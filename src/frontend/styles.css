@@ -416,6 +416,7 @@ body {
 
 .scroll-table, .data-table {
   width: 100%;
+  min-width: 650px;
   border-collapse: collapse;
   font-size: 13px;
 }
@@ -428,6 +429,17 @@ body {
   white-space: nowrap;
 }
 
+.col-seq { min-width: 50px; text-align: center; }
+.col-name { min-width: 120px; }
+.col-spec { min-width: 130px; }
+.col-count { min-width: 70px; }
+.col-unit { min-width: 60px; }
+.col-standard { min-width: 60px; }
+.col-remark { min-width: 130px; }
+.col-action { min-width: 70px; }
+.col-point { min-width: 100px; }
+.col-test-val { min-width: 150px; }
+
 .scroll-table th, .data-table th {
   background-color: #f8fafc;
   color: #475569;
@@ -436,12 +448,14 @@ body {
   top: 0;
 }
 
-.scroll-table input {
+.scroll-table input, .data-table input {
   padding: 6px 8px;
   font-size: 13px;
   border: 1px solid #cbd5e1;
   border-radius: 6px;
   width: 100%;
+  min-width: 60px;
+  box-sizing: border-box;
 }
 
 /* Preview Box */

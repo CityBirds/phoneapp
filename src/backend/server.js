@@ -60,6 +60,14 @@ function logAudit(reqId, clientId, clientName, action, details) {
   stmt.run(reqId || null, clientId || null, clientName || null, action, JSON.stringify(details || {}), new Date().toISOString());
 }
 
+// Clean up offline mock/stale workers on startup
+function cleanupStaleWorkers() {
+  try {
+    db.prepare("DELETE FROM workers WHERE status = 'OFFLINE' OR last_heartbeat IS NULL").run();
+  } catch (e) {}
+}
+cleanupStaleWorkers();
+
 // Default Seed Templates (POA200, DPT810) if empty
 function seedDefaultTemplates() {
   const count = db.prepare('SELECT count(*) as cnt FROM templates').get().cnt;
@@ -169,6 +177,7 @@ app.post('/api/workers/heartbeat', (req, res) => {
 
 app.get('/api/workers', (req, res) => {
   const now = Date.now();
+  const showAll = req.query.all === 'true';
   const rawWorkers = db.prepare('SELECT * FROM workers').all();
 
   // Analyze printer sharing across all workers
@@ -192,8 +201,11 @@ app.get('/api/workers', (req, res) => {
     const printerDetails = printersList.map(p => {
       const pName = typeof p === 'string' ? p : p.name;
       const isShared = (printerUsage[pName] || 0) > 1;
-      const isVirtual = pName.toLowerCase().includes('pdf') || 
-                        pName.toLowerCase().includes('onenote') || 
+      const pLower = pName.toLowerCase();
+      const isVirtual = pLower.includes('pdf') || 
+                        pLower.includes('onenote') || 
+                        pLower.includes('fax') || 
+                        pLower.includes('xps') || 
                         pName.includes('导出');
       return {
         name: pName,
@@ -210,6 +222,10 @@ app.get('/api/workers', (req, res) => {
       printerDetails
     };
   });
+
+  if (!showAll) {
+    return res.json(workers.filter(w => w.status === 'ONLINE'));
+  }
 
   res.json(workers);
 });

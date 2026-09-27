@@ -690,9 +690,17 @@ function updatePrinterDropdown(printers) {
     return;
   }
 
+  let defaultPhysicalPrinter = null;
+
   printers.forEach(p => {
     const pName = typeof p === 'string' ? p : p.name;
-    const isVirtual = pName.toLowerCase().includes('pdf') || pName.toLowerCase().includes('onenote') || pName.includes('导出');
+    const pLower = pName.toLowerCase();
+    const isVirtual = pLower.includes('pdf') || pLower.includes('onenote') || pLower.includes('fax') || pLower.includes('xps') || pName.includes('导出');
+    
+    if (!isVirtual && !defaultPhysicalPrinter) {
+      defaultPhysicalPrinter = pName;
+    }
+
     const opt = document.createElement('option');
     opt.value = pName;
     opt.innerText = isVirtual ? `${pName} (虚拟打印/导出)` : `${pName} (物理/共享打印机)`;
@@ -701,6 +709,8 @@ function updatePrinterDropdown(printers) {
 
   if (currentVal && printers.some(p => (typeof p === 'string' ? p : p.name) === currentVal)) {
     select.value = currentVal;
+  } else if (defaultPhysicalPrinter) {
+    select.value = defaultPhysicalPrinter;
   }
 
   onPrinterSelectChange();
@@ -717,9 +727,10 @@ function onPrinterSelectChange() {
     return;
   }
 
-  const isVirtual = val.toLowerCase().includes('pdf') || val.toLowerCase().includes('onenote') || val.includes('导出');
+  const pLower = val.toLowerCase();
+  const isVirtual = pLower.includes('pdf') || pLower.includes('onenote') || pLower.includes('fax') || pLower.includes('xps') || val.includes('导出');
   if (isVirtual) {
-    tip.innerText = 'ℹ️ 当前选择为虚拟打印机，打印操作将导出至文件/系统队列，不会实际出纸。';
+    tip.innerText = 'ℹ️ 当前选择为虚拟打印机，打印操作将导出至文件/系统队列，不会实际出纸。推荐选用物理硬件打印机。';
   } else {
     tip.innerText = '✅ 当前已就绪，打印任务将发送至执行端物理打印机出纸。';
   }

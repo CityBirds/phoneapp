@@ -107,7 +107,7 @@ async function loadWorkers() {
   container.innerHTML = '<div style="padding: 20px;">正在检测执行终端...</div>';
 
   try {
-    const res = await fetch(`${API_BASE}/api/workers`);
+    const res = await fetch(`${API_BASE}/api/workers?all=true`);
     const workers = await res.json();
 
     if (workers.length === 0) {
