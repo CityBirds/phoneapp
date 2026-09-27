@@ -27,6 +27,7 @@ const returnedDir = path.join(__dirname, '../../data/returned');
 
 app.use('/previews', express.static(previewDir));
 app.use('/frontend', express.static(path.join(__dirname, '../frontend')));
+app.use(express.static(path.join(__dirname, '../frontend')));
 app.get('/', (req, res) => res.redirect('/frontend/index.html'));
 app.get('/admin', (req, res) => res.sendFile(path.join(__dirname, '../frontend/admin.html')));
 
