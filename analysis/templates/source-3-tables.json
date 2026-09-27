@@ -1,0 +1,419 @@
+[
+  [
+    {
+      "column": 1,
+      "text": "\r\u0007",
+      "row": 1
+    },
+    {
+      "column": 1,
+      "text": "\r\u0007",
+      "row": 2
+    },
+    {
+      "column": 2,
+      "text": "\u0001\r\u0007",
+      "row": 2
+    },
+    {
+      "column": 3,
+      "text": "CERTIFICATE OF CONFORMANCE\rCalibration with NIST Traceable Certification\r\u0007",
+      "row": 2
+    },
+    {
+      "column": 4,
+      "text": "\r\u0007",
+      "row": 2
+    },
+    {
+      "column": 2,
+      "text": "\r\u0007",
+      "row": 3
+    },
+    {
+      "column": 2,
+      "text": "Customer\r\u0007",
+      "row": 4
+    },
+    {
+      "column": 3,
+      "text": "York\r\u0007",
+      "row": 4
+    },
+    {
+      "column": 4,
+      "text": "\r\u0007",
+      "row": 4
+    },
+    {
+      "column": 5,
+      "text": "\r\u0007",
+      "row": 4
+    },
+    {
+      "column": 6,
+      "text": "Date:\r\u0007",
+      "row": 4
+    },
+    {
+      "column": 7,
+      "text": "8/13/2026\r\u0007",
+      "row": 4
+    },
+    {
+      "column": 2,
+      "text": "Cust Ref #\r\u0007",
+      "row": 5
+    },
+    {
+      "column": 3,
+      "text": "\r\u0007",
+      "row": 5
+    },
+    {
+      "column": 4,
+      "text": "\r\u0007",
+      "row": 5
+    },
+    {
+      "column": 5,
+      "text": "\r\u0007",
+      "row": 5
+    },
+    {
+      "column": 6,
+      "text": "Examiner:\r\u0007",
+      "row": 5
+    },
+    {
+      "column": 7,
+      "text": "TP\r\u0007",
+      "row": 5
+    },
+    {
+      "column": 2,
+      "text": "Instrument\r\u0007",
+      "row": 6
+    },
+    {
+      "column": 3,
+      "text": "DPT810\r\u0007",
+      "row": 6
+    },
+    {
+      "column": 4,
+      "text": "\r\u0007",
+      "row": 6
+    },
+    {
+      "column": 5,
+      "text": "\r\u0007",
+      "row": 6
+    },
+    {
+      "column": 2,
+      "text": "Inst. SN.\r\u0007",
+      "row": 7
+    },
+    {
+      "column": 3,
+      "text": "A010007031\r\u0007",
+      "row": 7
+    },
+    {
+      "column": 4,
+      "text": "\r\u0007",
+      "row": 7
+    },
+    {
+      "column": 5,
+      "text": "\r\u0007",
+      "row": 7
+    },
+    {
+      "column": 6,
+      "text": "Ambient Temperature:\r\u0007",
+      "row": 7
+    },
+    {
+      "column": 7,
+      "text": "21.1℃\r\u0007",
+      "row": 7
+    },
+    {
+      "column": 2,
+      "text": "\r\u0007",
+      "row": 8
+    },
+    {
+      "column": 3,
+      "text": "\r\u0007",
+      "row": 8
+    },
+    {
+      "column": 4,
+      "text": "\r\u0007",
+      "row": 8
+    },
+    {
+      "column": 5,
+      "text": "\r\u0007",
+      "row": 8
+    },
+    {
+      "column": 6,
+      "text": "Relative Humidity\r\u0007",
+      "row": 8
+    },
+    {
+      "column": 7,
+      "text": "54%RH\r\u0007",
+      "row": 8
+    },
+    {
+      "column": 2,
+      "text": "\r\u0007",
+      "row": 9
+    },
+    {
+      "column": 2,
+      "text": "Comments & Observations:\r\u0007",
+      "row": 10
+    },
+    {
+      "column": 2,
+      "text": "\r\u0007",
+      "row": 11
+    },
+    {
+      "column": 2,
+      "text": "Test point Number\r\u0007",
+      "row": 12
+    },
+    {
+      "column": 3,
+      "text": "NIST Traceable Standard ℃ dp\r\u0007",
+      "row": 12
+    },
+    {
+      "column": 4,
+      "text": "Analyzer Under Test mA\r\u0007",
+      "row": 12
+    },
+    {
+      "column": 5,
+      "text": "\r\u0007",
+      "row": 12
+    },
+    {
+      "column": 6,
+      "text": "\rData Traceable to\rNIST Certified1\rChilled Mirror,\rBuck Research\rModel CR-1A\rSerial #07\rMeasuring range:\r(-110.0℃ to 20.0℃)\r\u0007",
+      "row": 12
+    },
+    {
+      "column": 2,
+      "text": "1\r\u0007",
+      "row": 13
+    },
+    {
+      "column": 3,
+      "text": "-89.00\r\u0007",
+      "row": 13
+    },
+    {
+      "column": 4,
+      "text": "6.58 \r\u0007",
+      "row": 13
+    },
+    {
+      "column": 5,
+      "text": "\r\u0007",
+      "row": 13
+    },
+    {
+      "column": 2,
+      "text": "2\r\u0007",
+      "row": 14
+    },
+    {
+      "column": 3,
+      "text": "-80.12\r\u0007",
+      "row": 14
+    },
+    {
+      "column": 4,
+      "text": "7.62 \r\u0007",
+      "row": 14
+    },
+    {
+      "column": 5,
+      "text": "\r\u0007",
+      "row": 14
+    },
+    {
+      "column": 2,
+      "text": "3\r\u0007",
+      "row": 15
+    },
+    {
+      "column": 3,
+      "text": "-70.81\r\u0007",
+      "row": 15
+    },
+    {
+      "column": 4,
+      "text": "8.75 \r\u0007",
+      "row": 15
+    },
+    {
+      "column": 5,
+      "text": "\r\u0007",
+      "row": 15
+    },
+    {
+      "column": 2,
+      "text": "4\r\u0007",
+      "row": 16
+    },
+    {
+      "column": 3,
+      "text": "-60.23\r\u0007",
+      "row": 16
+    },
+    {
+      "column": 4,
+      "text": "10.14\r\u0007",
+      "row": 16
+    },
+    {
+      "column": 5,
+      "text": "\r\u0007",
+      "row": 16
+    },
+    {
+      "column": 2,
+      "text": "5\r\u0007",
+      "row": 17
+    },
+    {
+      "column": 3,
+      "text": "-50.82\r\u0007",
+      "row": 17
+    },
+    {
+      "column": 4,
+      "text": "11.27 \r\u0007",
+      "row": 17
+    },
+    {
+      "column": 5,
+      "text": "\r\u0007",
+      "row": 17
+    },
+    {
+      "column": 2,
+      "text": "6\r\u0007",
+      "row": 18
+    },
+    {
+      "column": 3,
+      "text": "-40.91\r\u0007",
+      "row": 18
+    },
+    {
+      "column": 4,
+      "text": "12.65 \r\u0007",
+      "row": 18
+    },
+    {
+      "column": 5,
+      "text": "\r\u0007",
+      "row": 18
+    },
+    {
+      "column": 2,
+      "text": "7\r\u0007",
+      "row": 19
+    },
+    {
+      "column": 3,
+      "text": "-30.45\r\u0007",
+      "row": 19
+    },
+    {
+      "column": 4,
+      "text": "13.78 \r\u0007",
+      "row": 19
+    },
+    {
+      "column": 5,
+      "text": "\r\u0007",
+      "row": 19
+    },
+    {
+      "column": 2,
+      "text": "8\r\u0007",
+      "row": 20
+    },
+    {
+      "column": 3,
+      "text": "-21.90\r\u0007",
+      "row": 20
+    },
+    {
+      "column": 4,
+      "text": "14.86 \r\u0007",
+      "row": 20
+    },
+    {
+      "column": 5,
+      "text": "\r\u0007",
+      "row": 20
+    },
+    {
+      "column": 2,
+      "text": "9\r\u0007",
+      "row": 21
+    },
+    {
+      "column": 3,
+      "text": "-12.26\r\u0007",
+      "row": 21
+    },
+    {
+      "column": 4,
+      "text": "16.03 \r\u0007",
+      "row": 21
+    },
+    {
+      "column": 5,
+      "text": "\r\u0007",
+      "row": 21
+    },
+    {
+      "column": 2,
+      "text": "10\r\u0007",
+      "row": 22
+    },
+    {
+      "column": 3,
+      "text": "10.25\r\u0007",
+      "row": 22
+    },
+    {
+      "column": 4,
+      "text": "18.80 \r\u0007",
+      "row": 22
+    },
+    {
+      "column": 5,
+      "text": "\r\u0007",
+      "row": 22
+    },
+    {
+      "column": 2,
+      "text": "\rWe herby certify that the analyzer detailed above has been tested and calibrated by the\rUndersigned, and its performance was found to meet our specifications unless noted otherwise in the comments section.\r                                  For and on behalf of PhyMetrix Ltd \r\t\r\r\r                                   For Quality Assurance Manager\r\rNote: 1.For Chilled Mirror Certificate refer to the attached Manufacturer’s Certificate\r\u0007",
+      "row": 23
+    }
+  ]
+]

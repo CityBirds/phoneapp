@@ -1,0 +1,354 @@
+[
+  [
+    {
+      "column": 1,
+      "text": "序号\r\u0007",
+      "row": 1
+    },
+    {
+      "column": 2,
+      "text": "名称\r\u0007",
+      "row": 1
+    },
+    {
+      "column": 3,
+      "text": "规格/型号\r\u0007",
+      "row": 1
+    },
+    {
+      "column": 4,
+      "text": "数量\r\u0007",
+      "row": 1
+    },
+    {
+      "column": 5,
+      "text": "单位\r\u0007",
+      "row": 1
+    },
+    {
+      "column": 6,
+      "text": "标配\r\u0007",
+      "row": 1
+    },
+    {
+      "column": 7,
+      "text": "备注\r\u0007",
+      "row": 1
+    },
+    {
+      "column": 1,
+      "text": "1\r\u0007",
+      "row": 2
+    },
+    {
+      "column": 2,
+      "text": "主设备\r\u0007",
+      "row": 2
+    },
+    {
+      "column": 3,
+      "text": "POA200\r\u0007",
+      "row": 2
+    },
+    {
+      "column": 4,
+      "text": "1\r\u0007",
+      "row": 2
+    },
+    {
+      "column": 5,
+      "text": "台\r\u0007",
+      "row": 2
+    },
+    {
+      "column": 6,
+      "text": "是\r\u0007",
+      "row": 2
+    },
+    {
+      "column": 7,
+      "text": "SN：AP10007513\r带泵\r\u0007",
+      "row": 2
+    },
+    {
+      "column": 1,
+      "text": "2\r\u0007",
+      "row": 3
+    },
+    {
+      "column": 2,
+      "text": "传感器\r\u0007",
+      "row": 3
+    },
+    {
+      "column": 3,
+      "text": "PMT210SEN\r\u0007",
+      "row": 3
+    },
+    {
+      "column": 4,
+      "text": "1\r\u0007",
+      "row": 3
+    },
+    {
+      "column": 5,
+      "text": "只\r\u0007",
+      "row": 3
+    },
+    {
+      "column": 6,
+      "text": "是\r\u0007",
+      "row": 3
+    },
+    {
+      "column": 7,
+      "text": "SN：201N200258\r\u0007",
+      "row": 3
+    },
+    {
+      "column": 1,
+      "text": "3\r\u0007",
+      "row": 4
+    },
+    {
+      "column": 2,
+      "text": "包装箱\r\u0007",
+      "row": 4
+    },
+    {
+      "column": 3,
+      "text": "ABS\r\u0007",
+      "row": 4
+    },
+    {
+      "column": 4,
+      "text": "1\r\u0007",
+      "row": 4
+    },
+    {
+      "column": 5,
+      "text": "个\r\u0007",
+      "row": 4
+    },
+    {
+      "column": 6,
+      "text": "是\r\u0007",
+      "row": 4
+    },
+    {
+      "column": 7,
+      "text": "\r\u0007",
+      "row": 4
+    },
+    {
+      "column": 1,
+      "text": "4\r\u0007",
+      "row": 5
+    },
+    {
+      "column": 2,
+      "text": "用户手册\r\u0007",
+      "row": 5
+    },
+    {
+      "column": 3,
+      "text": "中英文\r\u0007",
+      "row": 5
+    },
+    {
+      "column": 4,
+      "text": "2\r\u0007",
+      "row": 5
+    },
+    {
+      "column": 5,
+      "text": "本\r\u0007",
+      "row": 5
+    },
+    {
+      "column": 6,
+      "text": "是\r\u0007",
+      "row": 5
+    },
+    {
+      "column": 7,
+      "text": "\r\u0007",
+      "row": 5
+    },
+    {
+      "column": 1,
+      "text": "5\r\u0007",
+      "row": 6
+    },
+    {
+      "column": 2,
+      "text": "计量证书\r\u0007",
+      "row": 6
+    },
+    {
+      "column": 3,
+      "text": "英文\r\u0007",
+      "row": 6
+    },
+    {
+      "column": 4,
+      "text": "1\r\u0007",
+      "row": 6
+    },
+    {
+      "column": 5,
+      "text": "份\r\u0007",
+      "row": 6
+    },
+    {
+      "column": 6,
+      "text": "是\r\u0007",
+      "row": 6
+    },
+    {
+      "column": 7,
+      "text": "\r\u0007",
+      "row": 6
+    },
+    {
+      "column": 1,
+      "text": "6\r\u0007",
+      "row": 7
+    },
+    {
+      "column": 2,
+      "text": "电源适配器\r\u0007",
+      "row": 7
+    },
+    {
+      "column": 3,
+      "text": "902B\r\u0007",
+      "row": 7
+    },
+    {
+      "column": 4,
+      "text": "1\r\u0007",
+      "row": 7
+    },
+    {
+      "column": 5,
+      "text": "个\r\u0007",
+      "row": 7
+    },
+    {
+      "column": 6,
+      "text": "是\r\u0007",
+      "row": 7
+    },
+    {
+      "column": 7,
+      "text": "\r\u0007",
+      "row": 7
+    },
+    {
+      "column": 1,
+      "text": "7\r\u0007",
+      "row": 8
+    },
+    {
+      "column": 2,
+      "text": "USB数据线\r\u0007",
+      "row": 8
+    },
+    {
+      "column": 3,
+      "text": "/\r\u0007",
+      "row": 8
+    },
+    {
+      "column": 4,
+      "text": "1\r\u0007",
+      "row": 8
+    },
+    {
+      "column": 5,
+      "text": "根\r\u0007",
+      "row": 8
+    },
+    {
+      "column": 6,
+      "text": "是\r\u0007",
+      "row": 8
+    },
+    {
+      "column": 7,
+      "text": "\r\u0007",
+      "row": 8
+    },
+    {
+      "column": 1,
+      "text": "8\r\u0007",
+      "row": 9
+    },
+    {
+      "column": 2,
+      "text": "标定指南\r\u0007",
+      "row": 9
+    },
+    {
+      "column": 3,
+      "text": "\r\u0007",
+      "row": 9
+    },
+    {
+      "column": 4,
+      "text": "1\r\u0007",
+      "row": 9
+    },
+    {
+      "column": 5,
+      "text": "份\r\u0007",
+      "row": 9
+    },
+    {
+      "column": 6,
+      "text": "是\r\u0007",
+      "row": 9
+    },
+    {
+      "column": 7,
+      "text": "\r\u0007",
+      "row": 9
+    },
+    {
+      "column": 1,
+      "text": "9\r\u0007",
+      "row": 10
+    },
+    {
+      "column": 2,
+      "text": "F46采样管\r\u0007",
+      "row": 10
+    },
+    {
+      "column": 3,
+      "text": "外径1/8英寸\r\u0007",
+      "row": 10
+    },
+    {
+      "column": 4,
+      "text": "1\r\u0007",
+      "row": 10
+    },
+    {
+      "column": 5,
+      "text": "根\r\u0007",
+      "row": 10
+    },
+    {
+      "column": 6,
+      "text": "是\r\u0007",
+      "row": 10
+    },
+    {
+      "column": 7,
+      "text": "\r\u0007",
+      "row": 10
+    }
+  ]
+]
