@@ -1,5 +1,6 @@
 /**
- * phoneApp Mobile & Web Client Logic
+ * phoneApp Mobile & Workstation Client Logic (手机/车间作业端)
+ * Rules: M01 - M15
  */
 
 const API_BASE = window.location.origin;
@@ -14,8 +15,6 @@ const state = {
   currentTask: null,
   activePreviewType: 'cert',
   historyRange: 'today',
-  templates: [],
-  currentMatcherAnalysis: null,
   packingItems: [
     { index: 1, name: '主设备', spec: 'POA200', count: 1, unit: '台', standard: '是', remark: 'SN: AP10007513带泵', isProtectedMain: true },
     { index: 2, name: '传感器', spec: 'PMT210SEN', count: 1, unit: '支', standard: '是', remark: 'SN: 201N200258', isProtectedSensor: true },
@@ -53,7 +52,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     switchNavTab('workers');
   }
 
-  // Periodic poll for workers and client name updates
+  // Periodic poll for workers and client name updates from coordination server
   setInterval(loadWorkers, 5000);
   setInterval(syncClientNameFromServer, 5000);
 });
@@ -90,6 +89,7 @@ async function syncClientNameFromServer() {
 }
 
 function openNameModal() {
+  document.getElementById('client-id-display').value = state.clientId;
   document.getElementById('user-name-input').value = state.clientName;
   document.getElementById('name-modal').classList.add('active');
 }
@@ -98,7 +98,7 @@ function closeNameModal() {
   document.getElementById('name-modal').classList.remove('active');
 }
 
-async function saveUserName() {
+async function saveInitialUserName() {
   const name = document.getElementById('user-name-input').value.trim();
   if (!name) return alert('姓名不能为空');
 
@@ -400,7 +400,7 @@ async function submitTaskForm() {
     switchNavTab('preview');
     renderPreviewLoading();
 
-    // Start smart fast polling (800ms) until previews are returned
+    // Start smart fast polling (700ms) until previews are ready
     pollTaskPreview(data.task.id);
   } catch (err) {
     alert('提交任务失败: ' + err.message);
@@ -659,297 +659,9 @@ async function viewHistoryPreview(taskId, fileType) {
   }
 }
 
-// ==================== COORDINATION ADMIN MANAGEMENT ====================
-function switchAdminSection(section) {
-  ['clients', 'templates', 'matcher'].forEach(s => {
-    document.getElementById(`admin-sec-${s}`).style.display = s === section ? 'block' : 'none';
-    document.getElementById(`admin-tab-${s}`).className = s === section ? 'toggle-btn active' : 'toggle-btn';
-  });
-
-  if (section === 'clients') loadClientsList();
-  if (section === 'templates') loadTemplatesList();
-  if (section === 'matcher') loadMatcherTemplates();
-}
-
-async function loadClientsList() {
-  const tbody = document.getElementById('clients-table-body');
-  if (!tbody) return;
-  tbody.innerHTML = '<tr><td colspan="4" style="text-align: center;">加载中...</td></tr>';
-
-  try {
-    const res = await fetch(`${API_BASE}/api/clients`);
-    const clients = await res.json();
-
-    if (clients.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="4" style="text-align: center; color: #94a3b8;">暂无客户端登记记录</td></tr>';
-      return;
-    }
-
-    tbody.innerHTML = clients.map(c => `
-      <tr>
-        <td style="font-family: monospace; font-size: 12px;">${c.id}</td>
-        <td><b>${c.name}</b></td>
-        <td style="font-size: 12px; color: #64748b;">${new Date(c.last_seen).toLocaleString('zh-CN')}</td>
-        <td>
-          <button type="button" class="btn btn-sm btn-outline" onclick="openAdminRenameModal('${c.id}', '${c.name}')">
-            ✏️ 修改名字
-          </button>
-        </td>
-      </tr>
-    `).join('');
-  } catch (err) {
-    tbody.innerHTML = `<tr><td colspan="4">加载客户端失败: ${err.message}</td></tr>`;
-  }
-}
-
-function openAdminRenameModal(id, currentName) {
-  document.getElementById('rename-client-id').value = id;
-  document.getElementById('rename-client-id-disp').value = id;
-  document.getElementById('rename-client-name-input').value = currentName;
-  document.getElementById('admin-rename-modal').classList.add('active');
-}
-
-function closeAdminRenameModal() {
-  document.getElementById('admin-rename-modal').classList.remove('active');
-}
-
-async function submitAdminRenameClient() {
-  const id = document.getElementById('rename-client-id').value;
-  const newName = document.getElementById('rename-client-name-input').value.trim();
-  if (!newName) return alert('姓名不能为空');
-
-  try {
-    const res = await fetch(`${API_BASE}/api/clients/${id}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: newName })
-    });
-    if (!res.ok) throw new Error('保存失败');
-
-    closeAdminRenameModal();
-    loadClientsList();
-    alert(`APP端名字已成功修改为: ${newName}`);
-  } catch (err) {
-    alert('修改APP端名字失败: ' + err.message);
-  }
-}
-
-async function loadTemplatesList() {
-  const container = document.getElementById('templates-list-container');
-  if (!container) return;
-  container.innerHTML = '<div style="text-align: center; padding: 12px;">加载模板库中...</div>';
-
-  try {
-    const res = await fetch(`${API_BASE}/api/templates`);
-    const tmpls = await res.json();
-    state.templates = tmpls;
-
-    if (tmpls.length === 0) {
-      container.innerHTML = '<div style="text-align: center; color: #94a3b8; padding: 16px;">模板库暂无模板</div>';
-      return;
-    }
-
-    container.innerHTML = tmpls.map(t => `
-      <div class="template-card">
-        <div>
-          <div style="font-weight: 700; font-size: 14px;">📄 ${t.filename}</div>
-          <div style="font-size: 12px; color: #64748b; margin-top: 4px;">
-            型号: <b>${t.model}</b> | 类型: <b>${t.type === 'cert' ? '发货证书' : '装箱清单'}</b> | 版本: ${t.version}
-          </div>
-          <div style="font-size: 11px; color: #94a3b8; font-family: monospace; margin-top: 2px;">
-            SHA256: ${t.file_hash.substring(0, 16)}...
-          </div>
-        </div>
-        <div style="display: flex; gap: 6px;">
-          <button type="button" class="btn btn-sm btn-outline" onclick="startAutoMatcher('${t.id}')">
-            🤖 智能识别字段
-          </button>
-          <a href="${API_BASE}/api/templates/${t.id}/download" class="btn btn-sm btn-secondary" download>
-            ⬇️ 下载
-          </a>
-        </div>
-      </div>
-    `).join('');
-  } catch (err) {
-    container.innerHTML = '加载模板库失败: ' + err.message;
-  }
-}
-
-async function handleTemplateUpload(event) {
-  event.preventDefault();
-  const fileInput = document.getElementById('tmpl-file-input');
-  const modelInput = document.getElementById('tmpl-model-input');
-  const typeSelect = document.getElementById('tmpl-type-select');
-  const versionInput = document.getElementById('tmpl-version-input');
-
-  if (!fileInput.files.length) return alert('请选择模板文件');
-
-  const formData = new FormData();
-  formData.append('templateFile', fileInput.files[0]);
-  formData.append('model', modelInput.value.trim());
-  formData.append('type', typeSelect.value);
-  formData.append('version', versionInput.value.trim() || 'v1.0');
-
-  try {
-    const res = await fetch(`${API_BASE}/api/templates/upload`, {
-      method: 'POST',
-      body: formData
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || '上传失败');
-
-    alert(`模板文件 [${data.filename}] 成功上传至模板库！`);
-    fileInput.value = '';
-    loadTemplatesList();
-  } catch (err) {
-    alert('上传模板失败: ' + err.message);
-  }
-}
-
-async function loadMatcherTemplates() {
-  const select = document.getElementById('matcher-template-select');
-  if (!select) return;
-  select.innerHTML = '<option value="">加载模板中...</option>';
-
-  try {
-    const res = await fetch(`${API_BASE}/api/templates`);
-    const tmpls = await res.json();
-    state.templates = tmpls;
-
-    select.innerHTML = '<option value="">请选择模板...</option>' + tmpls.map(t => `
-      <option value="${t.id}">${t.model} - ${t.type === 'cert' ? '发货证书' : '装箱清单'} (${t.filename})</option>
-    `).join('');
-  } catch (err) {
-    select.innerHTML = '<option value="">加载模板失败</option>';
-  }
-}
-
-function startAutoMatcher(templateId) {
-  switchAdminSection('matcher');
-  const select = document.getElementById('matcher-template-select');
-  if (select) {
-    select.value = templateId;
-    analyzeTemplateFields();
-  }
-}
-
-async function analyzeTemplateFields() {
-  const select = document.getElementById('matcher-template-select');
-  const tmplId = select ? select.value : '';
-  if (!tmplId) return alert('请选择需要自动识别匹配的模板');
-
-  const resultCard = document.getElementById('matcher-results-card');
-  const resultBody = document.getElementById('matcher-results-body');
-  resultCard.style.display = 'block';
-  resultBody.innerHTML = '<div style="text-align: center; padding: 20px;">🤖 正在深度解析 Word 结构并识别候选字段位置...</div>';
-
-  try {
-    const res = await fetch(`${API_BASE}/api/templates/${tmplId}/analyze`);
-    const data = await res.json();
-    state.currentMatcherAnalysis = data;
-
-    const matchResults = data.matchResults || {};
-    const keys = Object.keys(matchResults);
-
-    let html = `
-      <div style="font-size: 13px; margin-bottom: 12px; color: #475569;">
-        解析模板: <b>${data.template.filename}</b> (提取结构元素: <b>${data.docItemsCount}</b> 项)
-      </div>
-      <div class="table-responsive">
-        <table class="data-table">
-          <thead>
-            <tr>
-              <th>目标业务字段</th>
-              <th>匹配置信度</th>
-              <th>识别标签位置</th>
-              <th>推荐赋值位置</th>
-              <th>候选参考值</th>
-            </tr>
-          </thead>
-          <tbody>
-    `;
-
-    keys.forEach(key => {
-      const match = matchResults[key];
-      const best = match && match.candidates && match.candidates.length > 0 ? match.candidates[0] : null;
-
-      if (best) {
-        const locStr = best.location.type === 'cell' 
-          ? `单元格 [第 ${best.location.rowIdx + 1} 行, 第 ${best.location.colIdx + 1} 列]`
-          : `段落 #${best.location.paragraphIdx + 1}`;
-
-        const valLocStr = best.suggestedValueLocation 
-          ? (best.suggestedValueLocation.tableIdx !== undefined 
-              ? `相邻单元格 [第 ${best.suggestedValueLocation.rowIdx + 1} 行, 第 ${best.suggestedValueLocation.colIdx + 1} 列]` 
-              : `段落 #${best.suggestedValueLocation.paragraphIdx + 1}`)
-          : '自动右侧对齐';
-
-        html += `
-          <tr>
-            <td><b>${key}</b></td>
-            <td><span class="badge badge-success">${Math.round(best.score * 100)}% 命中</span></td>
-            <td>${locStr}</td>
-            <td><span style="color: #0284c7; font-weight: 600;">${valLocStr}</span></td>
-            <td><code>${best.candidateValue || '待输入'}</code></td>
-          </tr>
-        `;
-      } else {
-        html += `
-          <tr>
-            <td><b>${key}</b></td>
-            <td><span class="badge badge-warning">待配置</span></td>
-            <td colspan="3" style="color: #94a3b8;">未自动定位，将在渲染时按标准表结构辅助排版</td>
-          </tr>
-        `;
-      }
-    });
-
-    html += `
-          </tbody>
-        </table>
-      </div>
-    `;
-
-    resultBody.innerHTML = html;
-  } catch (err) {
-    resultBody.innerHTML = '解析识别失败: ' + err.message;
-  }
-}
-
-async function saveMatchedMappings() {
-  if (!state.currentMatcherAnalysis) return alert('当前没有可保存的匹配结果');
-
-  const tmpl = state.currentMatcherAnalysis.template;
-  const matchResults = state.currentMatcherAnalysis.matchResults || {};
-
-  const fieldMappings = {
-    analyzedAt: new Date().toISOString(),
-    matches: matchResults
-  };
-
-  try {
-    const res = await fetch(`${API_BASE}/api/templates/publish`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        id: tmpl.id,
-        model: tmpl.model,
-        type: tmpl.type,
-        filename: tmpl.filename,
-        fieldMappings,
-        version: tmpl.version
-      })
-    });
-    if (!res.ok) throw new Error('保存失败');
-    alert('字段映射匹配规则已成功保存并发布至模板库！');
-  } catch (err) {
-    alert('保存失败: ' + err.message);
-  }
-}
-
 // ==================== NAVIGATION TABS ====================
 function switchNavTab(tabName) {
-  ['workers', 'create', 'preview', 'history', 'admin', 'serial'].forEach(t => {
+  ['workers', 'create', 'preview', 'history', 'serial'].forEach(t => {
     const viewEl = document.getElementById(`tab-${t}-view`);
     const navEl = document.getElementById(`nav-${t}`);
     if (viewEl) viewEl.style.display = t === tabName ? 'block' : 'none';
@@ -960,8 +672,6 @@ function switchNavTab(tabName) {
     loadHistoryList();
   } else if (tabName === 'workers') {
     loadWorkers();
-  } else if (tabName === 'admin') {
-    loadClientsList();
   }
 }
 

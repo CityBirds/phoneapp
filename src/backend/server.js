@@ -28,8 +28,27 @@ const returnedDir = path.join(__dirname, '../../data/returned');
 app.use('/previews', express.static(previewDir));
 app.use('/frontend', express.static(path.join(__dirname, '../frontend')));
 app.get('/', (req, res) => res.redirect('/frontend/index.html'));
+app.get('/admin', (req, res) => res.sendFile(path.join(__dirname, '../frontend/admin.html')));
 
 const upload = multer({ dest: uploadDir });
+
+// Security Middleware: Restrict coordinator management operations to localhost (Coordination PC)
+function isLocalhostRequest(req) {
+  const ip = req.ip || req.connection?.remoteAddress || '';
+  const isLocal = ip.includes('127.0.0.1') || ip === '::1' || ip === '::ffff:127.0.0.1' || req.hostname === 'localhost';
+  const hasToken = req.headers['x-admin-token'] === 'phoneapp-admin-secret';
+  return isLocal || hasToken;
+}
+
+function requireAdminAccess(req, res, next) {
+  if (!isLocalhostRequest(req)) {
+    return res.status(403).json({
+      error: '权限受限：该管理功能（修改手机端名字、上传模板、发布配置等）仅限在协调服务电脑本机操作 (C01, C03)'
+    });
+  }
+  next();
+}
+
 
 // Audit Logger Helper (C13, R33)
 function logAudit(reqId, clientId, clientName, action, details) {
@@ -113,7 +132,7 @@ app.get('/api/clients/:id', (req, res) => {
   res.json(client);
 });
 
-app.put('/api/clients/:id', (req, res) => {
+app.put('/api/clients/:id', requireAdminAccess, (req, res) => {
   const { id } = req.params;
   const { name } = req.body;
   if (!name) return res.status(400).json({ error: 'Name is required' });
@@ -213,7 +232,7 @@ app.get('/api/templates', (req, res) => {
 });
 
 // Template upload (C03)
-app.post('/api/templates/upload', upload.single('templateFile'), (req, res) => {
+app.post('/api/templates/upload', requireAdminAccess, upload.single('templateFile'), (req, res) => {
   const { model, type, version = 'v1.0' } = req.body;
   if (!req.file || !model || !type) {
     return res.status(400).json({ error: 'templateFile, model, and type are required' });
@@ -250,7 +269,7 @@ app.get('/api/templates/:id/download', (req, res) => {
 });
 
 // Template delete
-app.delete('/api/templates/:id', (req, res) => {
+app.delete('/api/templates/:id', requireAdminAccess, (req, res) => {
   const tmpl = db.prepare('SELECT * FROM templates WHERE id = ?').get(req.params.id);
   if (!tmpl) return res.status(404).json({ error: 'Template not found' });
 
@@ -319,7 +338,7 @@ app.post('/api/templates/match-candidates', (req, res) => {
   res.json(result);
 });
 
-app.post('/api/templates/publish', (req, res) => {
+app.post('/api/templates/publish', requireAdminAccess, (req, res) => {
   const { id, model, type, filename, fieldMappings, version = 'v1.0' } = req.body;
   if (!model || !type || !filename) return res.status(400).json({ error: 'Missing required parameters' });
 
@@ -669,8 +688,8 @@ if (require.main === module) {
     console.log('协调服务 (Coordination Service) 启动成功！');
     console.log('====================================================');
     console.log(`- 服务端口: ${PORT}`);
-    console.log(`- 本地访问地址: http://localhost:${PORT}/frontend`);
-    console.log(`- 手机端访问地址: http://<你的局域网IP>:${PORT}/frontend`);
+    console.log(`- 协调管理控制台 (仅限协调服务电脑本机): http://localhost:${PORT}/admin`);
+    console.log(`- 手机端发货作业地址 (车间局域网操作): http://<你的局域网IP>:${PORT}/frontend`);
     console.log(`- 数据存储目录: ${path.join(__dirname, '../../data')}`);
     console.log('====================================================');
     console.log('等待手机端/前端连接，以及执行端 (worker.js) 上线...');

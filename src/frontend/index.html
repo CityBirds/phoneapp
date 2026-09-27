@@ -18,7 +18,7 @@
       </div>
     </div>
     <div id="user-badge" class="user-badge" onclick="openNameModal()">
-      姓名: <span id="user-name-display">未登记</span> ✏️
+      姓名: <span id="user-name-display">未登记</span> ℹ️
     </div>
   </header>
 
@@ -202,115 +202,7 @@
       </div>
     </div>
 
-    <!-- TAB 4: COORDINATION ADMIN (协调端管理中心) -->
-    <div id="tab-admin-view" class="tab-view" style="display: none;">
-      
-      <!-- Sub-Tab Header -->
-      <div class="admin-nav-tabs">
-        <button id="admin-tab-clients" class="toggle-btn active" onclick="switchAdminSection('clients')">📱 APP端管理</button>
-        <button id="admin-tab-templates" class="toggle-btn" onclick="switchAdminSection('templates')">📑 模板库与上传</button>
-        <button id="admin-tab-matcher" class="toggle-btn" onclick="switchAdminSection('matcher')">🤖 字段智能匹配</button>
-      </div>
-
-      <!-- Section A: Client Management (改APP端名字) -->
-      <div id="admin-sec-clients" class="admin-section">
-        <div class="card">
-          <div class="card-title">
-            <span>APP 客户端管理 (C01, R01)</span>
-            <button type="button" class="btn btn-sm" onclick="loadClientsList()">刷新列表</button>
-          </div>
-          <p style="font-size: 13px; color: #64748b; margin-bottom: 12px;">
-            协调端可在此统一查看并修改已登记的 APP 手机端姓名，修改后手机端将自动同步更新。
-          </p>
-          <div class="table-responsive">
-            <table class="data-table">
-              <thead>
-                <tr>
-                  <th>客户端 ID</th>
-                  <th>当前姓名</th>
-                  <th>最后活跃时间</th>
-                  <th>操作</th>
-                </tr>
-              </thead>
-              <tbody id="clients-table-body">
-                <!-- Dynamically populated -->
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-
-      <!-- Section B: Template Library (添加与管理模板文件) -->
-      <div id="admin-sec-templates" class="admin-section" style="display: none;">
-        <div class="card">
-          <div class="card-title">上传新模板文件 (C03, T03)</div>
-          <form id="template-upload-form" onsubmit="handleTemplateUpload(event)">
-            <div class="form-group">
-              <label>选择模板文件 (.doc / .docx)</label>
-              <input type="file" id="tmpl-file-input" class="form-control" accept=".doc,.docx" required>
-            </div>
-            <div style="display: flex; gap: 12px;">
-              <div class="form-group" style="flex: 1;">
-                <label>适用设备型号</label>
-                <input type="text" id="tmpl-model-input" class="form-control" placeholder="例如: POA200 或 DPT810" required>
-              </div>
-              <div class="form-group" style="flex: 1;">
-                <label>模板类型</label>
-                <select id="tmpl-type-select" class="form-control">
-                  <option value="cert">发货证书 (cert)</option>
-                  <option value="packing">装箱清单 (packing)</option>
-                </select>
-              </div>
-              <div class="form-group" style="width: 100px;">
-                <label>版本号</label>
-                <input type="text" id="tmpl-version-input" class="form-control" value="v1.0">
-              </div>
-            </div>
-            <button type="submit" class="btn btn-block">上传并保存至模板库</button>
-          </form>
-        </div>
-
-        <div class="card">
-          <div class="card-title">
-            <span>当前已发布模板库</span>
-            <button type="button" class="btn btn-sm" onclick="loadTemplatesList()">刷新</button>
-          </div>
-          <div id="templates-list-container">
-            加载模板列表中...
-          </div>
-        </div>
-      </div>
-
-      <!-- Section C: Field Matcher Assistant (自动识别字段位置辅助匹配) -->
-      <div id="admin-sec-matcher" class="admin-section" style="display: none;">
-        <div class="card">
-          <div class="card-title">模板字段位置自动识别与辅助匹配 (C04, C05, T03)</div>
-          <p style="font-size: 13px; color: #64748b; margin-bottom: 12px;">
-            系统将深度解析模板结构（段落与表格坐标），针对核心业务字段进行规则与特征辅助匹配：
-          </p>
-          <div class="form-group">
-            <label>选择需要解析匹配的模板</label>
-            <div style="display: flex; gap: 8px;">
-              <select id="matcher-template-select" class="form-control" style="flex: 1;">
-                <option value="">请选择模板...</option>
-              </select>
-              <button type="button" class="btn" onclick="analyzeTemplateFields()">🤖 开始自动识别匹配</button>
-            </div>
-          </div>
-        </div>
-
-        <div class="card" id="matcher-results-card" style="display: none;">
-          <div class="card-title" style="display: flex; justify-content: space-between; align-items: center;">
-            <span>字段匹配结果候选清单</span>
-            <button type="button" class="btn btn-sm btn-success" onclick="saveMatchedMappings()">💾 保存字段映射规则</button>
-          </div>
-          <div id="matcher-results-body"></div>
-        </div>
-      </div>
-
-    </div>
-
-    <!-- TAB 5: SERIAL PORT -->
+    <!-- TAB 4: SERIAL PORT -->
     <div id="tab-serial-view" class="tab-view" style="display: none;">
       <div class="card" style="text-align: center; padding: 32px 16px;">
         <div style="font-size: 48px; margin-bottom: 12px;">🔌</div>
@@ -324,7 +216,7 @@
 
   </div>
 
-  <!-- Bottom Navigation Bar -->
+  <!-- Bottom Navigation Bar (手机作业端仅保留作业功能) -->
   <nav class="nav-tabs">
     <div id="nav-workers" class="nav-tab active" onclick="switchNavTab('workers')">
       <div>🖥️</div>
@@ -342,32 +234,38 @@
       <div>📜</div>
       <div>历史记录</div>
     </div>
-    <div id="nav-admin" class="nav-tab" onclick="switchNavTab('admin')">
-      <div>⚙️</div>
-      <div>协调管理</div>
-    </div>
     <div id="nav-serial" class="nav-tab" onclick="switchNavTab('serial')">
       <div>🔌</div>
       <div>串口助手</div>
     </div>
   </nav>
 
-  <!-- Name Register Modal -->
+  <!-- Name Register / Info Modal -->
   <div id="name-modal" class="modal">
     <div class="modal-content">
-      <h3 style="margin-bottom: 12px;">客户端姓名登记</h3>
+      <h3 style="margin-bottom: 12px;">客户端设备标识与姓名</h3>
+      <p style="font-size: 13px; color: #64748b; margin-bottom: 14px;">
+        根据系统安全规范 (M01, C01)，手机端设备名称由<b>协调服务电脑统一命名与管理</b>，避免车间作业人员随意更改引起混乱。
+      </p>
       <div class="form-group">
-        <label>请输入您的真实姓名（例如：张三）</label>
+        <label>设备标识 (Client ID)</label>
+        <input type="text" id="client-id-display" class="form-control" disabled style="background: #f1f5f9; font-family: monospace;">
+      </div>
+      <div class="form-group">
+        <label>当前分配姓名</label>
         <input type="text" id="user-name-input" class="form-control" placeholder="姓名">
       </div>
-      <div style="display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px;">
-        <button type="button" class="btn btn-secondary" onclick="closeNameModal()">取消</button>
-        <button type="button" class="btn" onclick="saveUserName()">保存登记</button>
+      <small style="color: #0284c7; display: block; margin-bottom: 14px;">
+        💡 如需指定或修改此手机端名称，请在协调服务电脑上的【协调管理控制台】中操作。
+      </small>
+      <div style="display: flex; gap: 8px; justify-content: flex-end;">
+        <button type="button" class="btn btn-secondary" onclick="closeNameModal()">关闭</button>
+        <button type="button" class="btn" onclick="saveInitialUserName()">保存登记</button>
       </div>
     </div>
   </div>
 
-  <!-- Fullscreen Document Preview Modal (即使刷新后在历史记录点击也能打开) -->
+  <!-- Fullscreen Document Preview Modal -->
   <div id="preview-modal" class="modal">
     <div class="modal-content modal-fullscreen">
       <div class="modal-header">
@@ -379,26 +277,6 @@
       </div>
       <div class="modal-body" id="modal-preview-body">
         <!-- Rendered preview image -->
-      </div>
-    </div>
-  </div>
-
-  <!-- Admin Rename Client Modal -->
-  <div id="admin-rename-modal" class="modal">
-    <div class="modal-content">
-      <h3 style="margin-bottom: 12px;">修改 APP 手机端姓名</h3>
-      <input type="hidden" id="rename-client-id">
-      <div class="form-group">
-        <label>客户端 ID</label>
-        <input type="text" id="rename-client-id-disp" class="form-control" disabled>
-      </div>
-      <div class="form-group">
-        <label>修改后的姓名 (例如: 产线1号-李四)</label>
-        <input type="text" id="rename-client-name-input" class="form-control">
-      </div>
-      <div style="display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px;">
-        <button type="button" class="btn btn-secondary" onclick="closeAdminRenameModal()">取消</button>
-        <button type="button" class="btn" onclick="submitAdminRenameClient()">保存修改</button>
       </div>
     </div>
   </div>
