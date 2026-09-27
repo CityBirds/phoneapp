@@ -80,13 +80,14 @@
       <!-- Test Point Data Table Card -->
       <div class="card">
         <div class="card-title">证书测试数据点录入</div>
-        <div style="overflow-x: auto;">
-          <table id="test-points-table">
+        <div class="table-scroll-hint">⇄ 可横向左右滑动</div>
+        <div class="table-responsive">
+          <table id="test-points-table" class="scroll-table">
             <thead>
               <tr>
-                <th>测试点</th>
-                <th>标准值</th>
-                <th>实测值</th>
+                <th class="col-point">测试点</th>
+                <th class="col-test-val">标准值</th>
+                <th class="col-test-val">实测值</th>
               </tr>
             </thead>
             <tbody id="test-points-body">
@@ -102,18 +103,19 @@
           <span>装箱清单明细管理</span>
           <button type="button" class="btn btn-sm" onclick="addPackingRow()">+ 添加物料</button>
         </div>
-        <div style="overflow-x: auto;">
-          <table>
+        <div class="table-scroll-hint">⇄ 可横向左右滑动</div>
+        <div class="table-responsive">
+          <table id="packing-items-table" class="scroll-table">
             <thead>
               <tr>
-                <th style="width: 40px;">序号</th>
-                <th>名称</th>
-                <th>规格/型号</th>
-                <th style="width: 50px;">数量</th>
-                <th style="width: 50px;">单位</th>
-                <th style="width: 50px;">标配</th>
-                <th>备注</th>
-                <th style="width: 50px;">操作</th>
+                <th class="col-seq">序号</th>
+                <th class="col-name">名称</th>
+                <th class="col-spec">规格/型号</th>
+                <th class="col-count">数量</th>
+                <th class="col-unit">单位</th>
+                <th class="col-standard">标配</th>
+                <th class="col-remark">备注</th>
+                <th class="col-action">操作</th>
               </tr>
             </thead>
             <tbody id="packing-items-body">

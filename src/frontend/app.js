@@ -149,9 +149,9 @@ function renderTestPointsTable() {
     // 1 test point row
     tbody.innerHTML = `
       <tr>
-        <td>1</td>
-        <td><input type="text" class="table-input" id="std-val-1" value="9.96(N2 balance)"></td>
-        <td><input type="text" class="table-input" id="act-val-1" value="9.93"></td>
+        <td class="col-point">1</td>
+        <td class="col-test-val"><input type="text" class="table-input" id="std-val-1" value="9.96(N2 balance)" title="9.96(N2 balance)"></td>
+        <td class="col-test-val"><input type="text" class="table-input" id="act-val-1" value="9.93" title="9.93"></td>
       </tr>
     `;
   } else {
@@ -172,9 +172,9 @@ function renderTestPointsTable() {
     defaultData.forEach(item => {
       const tr = document.createElement('tr');
       tr.innerHTML = `
-        <td>${item.point}</td>
-        <td><input type="text" class="table-input" id="std-val-${item.point}" value="${item.std}"></td>
-        <td><input type="text" class="table-input" id="act-val-${item.point}" value="${item.act}"></td>
+        <td class="col-point">${item.point}</td>
+        <td class="col-test-val"><input type="text" class="table-input" id="std-val-${item.point}" value="${item.std}" title="${item.std}"></td>
+        <td class="col-test-val"><input type="text" class="table-input" id="act-val-${item.point}" value="${item.act}" title="${item.act}"></td>
       `;
       tbody.appendChild(tr);
     });
@@ -193,14 +193,14 @@ function renderPackingItemsTable() {
 
     const tr = document.createElement('tr');
     tr.innerHTML = `
-      <td>${item.index}</td>
-      <td><input type="text" class="table-input" value="${item.name}" onchange="updatePackingItem(${idx}, 'name', this.value)" ${isProtected ? 'readonly' : ''}></td>
-      <td><input type="text" class="table-input" value="${item.spec || ''}" onchange="updatePackingItem(${idx}, 'spec', this.value)"></td>
-      <td><input type="number" class="table-input" value="${item.count}" onchange="updatePackingItem(${idx}, 'count', this.value)"></td>
-      <td><input type="text" class="table-input" value="${item.unit}" onchange="updatePackingItem(${idx}, 'unit', this.value)"></td>
-      <td><input type="text" class="table-input" value="${item.standard}" onchange="updatePackingItem(${idx}, 'standard', this.value)"></td>
-      <td><input type="text" class="table-input" value="${item.remark || ''}" onchange="updatePackingItem(${idx}, 'remark', this.value)"></td>
-      <td>
+      <td class="col-seq">${item.index}</td>
+      <td class="col-name"><input type="text" class="table-input" value="${item.name}" title="${item.name}" onchange="updatePackingItem(${idx}, 'name', this.value)" ${isProtected ? 'readonly' : ''}></td>
+      <td class="col-spec"><input type="text" class="table-input" value="${item.spec || ''}" title="${item.spec || ''}" onchange="updatePackingItem(${idx}, 'spec', this.value)"></td>
+      <td class="col-count"><input type="number" class="table-input table-input-center" value="${item.count}" onchange="updatePackingItem(${idx}, 'count', this.value)"></td>
+      <td class="col-unit"><input type="text" class="table-input table-input-center" value="${item.unit}" onchange="updatePackingItem(${idx}, 'unit', this.value)"></td>
+      <td class="col-standard"><input type="text" class="table-input table-input-center" value="${item.standard}" onchange="updatePackingItem(${idx}, 'standard', this.value)"></td>
+      <td class="col-remark"><input type="text" class="table-input" value="${item.remark || ''}" title="${item.remark || ''}" onchange="updatePackingItem(${idx}, 'remark', this.value)"></td>
+      <td class="col-action">
         ${isProtected 
           ? '<span class="badge badge-disabled" title="受保护行不可删除">锁</span>' 
           : `<button type="button" class="btn btn-danger btn-sm" onclick="removePackingRow(${idx})">删除</button>`
