@@ -63,7 +63,8 @@ function logAudit(reqId, clientId, clientName, action, details) {
 // Clean up offline mock/stale workers on startup
 function cleanupStaleWorkers() {
   try {
-    db.prepare("DELETE FROM workers WHERE status = 'OFFLINE' OR last_heartbeat IS NULL").run();
+    const cutoff = new Date(Date.now() - 15000).toISOString();
+    db.prepare("DELETE FROM workers WHERE last_heartbeat < ? OR last_heartbeat IS NULL OR status = 'OFFLINE' OR id LIKE 'worker-e2e%' OR id LIKE 'worker-test%'").run(cutoff);
   } catch (e) {}
 }
 cleanupStaleWorkers();
