@@ -32,7 +32,7 @@ function generateWordDocument(templatePath, outputPath, taskData) {
     fs.mkdirSync(outputDir, { recursive: true });
   }
 
-  // Clean existing output file if present and remove read-only attribute
+  // Clean existing output file if present and explicitly remove read-only attribute
   if (fs.existsSync(outputPath)) {
     try {
       fs.chmodSync(outputPath, 0o666);
@@ -40,28 +40,63 @@ function generateWordDocument(templatePath, outputPath, taskData) {
     } catch (e) {}
   }
 
-  // Write temporary json data for doc_processor.py
-  const tmpJsonPath = path.join(outputDir, `task_${Date.now()}.json`);
+  // Copy template to output path (strict template protection R17)
+  fs.copyFileSync(templatePath, outputPath);
+  try {
+    fs.chmodSync(outputPath, 0o666);
+  } catch (e) {}
+
+  // Write temporary json data for doc_processor
+  const tmpJsonPath = path.join(outputDir, `task_${Date.now()}_${Math.random().toString(36).substring(2, 6)}.json`);
   fs.writeFileSync(tmpJsonPath, JSON.stringify(taskData, null, 2), 'utf-8');
 
-  // Invoke python doc_processor.py script
-  const scriptPath = path.join(__dirname, 'doc_processor.py');
-  const pythonCmd = process.platform === 'win32' ? 'python' : 'python3';
-  try {
-    execSync(`"${pythonCmd}" "${scriptPath}" "${templatePath}" "${outputPath}" "${tmpJsonPath}"`, {
-      stdio: 'pipe',
-      timeout: 30000
-    });
-    if (fs.existsSync(outputPath)) {
-      try { fs.chmodSync(outputPath, 0o666); } catch (e) {}
+  let processedSuccessfully = false;
+
+  // On Windows, prioritize native PowerShell COM execution (doc_processor.ps1) with zero third-party dependencies
+  if (process.platform === 'win32') {
+    const psScriptPath = path.join(__dirname, 'doc_processor.ps1');
+    if (fs.existsSync(psScriptPath)) {
+      try {
+        execSync(`powershell -NoProfile -ExecutionPolicy Bypass -File "${psScriptPath}" "${templatePath}" "${outputPath}" "${tmpJsonPath}"`, {
+          stdio: 'pipe',
+          timeout: 30000
+        });
+        processedSuccessfully = true;
+      } catch (psErr) {
+        console.warn('doc_processor.ps1 execution notice:', psErr.message);
+      }
     }
-  } catch (err) {
-    // If python fails or isn't found, fallback to copying template
-    console.warn('doc_processor.py fallback:', err.message);
-    fs.copyFileSync(templatePath, outputPath);
-    try { fs.chmodSync(outputPath, 0o666); } catch (e) {}
-  } finally {
-    if (fs.existsSync(tmpJsonPath)) fs.unlinkSync(tmpJsonPath);
+  }
+
+  // Secondary fallback: Python doc_processor.py if PowerShell did not run or on non-Windows platforms
+  if (!processedSuccessfully) {
+    const pyScriptPath = path.join(__dirname, 'doc_processor.py');
+    const pythonCmd = process.platform === 'win32' ? 'python' : 'python3';
+    if (fs.existsSync(pyScriptPath)) {
+      try {
+        execSync(`"${pythonCmd}" "${pyScriptPath}" "${templatePath}" "${outputPath}" "${tmpJsonPath}"`, {
+          stdio: 'pipe',
+          timeout: 30000
+        });
+        processedSuccessfully = true;
+      } catch (pyErr) {
+        console.warn('doc_processor.py fallback notice:', pyErr.message);
+      }
+    }
+  }
+
+  // Ensure output file remains non-read-only
+  if (fs.existsSync(outputPath)) {
+    try {
+      fs.chmodSync(outputPath, 0o666);
+    } catch (e) {}
+  }
+
+  // Cleanup temporary JSON file
+  if (fs.existsSync(tmpJsonPath)) {
+    try {
+      fs.unlinkSync(tmpJsonPath);
+    } catch (e) {}
   }
 
   // Verify R17: Source template must remain completely unchanged
