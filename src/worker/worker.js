@@ -31,9 +31,18 @@ class ExecutionWorker {
           status: 'ONLINE'
         })
       });
-      return await res.json();
+      const data = await res.json();
+      if (!this._connected) {
+        this._connected = true;
+        console.log(`[成功] 已连接协调服务 (${this.serverUrl})！状态: ONLINE，正在监听任务与打印调度...`);
+      }
+      return data;
     } catch (err) {
-      console.warn('Worker heartbeat failed:', err.message);
+      if (this._connected !== false) {
+        this._connected = false;
+        console.log(`[提示] 正在等待协调服务启动 (${this.serverUrl})...`);
+        console.log(`       请确保在另一窗口运行: node src/backend/server.js`);
+      }
       return null;
     }
   }
@@ -165,6 +174,20 @@ class ExecutionWorker {
 
 if (require.main === module) {
   const worker = new ExecutionWorker();
+  console.log('====================================================');
+  console.log(`执行端程序启动成功: ${worker.name}`);
+  console.log('====================================================');
+  console.log(`- 执行端 ID: ${worker.workerId}`);
+  console.log(`- 协调服务地址: ${worker.serverUrl}`);
+  console.log(`- 工作目录: ${worker.workingDir}`);
+  console.log(`- 开放打印机: ${worker.allowedPrinters.join(', ')}`);
+  console.log('----------------------------------------------------');
+  
+  // 立即发送首次心跳
+  worker.sendHeartbeat();
+  worker.pollAndExecuteTasks();
+  worker.pollAndExecutePrintJobs();
+
   setInterval(() => {
     worker.sendHeartbeat();
     worker.pollAndExecuteTasks();

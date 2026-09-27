@@ -27,6 +27,7 @@ const returnedDir = path.join(__dirname, '../../data/returned');
 
 app.use('/previews', express.static(previewDir));
 app.use('/frontend', express.static(path.join(__dirname, '../frontend')));
+app.get('/', (req, res) => res.redirect('/frontend/index.html'));
 
 const upload = multer({ dest: uploadDir });
 
@@ -489,7 +490,15 @@ app.get('/api/audit-logs', (req, res) => {
 // Start Server if run directly
 if (require.main === module) {
   app.listen(PORT, () => {
-    console.log(`Coordination Service running on port ${PORT}`);
+    console.log('====================================================');
+    console.log('协调服务 (Coordination Service) 启动成功！');
+    console.log('====================================================');
+    console.log(`- 服务端口: ${PORT}`);
+    console.log(`- 本地访问地址: http://localhost:${PORT}/frontend`);
+    console.log(`- 手机端访问地址: http://<你的局域网IP>:${PORT}/frontend`);
+    console.log(`- 数据存储目录: ${path.join(__dirname, '../../data')}`);
+    console.log('====================================================');
+    console.log('等待手机端/前端连接，以及执行端 (worker.js) 上线...');
   });
 }
 
