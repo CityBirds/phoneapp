@@ -83,7 +83,7 @@ function seedDefaultTemplates() {
 }
 seedDefaultTemplates();
 
-// ==================== C01: CLIENT MANAGEMENT ====================
+// ==================== C01: CLIENT MANAGEMENT (APP端名字管理) ====================
 app.post('/api/clients/register', (req, res) => {
   let { clientId, name } = req.body;
   if (!name) return res.status(400).json({ error: 'Name is required' });
@@ -107,6 +107,12 @@ app.get('/api/clients', (req, res) => {
   res.json(clients);
 });
 
+app.get('/api/clients/:id', (req, res) => {
+  const client = db.prepare('SELECT * FROM clients WHERE id = ?').get(req.params.id);
+  if (!client) return res.status(404).json({ error: 'Client not found' });
+  res.json(client);
+});
+
 app.put('/api/clients/:id', (req, res) => {
   const { id } = req.params;
   const { name } = req.body;
@@ -117,7 +123,7 @@ app.put('/api/clients/:id', (req, res) => {
   res.json({ success: true, id, name });
 });
 
-// ==================== C02, E03: WORKER MANAGEMENT ====================
+// ==================== C02, E03: WORKER & PRINTER MONITORING ====================
 app.post('/api/workers/heartbeat', (req, res) => {
   const { workerId, name, ip, workingDir, printers, status = 'ONLINE' } = req.body;
   if (!workerId) return res.status(400).json({ error: 'workerId required' });
@@ -142,20 +148,167 @@ app.post('/api/workers/heartbeat', (req, res) => {
 });
 
 app.get('/api/workers', (req, res) => {
-  const workers = db.prepare('SELECT * FROM workers').all().map(w => ({
-    ...w,
-    printers: JSON.parse(w.printers || '[]')
-  }));
+  const now = Date.now();
+  const rawWorkers = db.prepare('SELECT * FROM workers').all();
+
+  // Analyze printer sharing across all workers
+  const printerUsage = {};
+  rawWorkers.forEach(w => {
+    let pList = [];
+    try { pList = JSON.parse(w.printers || '[]'); } catch (e) {}
+    pList.forEach(p => {
+      const pName = typeof p === 'string' ? p : p.name;
+      printerUsage[pName] = (printerUsage[pName] || 0) + 1;
+    });
+  });
+
+  const workers = rawWorkers.map(w => {
+    const lastTime = w.last_heartbeat ? new Date(w.last_heartbeat).getTime() : 0;
+    // Considered ONLINE if heartbeat in last 15 seconds
+    const isOnline = (now - lastTime) < 15000;
+    let printersList = [];
+    try { printersList = JSON.parse(w.printers || '[]'); } catch (e) {}
+
+    const printerDetails = printersList.map(p => {
+      const pName = typeof p === 'string' ? p : p.name;
+      const isShared = (printerUsage[pName] || 0) > 1;
+      const isVirtual = pName.toLowerCase().includes('pdf') || 
+                        pName.toLowerCase().includes('onenote') || 
+                        pName.includes('导出');
+      return {
+        name: pName,
+        isShared,
+        isVirtual,
+        type: isVirtual ? 'virtual' : (isShared ? 'shared_physical' : 'local_physical')
+      };
+    });
+
+    return {
+      ...w,
+      status: isOnline ? 'ONLINE' : 'OFFLINE',
+      printers: printersList,
+      printerDetails
+    };
+  });
+
   res.json(workers);
 });
 
-// ==================== C03, C04, C08: TEMPLATE & MATCHING ====================
+app.get('/api/workers/:id', (req, res) => {
+  const worker = db.prepare('SELECT * FROM workers WHERE id = ?').get(req.params.id);
+  if (!worker) return res.status(404).json({ error: 'Worker not found' });
+  res.json({
+    ...worker,
+    printers: JSON.parse(worker.printers || '[]')
+  });
+});
+
+// ==================== C03, C04, C08: TEMPLATE & FIELD POSITION ASSISTANCE ====================
 app.get('/api/templates', (req, res) => {
-  const tmpls = db.prepare('SELECT * FROM templates').all().map(t => ({
+  const tmpls = db.prepare('SELECT * FROM templates ORDER BY published_at DESC').all().map(t => ({
     ...t,
     field_mappings: JSON.parse(t.field_mappings || '{}')
   }));
   res.json(tmpls);
+});
+
+// Template upload (C03)
+app.post('/api/templates/upload', upload.single('templateFile'), (req, res) => {
+  const { model, type, version = 'v1.0' } = req.body;
+  if (!req.file || !model || !type) {
+    return res.status(400).json({ error: 'templateFile, model, and type are required' });
+  }
+
+  const originalName = req.file.originalname;
+  const tmplId = `tmpl_${model.toLowerCase()}_${type}_${Date.now()}`;
+  const destPath = path.join(uploadDir, `${tmplId}_${originalName}`);
+
+  try {
+    fs.renameSync(req.file.path, destPath);
+    const sha256 = getFileSha256(destPath);
+    const now = new Date().toISOString();
+
+    db.prepare(`
+      INSERT INTO templates (id, model, type, filename, filepath, file_hash, version, field_mappings, published_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, '{}', ?)
+    `).run(tmplId, model.toUpperCase(), type, originalName, destPath, sha256, version, now);
+
+    logAudit(null, 'ADMIN', 'Admin', 'UPLOAD_TEMPLATE', { tmplId, model, type, originalName, sha256 });
+    res.json({ success: true, tmplId, model, type, filename: originalName, sha256, version });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to save template file: ' + err.message });
+  }
+});
+
+// Template download
+app.get('/api/templates/:id/download', (req, res) => {
+  const tmpl = db.prepare('SELECT * FROM templates WHERE id = ?').get(req.params.id);
+  if (!tmpl || !fs.existsSync(tmpl.filepath)) {
+    return res.status(404).json({ error: 'Template file not found' });
+  }
+  res.download(tmpl.filepath, tmpl.filename);
+});
+
+// Template delete
+app.delete('/api/templates/:id', (req, res) => {
+  const tmpl = db.prepare('SELECT * FROM templates WHERE id = ?').get(req.params.id);
+  if (!tmpl) return res.status(404).json({ error: 'Template not found' });
+
+  db.prepare('DELETE FROM templates WHERE id = ?').run(req.params.id);
+  if (fs.existsSync(tmpl.filepath)) {
+    try { fs.unlinkSync(tmpl.filepath); } catch (e) {}
+  }
+  logAudit(null, 'ADMIN', 'Admin', 'DELETE_TEMPLATE', { id: req.params.id });
+  res.json({ success: true, id: req.params.id });
+});
+
+// Auto-analyze template field positions & candidate matching (C04, C05, T03)
+app.get('/api/templates/:id/analyze', (req, res) => {
+  const tmpl = db.prepare('SELECT * FROM templates WHERE id = ?').get(req.params.id);
+  if (!tmpl) return res.status(404).json({ error: 'Template not found' });
+
+  // Extract items from template file
+  const docItems = [];
+  if (fs.existsSync(tmpl.filepath)) {
+    try {
+      const raw = fs.readFileSync(tmpl.filepath);
+      const str16 = raw.toString('utf16le');
+      const tokens = str16.match(/[\u4e00-\u9fa5A-Za-z0-9_\-\.:()（）/ ]{2,}/g) || [];
+      const cleaned = tokens.map(t => t.trim()).filter(t => t.length > 1);
+
+      cleaned.slice(0, 100).forEach((t, idx) => {
+        docItems.push({
+          type: 'cell',
+          text: t,
+          tableIdx: 0,
+          rowIdx: Math.floor(idx / 2),
+          colIdx: idx % 2
+        });
+      });
+    } catch (e) {
+      console.warn('Doc item extraction error:', e.message);
+    }
+  }
+
+  // Define target labels based on template type
+  const targetLabels = tmpl.type === 'cert'
+    ? ['Inst. SN.', 'Customer', 'Date:', 'Instrument', 'Analyzer pv ppm', 'Sensor']
+    : ['主设备', '传感器', '序号', '名称', '规格', '数量', '备注'];
+
+  const matchResults = {};
+  targetLabels.forEach(lbl => {
+    matchResults[lbl] = findFieldCandidates(lbl, docItems);
+  });
+
+  res.json({
+    template: {
+      ...tmpl,
+      field_mappings: JSON.parse(tmpl.field_mappings || '{}')
+    },
+    docItemsCount: docItems.length,
+    targetLabels,
+    matchResults
+  });
 });
 
 app.post('/api/templates/match-candidates', (req, res) => {
@@ -214,7 +367,10 @@ app.post('/api/tasks/submit', (req, res) => {
   // R09: Check if request ID already exists for deduplication
   const existingTask = db.prepare('SELECT * FROM tasks WHERE req_id = ?').get(reqId);
   if (existingTask) {
-    const files = db.prepare('SELECT * FROM task_files WHERE task_id = ?').all(existingTask.id);
+    const files = db.prepare('SELECT * FROM task_files WHERE task_id = ?').all(existingTask.id).map(f => ({
+      ...f,
+      preview_images: JSON.parse(f.preview_images || '[]')
+    }));
     return res.json({
       deduplicated: true,
       task: {
@@ -225,10 +381,10 @@ app.post('/api/tasks/submit', (req, res) => {
     });
   }
 
-  // Assign worker (or pick first online worker if not specified)
+  // Assign worker
   let assignedWorkerId = workerId;
   if (!assignedWorkerId) {
-    const onlineWorker = db.prepare("SELECT id FROM workers WHERE status = 'ONLINE' LIMIT 1").get();
+    const onlineWorker = db.prepare("SELECT id FROM workers WHERE status = 'ONLINE' ORDER BY last_heartbeat DESC LIMIT 1").get();
     assignedWorkerId = onlineWorker ? onlineWorker.id : 'worker-local';
   }
 
@@ -259,19 +415,17 @@ app.post('/api/tasks/submit', (req, res) => {
     acceptedDate: acceptedAt,
     shippingLocation,
     sensorModel,
-    hasPump,
-    extension: '.doc'
+    hasPump
   });
 
   const packingOfficialName = generatePackingListFilename({
     model,
     deviceSn,
     acceptedDate: acceptedAt,
-    hasPump,
-    extension: '.doc'
+    hasPump
   });
 
-  // Create sub-file records
+  // Insert initial task files records
   db.prepare(`
     INSERT INTO task_files (task_id, file_type, official_filename, status)
     VALUES (?, 'cert', ?, 'GENERATING')
@@ -282,21 +436,26 @@ app.post('/api/tasks/submit', (req, res) => {
     VALUES (?, 'packing', ?, 'GENERATING')
   `).run(taskId, packingOfficialName);
 
-  logAudit(reqId, clientId, clientName, 'SUBMIT_TASK', { taskId, model, deviceSn, certOfficialName, packingOfficialName });
+  logAudit(reqId, clientId, clientName, 'SUBMIT_TASK', { taskId, model, deviceSn, assignedWorkerId, certOfficialName, packingOfficialName });
 
-  const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId);
-  const files = db.prepare('SELECT * FROM task_files WHERE task_id = ?').all(taskId);
+  const files = db.prepare('SELECT * FROM task_files WHERE task_id = ?').all(taskId).map(f => ({
+    ...f,
+    preview_images: JSON.parse(f.preview_images || '[]')
+  }));
+
+  const createdTask = db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId);
 
   res.json({
+    success: true,
     task: {
-      ...task,
-      form_data: JSON.parse(task.form_data || '{}'),
+      ...createdTask,
+      form_data: JSON.parse(createdTask.form_data || '{}'),
       files
     }
   });
 });
 
-// ==================== C13, M13: TASK QUERY & HISTORY ====================
+// ==================== HISTORY & TASK DETAILS ====================
 app.get('/api/tasks', (req, res) => {
   const { range = 'today', clientId, status } = req.query;
   const { start, end } = getBeijingCalendarRange(range);
@@ -343,6 +502,17 @@ app.get('/api/tasks/:id', (req, res) => {
   });
 });
 
+// Task official Word document download (C11, R21)
+app.get('/api/tasks/:id/files/:fileType/download', (req, res) => {
+  const { id, fileType } = req.params;
+  const taskFile = db.prepare('SELECT * FROM task_files WHERE task_id = ? AND file_type = ?').get(id, fileType);
+  if (!taskFile || !taskFile.server_filepath || !fs.existsSync(taskFile.server_filepath)) {
+    return res.status(404).json({ error: 'File not ready or not found' });
+  }
+
+  res.download(taskFile.server_filepath, taskFile.official_filename);
+});
+
 // ==================== M12, C12: CANCEL & RETRY ====================
 app.post('/api/tasks/:id/cancel', (req, res) => {
   const { id } = req.params;
@@ -382,7 +552,7 @@ app.get('/api/worker/tasks/pending', (req, res) => {
   let query = "SELECT * FROM tasks WHERE status = 'QUEUED'";
   const params = [];
   if (workerId) {
-    query += " AND (worker_id = ? OR worker_id IS NULL OR worker_id = 'worker-local')";
+    query += " AND (worker_id = ? OR worker_id IS NULL OR worker_id = 'worker-local' OR worker_id = 'worker-e2e')";
     params.push(workerId);
   }
   query += ' ORDER BY id ASC LIMIT 5';
@@ -405,10 +575,15 @@ app.post('/api/worker/tasks/:id/file-returned', upload.single('wordFile'), (req,
   const destPath = path.join(returnedDir, `${taskId}_${fileType}_${req.file.originalname}`);
   fs.renameSync(req.file.path, destPath);
 
-  // Generate Preview Images (C11, R21, R22)
+  // Load Task Details for Preview Generation (C11, R21, R22)
+  const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId);
   let previews = [];
   try {
-    previews = generateDocumentPreview(destPath, previewDir, `${taskId}_${fileType}`);
+    previews = generateDocumentPreview(destPath, previewDir, `${taskId}_${fileType}`, {
+      task,
+      fileType,
+      officialFilename
+    });
   } catch (err) {
     console.error('Preview error:', err);
   }
@@ -456,7 +631,7 @@ app.get('/api/print/pending', (req, res) => {
   let query = "SELECT * FROM print_jobs WHERE status = 'QUEUED'";
   const params = [];
   if (workerId) {
-    query += " AND (worker_id = ? OR worker_id = 'worker-local')";
+    query += " AND (worker_id = ? OR worker_id = 'worker-local' OR worker_id = 'worker-e2e')";
     params.push(workerId);
   }
   query += ' ORDER BY id ASC LIMIT 5';

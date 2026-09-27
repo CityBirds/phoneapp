@@ -1,23 +1,34 @@
 const path = require('path');
 const fs = require('fs');
 const { execSync } = require('child_process');
+const { generateWordDocument } = require('./word_engine');
 const { isPathInWhitelist, isPrinterAllowed } = require('./security');
 const { handleFileConflictAndOverwrite } = require('./conflict');
-const { generateWordDocument } = require('./word_engine');
 const { getFileSha256 } = require('../common/utils');
 
+/**
+ * Dynamic System Printer Detector for Windows (PowerShell CIM Query)
+ * Rules: R04, R05
+ */
 function getInstalledSystemPrinters() {
   if (process.platform === 'win32') {
     try {
-      const script = `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Get-CimInstance Win32_Printer | Select-Object Name | ConvertTo-Json`;
-      const out = execSync(`powershell.exe -NoProfile -Command "${script}"`, { encoding: 'utf-8', timeout: 5000 });
-      const data = JSON.parse(out);
-      const list = Array.isArray(data) ? data : [data];
-      return list.map(p => p.Name).filter(Boolean);
+      const output = execSync('powershell -NoProfile -Command "Get-CimInstance Win32_Printer | Select-Object -ExpandProperty Name"', {
+        encoding: 'utf-8',
+        timeout: 5000,
+        stdio: ['ignore', 'pipe', 'ignore']
+      });
+      const lines = output.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+      if (lines.length > 0) return lines;
     } catch (e) {
       try {
-        const out = execSync('wmic printer get name', { encoding: 'utf-8', timeout: 5000 });
-        return out.split(/\r?\n/).map(s => s.trim()).filter(s => s && s.toLowerCase() !== 'name');
+        const output = execSync('wmic printer get name', {
+          encoding: 'utf-8',
+          timeout: 5000,
+          stdio: ['ignore', 'pipe', 'ignore']
+        });
+        const lines = output.split(/\r?\n/).map(s => s.trim()).filter(s => s && s.toLowerCase() !== 'name');
+        if (lines.length > 0) return lines;
       } catch (err) {
         return [];
       }
@@ -26,12 +37,40 @@ function getInstalledSystemPrinters() {
   return [];
 }
 
+/**
+ * Parse Command Line Arguments
+ */
+function parseCliArgs() {
+  const args = process.argv.slice(2);
+  const options = {};
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--id' && args[i + 1]) {
+      options.workerId = args[i + 1];
+      i++;
+    } else if (args[i] === '--name' && args[i + 1]) {
+      options.name = args[i + 1];
+      i++;
+    } else if (args[i] === '--server' && args[i + 1]) {
+      options.serverUrl = args[i + 1];
+      i++;
+    } else if (args[i] === '--port' && args[i + 1]) {
+      options.serverUrl = `http://localhost:${args[i + 1]}`;
+      i++;
+    } else if (args[i] === '--dir' && args[i + 1]) {
+      options.workingDir = args[i + 1];
+      i++;
+    }
+  }
+  return options;
+}
+
 class ExecutionWorker {
   constructor(config = {}) {
-    this.workerId = config.workerId || 'worker-local';
-    this.name = config.name || 'Execution Worker (PC-01)';
-    this.serverUrl = config.serverUrl || 'http://localhost:3000';
-    this.workingDir = config.workingDir || path.resolve(__dirname, '../../data/working_dir');
+    const cliOptions = parseCliArgs();
+    this.workerId = config.workerId || cliOptions.workerId || 'worker-local';
+    this.name = config.name || cliOptions.name || `执行终端 (${this.workerId})`;
+    this.serverUrl = config.serverUrl || cliOptions.serverUrl || 'http://localhost:3000';
+    this.workingDir = config.workingDir || cliOptions.workingDir || path.resolve(__dirname, `../../data/working_dir_${this.workerId}`);
 
     // Read worker_config.json if present
     const configPath = path.resolve(__dirname, '../../worker_config.json');
@@ -72,7 +111,7 @@ class ExecutionWorker {
       const data = await res.json();
       if (!this._connected) {
         this._connected = true;
-        console.log(`[成功] 已连接协调服务 (${this.serverUrl})！状态: ONLINE，正在监听任务与打印调度...`);
+        console.log(`[成功] 已连接协调服务 (${this.serverUrl})！状态: ONLINE，终端ID: ${this.workerId}，监听任务与打印调度...`);
       }
       return data;
     } catch (err) {
@@ -95,12 +134,12 @@ class ExecutionWorker {
         await this.processTask(task);
       }
     } catch (err) {
-      console.warn('Task polling error:', err.message);
+      // Silently handle poll disconnect
     }
   }
 
   async processTask(task) {
-    console.log(`Processing Task #${task.id} (${task.model} ${task.device_sn})`);
+    console.log(`[${this.name}] 正在处理发货任务 #${task.id} (${task.model} ${task.device_sn})`);
 
     const formData = task.form_data || {};
     const files = task.files || [];
@@ -170,12 +209,12 @@ class ExecutionWorker {
         await this.processPrintJob(job);
       }
     } catch (err) {
-      console.warn('Print job polling error:', err.message);
+      // Silently handle
     }
   }
 
   async processPrintJob(job) {
-    console.log(`Processing Print Job #${job.id} on printer: ${job.printer_name}`);
+    console.log(`[${this.name}] 正在处理打印任务 #${job.id}，目标打印机: ${job.printer_name}`);
 
     if (!isPrinterAllowed(job.printer_name, this.allowedPrinters)) {
       console.warn(`Print rejected: ${job.printer_name} not in allowed whitelist`);
@@ -223,12 +262,12 @@ if (require.main === module) {
   console.log('====================================================');
   console.log(`- 执行端 ID: ${worker.workerId}`);
   console.log(`- 协调服务地址: ${worker.serverUrl}`);
-  console.log(`- 工作目录: ${worker.workingDir}`);
+  console.log(`- 本地工作目录: ${worker.workingDir}`);
   
   if (physicalPrinters.length > 0) {
-    console.log(`- 物理打印机: ${physicalPrinters.join(', ')}`);
+    console.log(`- 物理/共享打印机: ${physicalPrinters.join(', ')}`);
   } else {
-    console.log(`- 物理打印机: 未连接 / 未配置`);
+    console.log(`- 物理/共享打印机: 未连接 / 未配置`);
   }
 
   if (virtualPrinters.length > 0) {
@@ -244,7 +283,7 @@ if (require.main === module) {
     worker.sendHeartbeat();
     worker.pollAndExecuteTasks();
     worker.pollAndExecutePrintJobs();
-  }, 3000);
+  }, 1000);
 }
 
 module.exports = ExecutionWorker;

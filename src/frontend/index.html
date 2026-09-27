@@ -3,34 +3,52 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>多人设备发货证书与装箱清单系统 (phoneApp)</title>
+  <title>多人设备发货证书与装箱清单任务系统 (phoneApp)</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
 
   <!-- Top Header -->
   <header class="header">
-    <h1>发货证书与清单系统</h1>
+    <div class="header-left">
+      <h1>发货证书与清单系统</h1>
+      <div id="active-worker-indicator" class="active-worker-pill" onclick="switchNavTab('workers')">
+        <span class="status-dot"></span>
+        <span id="current-worker-name">未选择执行终端 (点击选择)</span>
+      </div>
+    </div>
     <div id="user-badge" class="user-badge" onclick="openNameModal()">
-      姓名: <span id="user-name-display">未登记</span> ✎
+      姓名: <span id="user-name-display">未登记</span> ✏️
     </div>
   </header>
 
   <div class="container">
 
-    <!-- Worker & Resource Status Banner -->
-    <div class="card" id="worker-status-card">
-      <div class="card-title">
-        <span>执行电脑与资源状态</span>
-        <span id="worker-status-badge" class="badge badge-warning">检测中...</span>
+    <!-- TAB 0: WORKER SELECTION & MONITORING (先选执行终端) -->
+    <div id="tab-workers-view" class="tab-view">
+      <div class="section-banner">
+        <h2>🖥️ 执行终端监控与选择</h2>
+        <p>系统架构采用单一协调服务监控多个执行端。请选择本次发货任务的执行电脑终端：</p>
       </div>
-      <div id="worker-details" style="font-size: 13px; color: #666;">
-        未检测到在线执行电脑
+
+      <div class="worker-grid" id="worker-cards-list">
+        <div class="loading-box">正在扫描局域网执行终端...</div>
       </div>
     </div>
 
-    <!-- TAB 1: TASK CREATION -->
-    <div id="tab-create-view" class="tab-view">
+    <!-- TAB 1: TASK CREATION (发货任务录入) -->
+    <div id="tab-create-view" class="tab-view" style="display: none;">
+      <!-- Selected Worker Bar -->
+      <div class="card selected-worker-bar">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <div>
+            <span style="font-size: 12px; color: #64748b;">当前分派执行终端：</span>
+            <b id="task-assigned-worker" style="color: #0284c7; font-size: 14px;">请先选择执行终端</b>
+          </div>
+          <button type="button" class="btn btn-sm btn-outline" onclick="switchNavTab('workers')">切换终端</button>
+        </div>
+      </div>
+
       <div class="card">
         <div class="card-title">设备与模板选择</div>
         <div class="form-group">
@@ -125,13 +143,16 @@
         </div>
       </div>
 
-      <button type="button" class="btn btn-block" style="margin-top: 16px; margin-bottom: 24px;" onclick="submitTaskForm()">确认并提交排队</button>
+      <button type="button" id="btn-submit-task" class="btn btn-block btn-lg" style="margin-top: 16px; margin-bottom: 24px;" onclick="submitTaskForm()">确认并提交排队处理</button>
     </div>
 
     <!-- TAB 2: PREVIEW & PRINT -->
     <div id="tab-preview-view" class="tab-view" style="display: none;">
       <div class="card">
-        <div class="card-title">证书与清单分页预览</div>
+        <div class="card-title" style="display: flex; justify-content: space-between; align-items: center;">
+          <span>证书与清单高保真预览</span>
+          <div id="preview-download-btn-box"></div>
+        </div>
         <div style="display: flex; gap: 8px; margin-bottom: 12px;">
           <button id="preview-tab-cert" class="toggle-btn active" onclick="switchPreviewDoc('cert')">发货证书预览</button>
           <button id="preview-tab-pack" class="toggle-btn" onclick="switchPreviewDoc('packing')">装箱清单预览</button>
@@ -143,9 +164,9 @@
       </div>
 
       <div class="card">
-        <div class="card-title">打印选项与批次提交</div>
+        <div class="card-title">调度打印至执行终端</div>
         <div class="form-group">
-          <label>目标打印机</label>
+          <label>目标执行终端打印机</label>
           <select id="printer-select" class="form-control" onchange="onPrinterSelectChange()">
             <option value="">正在检测执行电脑打印机...</option>
           </select>
@@ -162,14 +183,14 @@
           <label>打印份数</label>
           <input type="number" id="print-copies" class="form-control" value="1" min="1" max="50">
         </div>
-        <button type="button" id="btn-submit-print" class="btn btn-block" onclick="submitPrintJob()">确认并提交打印</button>
+        <button type="button" id="btn-submit-print" class="btn btn-block" onclick="submitPrintJob()">确认并提交执行端出纸打印</button>
       </div>
     </div>
 
-    <!-- TAB 3: HISTORY -->
+    <!-- TAB 3: HISTORY (历史记录与预览打开) -->
     <div id="tab-history-view" class="tab-view" style="display: none;">
       <div class="card">
-        <div class="card-title">历史任务查询（北京时间自然日历）</div>
+        <div class="card-title">历史发货任务记录（北京时间自然日历）</div>
         <div class="toggle-group" style="margin-bottom: 12px;">
           <button id="range-today" class="toggle-btn active" onclick="setHistoryRange('today')">今天</button>
           <button id="range-week" class="toggle-btn" onclick="setHistoryRange('week')">本周</button>
@@ -181,7 +202,115 @@
       </div>
     </div>
 
-    <!-- TAB 4: SERIAL PORT -->
+    <!-- TAB 4: COORDINATION ADMIN (协调端管理中心) -->
+    <div id="tab-admin-view" class="tab-view" style="display: none;">
+      
+      <!-- Sub-Tab Header -->
+      <div class="admin-nav-tabs">
+        <button id="admin-tab-clients" class="toggle-btn active" onclick="switchAdminSection('clients')">📱 APP端管理</button>
+        <button id="admin-tab-templates" class="toggle-btn" onclick="switchAdminSection('templates')">📑 模板库与上传</button>
+        <button id="admin-tab-matcher" class="toggle-btn" onclick="switchAdminSection('matcher')">🤖 字段智能匹配</button>
+      </div>
+
+      <!-- Section A: Client Management (改APP端名字) -->
+      <div id="admin-sec-clients" class="admin-section">
+        <div class="card">
+          <div class="card-title">
+            <span>APP 客户端管理 (C01, R01)</span>
+            <button type="button" class="btn btn-sm" onclick="loadClientsList()">刷新列表</button>
+          </div>
+          <p style="font-size: 13px; color: #64748b; margin-bottom: 12px;">
+            协调端可在此统一查看并修改已登记的 APP 手机端姓名，修改后手机端将自动同步更新。
+          </p>
+          <div class="table-responsive">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>客户端 ID</th>
+                  <th>当前姓名</th>
+                  <th>最后活跃时间</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="clients-table-body">
+                <!-- Dynamically populated -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Section B: Template Library (添加与管理模板文件) -->
+      <div id="admin-sec-templates" class="admin-section" style="display: none;">
+        <div class="card">
+          <div class="card-title">上传新模板文件 (C03, T03)</div>
+          <form id="template-upload-form" onsubmit="handleTemplateUpload(event)">
+            <div class="form-group">
+              <label>选择模板文件 (.doc / .docx)</label>
+              <input type="file" id="tmpl-file-input" class="form-control" accept=".doc,.docx" required>
+            </div>
+            <div style="display: flex; gap: 12px;">
+              <div class="form-group" style="flex: 1;">
+                <label>适用设备型号</label>
+                <input type="text" id="tmpl-model-input" class="form-control" placeholder="例如: POA200 或 DPT810" required>
+              </div>
+              <div class="form-group" style="flex: 1;">
+                <label>模板类型</label>
+                <select id="tmpl-type-select" class="form-control">
+                  <option value="cert">发货证书 (cert)</option>
+                  <option value="packing">装箱清单 (packing)</option>
+                </select>
+              </div>
+              <div class="form-group" style="width: 100px;">
+                <label>版本号</label>
+                <input type="text" id="tmpl-version-input" class="form-control" value="v1.0">
+              </div>
+            </div>
+            <button type="submit" class="btn btn-block">上传并保存至模板库</button>
+          </form>
+        </div>
+
+        <div class="card">
+          <div class="card-title">
+            <span>当前已发布模板库</span>
+            <button type="button" class="btn btn-sm" onclick="loadTemplatesList()">刷新</button>
+          </div>
+          <div id="templates-list-container">
+            加载模板列表中...
+          </div>
+        </div>
+      </div>
+
+      <!-- Section C: Field Matcher Assistant (自动识别字段位置辅助匹配) -->
+      <div id="admin-sec-matcher" class="admin-section" style="display: none;">
+        <div class="card">
+          <div class="card-title">模板字段位置自动识别与辅助匹配 (C04, C05, T03)</div>
+          <p style="font-size: 13px; color: #64748b; margin-bottom: 12px;">
+            系统将深度解析模板结构（段落与表格坐标），针对核心业务字段进行规则与特征辅助匹配：
+          </p>
+          <div class="form-group">
+            <label>选择需要解析匹配的模板</label>
+            <div style="display: flex; gap: 8px;">
+              <select id="matcher-template-select" class="form-control" style="flex: 1;">
+                <option value="">请选择模板...</option>
+              </select>
+              <button type="button" class="btn" onclick="analyzeTemplateFields()">🤖 开始自动识别匹配</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" id="matcher-results-card" style="display: none;">
+          <div class="card-title" style="display: flex; justify-content: space-between; align-items: center;">
+            <span>字段匹配结果候选清单</span>
+            <button type="button" class="btn btn-sm btn-success" onclick="saveMatchedMappings()">💾 保存字段映射规则</button>
+          </div>
+          <div id="matcher-results-body"></div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- TAB 5: SERIAL PORT -->
     <div id="tab-serial-view" class="tab-view" style="display: none;">
       <div class="card" style="text-align: center; padding: 32px 16px;">
         <div style="font-size: 48px; margin-bottom: 12px;">🔌</div>
@@ -197,17 +326,25 @@
 
   <!-- Bottom Navigation Bar -->
   <nav class="nav-tabs">
-    <div id="nav-create" class="nav-tab active" onclick="switchNavTab('create')">
-      <div>📄</div>
+    <div id="nav-workers" class="nav-tab active" onclick="switchNavTab('workers')">
+      <div>🖥️</div>
+      <div>执行终端</div>
+    </div>
+    <div id="nav-create" class="nav-tab" onclick="switchNavTab('create')">
+      <div>📋</div>
       <div>发货任务</div>
     </div>
     <div id="nav-preview" class="nav-tab" onclick="switchNavTab('preview')">
-      <div>👁</div>
+      <div>👁️</div>
       <div>文件预览</div>
     </div>
     <div id="nav-history" class="nav-tab" onclick="switchNavTab('history')">
       <div>📜</div>
       <div>历史记录</div>
+    </div>
+    <div id="nav-admin" class="nav-tab" onclick="switchNavTab('admin')">
+      <div>⚙️</div>
+      <div>协调管理</div>
     </div>
     <div id="nav-serial" class="nav-tab" onclick="switchNavTab('serial')">
       <div>🔌</div>
@@ -226,6 +363,42 @@
       <div style="display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px;">
         <button type="button" class="btn btn-secondary" onclick="closeNameModal()">取消</button>
         <button type="button" class="btn" onclick="saveUserName()">保存登记</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Fullscreen Document Preview Modal (即使刷新后在历史记录点击也能打开) -->
+  <div id="preview-modal" class="modal">
+    <div class="modal-content modal-fullscreen">
+      <div class="modal-header">
+        <h3 id="modal-doc-title">文档高清预览</h3>
+        <div style="display: flex; gap: 8px;">
+          <a id="modal-download-link" href="#" class="btn btn-sm btn-outline" download>⬇️ 下载原件</a>
+          <button type="button" class="btn btn-sm btn-secondary" onclick="closePreviewModal()">✕ 关闭</button>
+        </div>
+      </div>
+      <div class="modal-body" id="modal-preview-body">
+        <!-- Rendered preview image -->
+      </div>
+    </div>
+  </div>
+
+  <!-- Admin Rename Client Modal -->
+  <div id="admin-rename-modal" class="modal">
+    <div class="modal-content">
+      <h3 style="margin-bottom: 12px;">修改 APP 手机端姓名</h3>
+      <input type="hidden" id="rename-client-id">
+      <div class="form-group">
+        <label>客户端 ID</label>
+        <input type="text" id="rename-client-id-disp" class="form-control" disabled>
+      </div>
+      <div class="form-group">
+        <label>修改后的姓名 (例如: 产线1号-李四)</label>
+        <input type="text" id="rename-client-name-input" class="form-control">
+      </div>
+      <div style="display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px;">
+        <button type="button" class="btn btn-secondary" onclick="closeAdminRenameModal()">取消</button>
+        <button type="button" class="btn" onclick="submitAdminRenameClient()">保存修改</button>
       </div>
     </div>
   </div>
