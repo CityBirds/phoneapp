@@ -436,7 +436,7 @@ app.post('/api/worker/tasks/:id/file-returned', upload.single('wordFile'), (req,
 
 // ==================== C10, M11, E09: PRINT JOBS ====================
 app.post('/api/print/submit', (req, res) => {
-  const { clientId, workerId = 'worker-local', printerName = 'Epson EcoTank L3258', batchItems = [] } = req.body;
+  const { clientId, workerId = 'worker-local', printerName = '', batchItems = [] } = req.body;
   if (!clientId || !batchItems.length) {
     return res.status(400).json({ error: 'clientId and batchItems required' });
   }

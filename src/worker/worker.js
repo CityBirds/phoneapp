@@ -1,9 +1,30 @@
 const path = require('path');
 const fs = require('fs');
+const { execSync } = require('child_process');
 const { isPathInWhitelist, isPrinterAllowed } = require('./security');
 const { handleFileConflictAndOverwrite } = require('./conflict');
 const { generateWordDocument } = require('./word_engine');
 const { getFileSha256 } = require('../common/utils');
+
+function getInstalledSystemPrinters() {
+  if (process.platform === 'win32') {
+    try {
+      const script = `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Get-CimInstance Win32_Printer | Select-Object Name | ConvertTo-Json`;
+      const out = execSync(`powershell.exe -NoProfile -Command "${script}"`, { encoding: 'utf-8', timeout: 5000 });
+      const data = JSON.parse(out);
+      const list = Array.isArray(data) ? data : [data];
+      return list.map(p => p.Name).filter(Boolean);
+    } catch (e) {
+      try {
+        const out = execSync('wmic printer get name', { encoding: 'utf-8', timeout: 5000 });
+        return out.split(/\r?\n/).map(s => s.trim()).filter(s => s && s.toLowerCase() !== 'name');
+      } catch (err) {
+        return [];
+      }
+    }
+  }
+  return [];
+}
 
 class ExecutionWorker {
   constructor(config = {}) {
@@ -11,7 +32,24 @@ class ExecutionWorker {
     this.name = config.name || 'Execution Worker (PC-01)';
     this.serverUrl = config.serverUrl || 'http://localhost:3000';
     this.workingDir = config.workingDir || path.resolve(__dirname, '../../data/working_dir');
-    this.allowedPrinters = config.allowedPrinters || ['Epson EcoTank L3258', 'Microsoft Print to PDF'];
+
+    // Read worker_config.json if present
+    const configPath = path.resolve(__dirname, '../../worker_config.json');
+    let fileConfig = {};
+    if (fs.existsSync(configPath)) {
+      try {
+        fileConfig = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      } catch (e) {}
+    }
+
+    if (config.allowedPrinters && config.allowedPrinters.length > 0) {
+      this.allowedPrinters = config.allowedPrinters;
+    } else if (fileConfig.allowedPrinters && fileConfig.allowedPrinters.length > 0) {
+      this.allowedPrinters = fileConfig.allowedPrinters;
+    } else {
+      // Dynamic detection of real printers installed on system
+      this.allowedPrinters = getInstalledSystemPrinters();
+    }
 
     if (!fs.existsSync(this.workingDir)) {
       fs.mkdirSync(this.workingDir, { recursive: true });
@@ -69,7 +107,6 @@ class ExecutionWorker {
 
     for (const fileRec of files) {
       try {
-        // Find template file
         const samplesDir = path.resolve(__dirname, '../../samples');
         let templatePath = '';
         if (fileRec.file_type === 'cert') {
@@ -82,25 +119,21 @@ class ExecutionWorker {
 
         const officialFilename = fileRec.official_filename;
 
-        // E07, R18-R20: Handle file overwrite & conflict protection
-        const { officialFilePath, renamedCopyPath } = handleFileConflictAndOverwrite(
+        const { officialFilePath } = handleFileConflictAndOverwrite(
           this.workingDir,
           officialFilename,
           formData.overwriteConfirmed
         );
 
-        // Security check: ensure path is inside working directory whitelist (E02, R03)
         if (!isPathInWhitelist(officialFilePath, this.workingDir)) {
           throw new Error(`Security Violation: Target path outside working directory boundary! (E02)`);
         }
 
-        // Generate document
         const genResult = generateWordDocument(templatePath, officialFilePath, {
           type: fileRec.file_type,
           formData
         });
 
-        // Upload returned document back to Coordination Service (E08, R21)
         await this.uploadReturnedFile(task.id, fileRec.file_type, officialFilename, officialFilePath, genResult.sha256);
 
       } catch (err) {
@@ -142,48 +175,67 @@ class ExecutionWorker {
   }
 
   async processPrintJob(job) {
-    console.log(`Processing Print Job #${job.id} on printer ${job.printer_name}`);
+    console.log(`Processing Print Job #${job.id} on printer: ${job.printer_name}`);
 
-    // Validate printer whitelist (E02, R03)
     if (!isPrinterAllowed(job.printer_name, this.allowedPrinters)) {
+      console.warn(`Print rejected: ${job.printer_name} not in allowed whitelist`);
       await fetch(`${this.serverUrl}/api/print/${job.id}/status`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: 'FAILED', errorMsg: 'Printer not in allowed whitelist' })
+        body: JSON.stringify({ status: 'FAILED', errorMsg: `打印机 '${job.printer_name}' 未在执行端白名单中或未连接` })
       });
       return;
     }
 
-    // Report SUBMITTED_TO_QUEUE status (R27)
     await fetch(`${this.serverUrl}/api/print/${job.id}/status`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ status: 'SUBMITTED_TO_QUEUE' })
     });
 
-    // Simulate/Execute Windows Print Submission
     setTimeout(async () => {
       await fetch(`${this.serverUrl}/api/print/${job.id}/status`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: 'PRINTED' })
       });
+      console.log(`Print Job #${job.id} marked as PRINTED.`);
     }, 1000);
   }
 }
 
 if (require.main === module) {
   const worker = new ExecutionWorker();
+  
+  const physicalPrinters = worker.allowedPrinters.filter(p => 
+    !p.toLowerCase().includes('pdf') && 
+    !p.toLowerCase().includes('onenote') && 
+    !p.includes('导出')
+  );
+  const virtualPrinters = worker.allowedPrinters.filter(p => 
+    p.toLowerCase().includes('pdf') || 
+    p.toLowerCase().includes('onenote') || 
+    p.includes('导出')
+  );
+
   console.log('====================================================');
   console.log(`执行端程序启动成功: ${worker.name}`);
   console.log('====================================================');
   console.log(`- 执行端 ID: ${worker.workerId}`);
   console.log(`- 协调服务地址: ${worker.serverUrl}`);
   console.log(`- 工作目录: ${worker.workingDir}`);
-  console.log(`- 开放打印机: ${worker.allowedPrinters.join(', ')}`);
+  
+  if (physicalPrinters.length > 0) {
+    console.log(`- 物理打印机: ${physicalPrinters.join(', ')}`);
+  } else {
+    console.log(`- 物理打印机: 未连接 / 未配置`);
+  }
+
+  if (virtualPrinters.length > 0) {
+    console.log(`- 系统虚拟打印: ${virtualPrinters.join(', ')}`);
+  }
   console.log('----------------------------------------------------');
   
-  // 立即发送首次心跳
   worker.sendHeartbeat();
   worker.pollAndExecuteTasks();
   worker.pollAndExecutePrintJobs();

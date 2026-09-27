@@ -96,11 +96,35 @@ async function checkWorkerStatus() {
     if (active) {
       badgeEl.className = 'badge badge-success';
       badgeEl.innerText = '在线可连接';
+
+      const printers = active.printers || [];
+      const physicalPrinters = printers.filter(p => 
+        !p.toLowerCase().includes('pdf') && 
+        !p.toLowerCase().includes('onenote') && 
+        !p.includes('导出')
+      );
+      const virtualPrinters = printers.filter(p => 
+        p.toLowerCase().includes('pdf') || 
+        p.toLowerCase().includes('onenote') || 
+        p.includes('导出')
+      );
+
+      let printerHtml = '';
+      if (physicalPrinters.length > 0) {
+        printerHtml = `物理打印机: <b style="color: #166534;">${physicalPrinters.join(', ')}</b>`;
+      } else if (virtualPrinters.length > 0) {
+        printerHtml = `物理打印机: <span style="color: #d97706;">未连接</span>（可用虚拟打印: ${virtualPrinters.join(', ')}）`;
+      } else {
+        printerHtml = `物理打印机: <span style="color: #ef4444;">未连接任何打印机</span>`;
+      }
+
       detailsEl.innerHTML = `
         <div>工作电脑: <b>${active.name}</b> (${active.ip})</div>
         <div>允许目录: <code>${active.working_dir || 'D:\\docs'}</code></div>
-        <div>可用打印机: ${active.printers.join(', ') || 'Epson EcoTank L3258'}</div>
+        <div>${printerHtml}</div>
       `;
+
+      updatePrinterDropdown(printers, physicalPrinters);
     } else {
       badgeEl.className = 'badge badge-warning';
       badgeEl.innerText = '挂起 / 本地离线';
@@ -358,12 +382,19 @@ async function submitPrintJob() {
   if (printPack) batchItems.push({ fileType: 'packing', copies });
 
   try {
+    const select = document.getElementById('printer-select');
+    const chosenPrinter = select ? select.value : '';
+
+    if (!chosenPrinter) {
+      return alert('当前电脑未连接或未配置可用打印机！\n如需测试可选择系统虚拟打印（如 Microsoft Print to PDF）或仅查看文档预览。');
+    }
+
     const res = await fetch(`${API_BASE}/api/print/submit`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         clientId: state.clientId,
-        printerName: 'Epson EcoTank L3258',
+        printerName: chosenPrinter,
         batchItems
       })
     });
@@ -424,5 +455,54 @@ function switchNavTab(tabName) {
 
   if (tabName === 'history') {
     loadHistoryList();
+  }
+}
+
+
+function updatePrinterDropdown(printers, physicalPrinters) {
+  const select = document.getElementById('printer-select');
+  const tip = document.getElementById('printer-status-tip');
+  if (!select) return;
+
+  const currentVal = select.value;
+  select.innerHTML = '';
+
+  if (printers.length === 0) {
+    select.innerHTML = '<option value="">(未检测到可用打印机)</option>';
+    if (tip) tip.innerText = '⚠️ 电脑未连接打印机，可进行表单录入与预览，暂无法执行实物出纸。';
+    return;
+  }
+
+  printers.forEach(p => {
+    const isVirtual = p.toLowerCase().includes('pdf') || p.toLowerCase().includes('onenote') || p.includes('导出');
+    const opt = document.createElement('option');
+    opt.value = p;
+    opt.innerText = isVirtual ? `${p} (虚拟打印/导出)` : `${p} (物理打印机)`;
+    select.appendChild(opt);
+  });
+
+  if (currentVal && printers.includes(currentVal)) {
+    select.value = currentVal;
+  }
+
+  onPrinterSelectChange();
+}
+
+function onPrinterSelectChange() {
+  const select = document.getElementById('printer-select');
+  const tip = document.getElementById('printer-status-tip');
+  if (!select || !tip) return;
+
+  const val = select.value;
+  if (!val) {
+    tip.innerText = '⚠️ 当前未连接打印机。';
+    return;
+  }
+
+  const isVirtual = val.toLowerCase().includes('pdf') || val.toLowerCase().includes('onenote') || val.includes('导出');
+  if (isVirtual) {
+    tip.innerText = 'ℹ️ 当前选择为虚拟打印机，打印操作将导出至文件/系统队列，不会实际出纸。';
+  } else {
+    tip.innerText = '✅ 当前已就绪，打印任务将发送至物理打印机。';
   }
 }

@@ -1,0 +1,7 @@
+{
+  "workerId": "worker-local",
+  "name": "Execution Worker (PC-01)",
+  "serverUrl": "http://localhost:3000",
+  "autoDetectPrinters": true,
+  "allowedPrinters": []
+}
