@@ -1,19 +1,25 @@
 /* Modern Desktop Admin Dashboard Styles for Coordination Service */
 
 :root {
-  --primary: #0052cc;
-  --primary-hover: #0747a6;
+  --primary: #2563eb;
+  --primary-hover: #1d4ed8;
+  --primary-light: #eff6ff;
   --sidebar-bg: #0f172a;
   --sidebar-text: #94a3b8;
   --sidebar-active: #1e293b;
   --bg-main: #f8fafc;
   --card-bg: #ffffff;
   --border: #e2e8f0;
-  --text-main: #1e293b;
+  --text-main: #0f172a;
   --text-muted: #64748b;
-  --success: #16a34a;
-  --danger: #dc2626;
+  --success: #10b981;
+  --success-bg: #ecfdf5;
+  --danger: #ef4444;
+  --danger-bg: #fef2f2;
   --warning: #f59e0b;
+  --warning-bg: #fffbeb;
+  --card-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -2px rgba(0, 0, 0, 0.05);
+  --card-shadow-hover: 0 10px 15px -3px rgba(0, 0, 0, 0.08), 0 4px 6px -4px rgba(0, 0, 0, 0.04);
 }
 
 * {
@@ -33,13 +39,13 @@ body {
 
 /* Top Header */
 .admin-header {
-  background: #0052cc;
+  background: linear-gradient(135deg, #1e3a8a 0%, #2563eb 100%);
   color: #ffffff;
-  padding: 12px 24px;
+  padding: 14px 28px;
   display: flex;
   justify-content: space-between;
   align-items: center;
-  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.12);
   z-index: 100;
 }
 
@@ -184,9 +190,14 @@ body {
 .card {
   background: var(--card-bg);
   border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 20px;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+  border-radius: 12px;
+  padding: 22px;
+  box-shadow: var(--card-shadow);
+  transition: box-shadow 0.2s ease, border-color 0.2s ease;
+}
+
+.card:hover {
+  box-shadow: var(--card-shadow-hover);
 }
 
 /* Table */
@@ -202,15 +213,22 @@ body {
 }
 
 .admin-table th, .admin-table td {
-  padding: 12px 14px;
+  padding: 14px 16px;
   text-align: left;
   border-bottom: 1px solid var(--border);
 }
 
 .admin-table th {
-  background-color: #f8fafc;
-  color: #475569;
+  background-color: #f1f5f9;
+  color: #334155;
   font-weight: 700;
+  text-transform: uppercase;
+  font-size: 12px;
+  letter-spacing: 0.5px;
+}
+
+.admin-table tr {
+  transition: background-color 0.15s ease;
 }
 
 .admin-table tr:hover {
