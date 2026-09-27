@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>多人设备发货证书与装箱清单系统 (phoneApp)</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+  <!-- Top Header -->
+  <header class="header">
+    <h1>发货证书与清单系统</h1>
+    <div id="user-badge" class="user-badge" onclick="openNameModal()">
+      姓名: <span id="user-name-display">未登记</span> ✎
+    </div>
+  </header>
+
+  <div class="container">
+
+    <!-- Worker & Resource Status Banner -->
+    <div class="card" id="worker-status-card">
+      <div class="card-title">
+        <span>执行电脑与资源状态</span>
+        <span id="worker-status-badge" class="badge badge-warning">检测中...</span>
+      </div>
+      <div id="worker-details" style="font-size: 13px; color: #666;">
+        未检测到在线执行电脑
+      </div>
+    </div>
+
+    <!-- TAB 1: TASK CREATION -->
+    <div id="tab-create-view" class="tab-view">
+      <div class="card">
+        <div class="card-title">设备与模板选择</div>
+        <div class="form-group">
+          <label>设备型号</label>
+          <select id="model-select" class="form-control" onchange="onModelChange()">
+            <option value="POA200">POA200 便携式露点仪</option>
+            <option value="DPT810">DPT810 露点变送器</option>
+          </select>
+        </div>
+
+        <div class="form-group" id="pump-group">
+          <label>带泵 / 不带泵 选项</label>
+          <div class="toggle-group">
+            <button type="button" id="pump-yes" class="toggle-btn active" onclick="setPumpOption(true)">带泵</button>
+            <button type="button" id="pump-no" class="toggle-btn" onclick="setPumpOption(false)">不带泵</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">共享与公共字段信息</div>
+        <div class="form-group">
+          <label>设备序列号 (Inst. SN.)</label>
+          <input type="text" id="device-sn" class="form-control" value="AP10007513" placeholder="例如: AP10007513">
+        </div>
+        <div class="form-group">
+          <label>发货目的地 (Customer)</label>
+          <input type="text" id="shipping-location" class="form-control" value="南京" placeholder="例如: 南京">
+        </div>
+        <div class="form-group">
+          <label>传感器型号</label>
+          <select id="sensor-model" class="form-control">
+            <option value="PSR-12-223(封装）">PSR-12-223(封装）</option>
+            <option value="PMT210SEN">PMT210SEN</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>传感器序号</label>
+          <input type="text" id="sensor-sn" class="form-control" value="201N200258" placeholder="例如: 201N200258">
+        </div>
+        <div class="form-group">
+          <label>证书生成日期</label>
+          <input type="date" id="cert-date" class="form-control">
+        </div>
+      </div>
+
+      <!-- Test Point Data Table Card -->
+      <div class="card">
+        <div class="card-title">证书测试数据点录入</div>
+        <div style="overflow-x: auto;">
+          <table id="test-points-table">
+            <thead>
+              <tr>
+                <th>测试点</th>
+                <th>标准值</th>
+                <th>实测值</th>
+              </tr>
+            </thead>
+            <tbody id="test-points-body">
+              <!-- Dynamically populated -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Packing List Table Card -->
+      <div class="card">
+        <div class="card-title">
+          <span>装箱清单明细管理</span>
+          <button type="button" class="btn btn-sm" onclick="addPackingRow()">+ 添加物料</button>
+        </div>
+        <div style="overflow-x: auto;">
+          <table>
+            <thead>
+              <tr>
+                <th style="width: 40px;">序号</th>
+                <th>名称</th>
+                <th>规格/型号</th>
+                <th style="width: 50px;">数量</th>
+                <th style="width: 50px;">单位</th>
+                <th style="width: 50px;">标配</th>
+                <th>备注</th>
+                <th style="width: 50px;">操作</th>
+              </tr>
+            </thead>
+            <tbody id="packing-items-body">
+              <!-- Dynamically populated -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <button type="button" class="btn btn-block" style="margin-top: 16px; margin-bottom: 24px;" onclick="submitTaskForm()">确认并提交排队</button>
+    </div>
+
+    <!-- TAB 2: PREVIEW & PRINT -->
+    <div id="tab-preview-view" class="tab-view" style="display: none;">
+      <div class="card">
+        <div class="card-title">证书与清单分页预览</div>
+        <div style="display: flex; gap: 8px; margin-bottom: 12px;">
+          <button id="preview-tab-cert" class="toggle-btn active" onclick="switchPreviewDoc('cert')">发货证书预览</button>
+          <button id="preview-tab-pack" class="toggle-btn" onclick="switchPreviewDoc('packing')">装箱清单预览</button>
+        </div>
+
+        <div id="preview-container" class="preview-box">
+          请先在“发货任务”中提交生成证书与清单
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">打印选项与批次提交</div>
+        <div class="form-group">
+          <label>选择打印文件</label>
+          <div style="display: flex; flex-direction: column; gap: 8px;">
+            <label><input type="checkbox" id="print-check-cert" checked> 发货证书 (.doc)</label>
+            <label><input type="checkbox" id="print-check-pack" checked> 装箱清单 (.doc)</label>
+          </div>
+        </div>
+        <div class="form-group">
+          <label>打印份数</label>
+          <input type="number" id="print-copies" class="form-control" value="1" min="1" max="50">
+        </div>
+        <button type="button" class="btn btn-block" onclick="submitPrintJob()">确认并提交打印</button>
+      </div>
+    </div>
+
+    <!-- TAB 3: HISTORY -->
+    <div id="tab-history-view" class="tab-view" style="display: none;">
+      <div class="card">
+        <div class="card-title">历史任务查询（北京时间自然日历）</div>
+        <div class="toggle-group" style="margin-bottom: 12px;">
+          <button id="range-today" class="toggle-btn active" onclick="setHistoryRange('today')">今天</button>
+          <button id="range-week" class="toggle-btn" onclick="setHistoryRange('week')">本周</button>
+          <button id="range-month" class="toggle-btn" onclick="setHistoryRange('month')">本月</button>
+        </div>
+        <div id="history-list">
+          加载中...
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 4: SERIAL PORT -->
+    <div id="tab-serial-view" class="tab-view" style="display: none;">
+      <div class="card" style="text-align: center; padding: 32px 16px;">
+        <div style="font-size: 48px; margin-bottom: 12px;">🔌</div>
+        <h3 style="margin-bottom: 8px;">串口硬件直连通信</h3>
+        <span class="badge badge-disabled" style="font-size: 14px; padding: 6px 16px;">暂未开放</span>
+        <p style="margin-top: 16px; font-size: 13px; color: #64748b;">
+          基线规则 R06 / M15: 首版串口仅作占位展示，不发送真实串口通信指令。
+        </p>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Bottom Navigation Bar -->
+  <nav class="nav-tabs">
+    <div id="nav-create" class="nav-tab active" onclick="switchNavTab('create')">
+      <div>📄</div>
+      <div>发货任务</div>
+    </div>
+    <div id="nav-preview" class="nav-tab" onclick="switchNavTab('preview')">
+      <div>👁</div>
+      <div>文件预览</div>
+    </div>
+    <div id="nav-history" class="nav-tab" onclick="switchNavTab('history')">
+      <div>📜</div>
+      <div>历史记录</div>
+    </div>
+    <div id="nav-serial" class="nav-tab" onclick="switchNavTab('serial')">
+      <div>🔌</div>
+      <div>串口助手</div>
+    </div>
+  </nav>
+
+  <!-- Name Register Modal -->
+  <div id="name-modal" class="modal">
+    <div class="modal-content">
+      <h3 style="margin-bottom: 12px;">客户端姓名登记</h3>
+      <div class="form-group">
+        <label>请输入您的真实姓名（例如：张三）</label>
+        <input type="text" id="user-name-input" class="form-control" placeholder="姓名">
+      </div>
+      <div style="display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px;">
+        <button type="button" class="btn btn-secondary" onclick="closeNameModal()">取消</button>
+        <button type="button" class="btn" onclick="saveUserName()">保存登记</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
