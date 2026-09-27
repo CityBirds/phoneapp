@@ -141,7 +141,7 @@ class ExecutionWorker {
   async processTask(task) {
     console.log(`[${this.name}] 正在处理发货任务 #${task.id} (${task.model} ${task.device_sn})`);
 
-    const formData = task.form_data || {};
+    const formData = { model: task.model, deviceSn: task.device_sn, ...(task.form_data || {}) };
     const files = task.files || [];
 
     for (const fileRec of files) {

@@ -83,37 +83,40 @@ try {
         if ($doc.Tables.Count -ge 1) {
             $table = $doc.Tables.Item(1)
 
-            # Row 4, Col 2: Customer / shippingLocation
-            if ($shippingLocation -and $table.Rows.Count -ge 4 -and $table.Columns.Count -ge 2) {
-                $table.Cell(4, 2).Range.Text = $shippingLocation
+            # Smart label matching across all cells (handles merged cells robustly)
+            for ($i = 1; $i -lt $table.Range.Cells.Count; $i++) {
+                try {
+                    $cellTxt = $table.Range.Cells.Item($i).Range.Text.Trim("`r", "`a", "`n", " ")
+                    if ($cellTxt -eq "Customer" -and $shippingLocation) {
+                        $table.Range.Cells.Item($i + 1).Range.Text = $shippingLocation
+                    } elseif ($cellTxt -eq "Date:" -and $certDate) {
+                        $table.Range.Cells.Item($i + 1).Range.Text = $certDate
+                    } elseif ($cellTxt -eq "Inst. SN." -and $deviceSn) {
+                        $table.Range.Cells.Item($i + 1).Range.Text = $deviceSn
+                    } elseif ($cellTxt -eq "Instrument" -and $model) {
+                        $table.Range.Cells.Item($i + 1).Range.Text = $model
+                    }
+                } catch {}
             }
 
-            # Row 4, Col 6: Date / certDate
-            if ($certDate -and $table.Rows.Count -ge 4 -and $table.Columns.Count -ge 6) {
-                $table.Cell(4, 6).Range.Text = $certDate
-            }
-
-            # Row 7, Col 2: Inst. SN. / deviceSn
-            if ($deviceSn -and $table.Rows.Count -ge 7 -and $table.Columns.Count -ge 2) {
-                $table.Cell(7, 2).Range.Text = $deviceSn
-            }
-
-            # Row 13 onwards: Test points table rows
+            # Update Test Points in Table 1
             $testPoints = $formData.testPoints
             if ($testPoints -and $testPoints.Count -gt 0) {
-                for ($i = 0; $i -lt $testPoints.Count; $i++) {
-                    $rowIdx = 13 + $i
-                    if ($table.Rows.Count -ge $rowIdx) {
-                        $tp = $testPoints[$i]
-                        $stdVal = if ($null -ne $tp.std) { $tp.std } else { $tp.standard }
-                        $actVal = if ($null -ne $tp.act) { $tp.act } else { $tp.actual }
+                for ($p = 0; $p -lt $testPoints.Count; $p++) {
+                    $ptNumStr = [string]($p + 1)
+                    $tp = $testPoints[$p]
+                    $stdVal = if ($null -ne $tp.std) { $tp.std } else { $tp.standard }
+                    $actVal = if ($null -ne $tp.act) { $tp.act } else { $tp.actual }
 
-                        if ($null -ne $stdVal -and $table.Columns.Count -ge 2) {
-                            $table.Cell($rowIdx, 2).Range.Text = [string]$stdVal
-                        }
-                        if ($null -ne $actVal -and $table.Columns.Count -ge 3) {
-                            $table.Cell($rowIdx, 3).Range.Text = [string]$actVal
-                        }
+                    for ($i = 1; $i -lt $table.Range.Cells.Count - 1; $i++) {
+                        try {
+                            $cText = $table.Range.Cells.Item($i).Range.Text.Trim("`r", "`a", "`n", " ")
+                            if ($cText -eq $ptNumStr) {
+                                if ($null -ne $stdVal) { $table.Range.Cells.Item($i + 1).Range.Text = [string]$stdVal }
+                                if ($null -ne $actVal) { $table.Range.Cells.Item($i + 2).Range.Text = [string]$actVal }
+                                break
+                            }
+                        } catch {}
                     }
                 }
             }
@@ -127,24 +130,18 @@ try {
             $mainRemark = if ($pumpStr) { "SN: $deviceSn $pumpStr" } else { "SN: $deviceSn" }
             $sensorRemarkStr = if ($sensorSn) { "SN: $sensorSn" } else { "" }
 
-            # Update protected Row 2 (Main Device)
-            if ($table.Rows.Count -ge 2) {
-                if ($model -and $table.Columns.Count -ge 3) {
-                    $table.Cell(2, 3).Range.Text = $model
-                }
-                if ($table.Columns.Count -ge 7) {
-                    $table.Cell(2, 7).Range.Text = $mainRemark
-                }
-            }
-
-            # Update protected Row 3 (Sensor)
-            if ($table.Rows.Count -ge 3) {
-                if ($sensorModel -and $table.Columns.Count -ge 3) {
-                    $table.Cell(3, 3).Range.Text = $sensorModel
-                }
-                if ($table.Columns.Count -ge 7) {
-                    $table.Cell(3, 7).Range.Text = $sensorRemarkStr
-                }
+            # Update protected Row 2 (Main Device) and Row 3 (Sensor)
+            for ($r = 2; $r -le $table.Rows.Count; $r++) {
+                try {
+                    $cName = $table.Cell($r, 2).Range.Text.Trim("`r", "`a", "`n", " ")
+                    if ($cName -eq "主设备") {
+                        if ($model) { $table.Cell($r, 3).Range.Text = $model }
+                        $table.Cell($r, 7).Range.Text = $mainRemark
+                    } elseif ($cName -eq "传感器") {
+                        if ($sensorModel) { $table.Cell($r, 3).Range.Text = $sensorModel }
+                        $table.Cell($r, 7).Range.Text = $sensorRemarkStr
+                    }
+                } catch {}
             }
 
             # Update full packingItems array
@@ -180,7 +177,7 @@ try {
                             if ($null -ne $item.unit) { $table.Cell($r, 5).Range.Text = [string]$item.unit }
                             if ($null -ne $item.standard) { $table.Cell($r, 6).Range.Text = [string]$item.standard }
 
-                            # Remarks: Ensure main device and sensor retain updated SN and pump status
+                            # Remarks
                             if ($idx -eq 0) {
                                 $table.Cell($r, 7).Range.Text = $mainRemark
                             } elseif ($idx -eq 1) {
