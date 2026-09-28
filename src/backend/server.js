@@ -83,8 +83,7 @@ cleanupStaleWorkers();
 
 // Default Seed Templates (POA200, DPT810, 990) if empty
 function seedDefaultTemplates() {
-  const count = db.prepare('SELECT count(*) as cnt FROM templates').get().cnt;
-  if (count === 0) {
+  if (true) {
     const samplesDir = path.join(__dirname, '../../samples');
     if (fs.existsSync(samplesDir)) {
       const poaCertPath = path.join(samplesDir, 'POA200证书AP10007513-20260403发南京订单-PSR-12-223(封装）带泵.doc');
@@ -94,7 +93,7 @@ function seedDefaultTemplates() {
 
       if (fs.existsSync(poaCertPath)) {
         db.prepare(`
-          INSERT INTO templates (id, model, type, filename, filepath, file_hash, version, field_mappings, published_at)
+          INSERT OR IGNORE INTO templates (id, model, type, filename, filepath, file_hash, version, field_mappings, published_at)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run('tmpl_poa200_cert', 'POA200', 'cert', path.basename(poaCertPath), poaCertPath, getFileSha256(poaCertPath) || 'hash_poa_cert', 'v1.0', JSON.stringify({
           singleFields: { deviceSn: 'Inst. SN.', ambientTemp: 'Ambient Temperature:', relativeHumidity: 'Relative Humidity' },
@@ -104,7 +103,7 @@ function seedDefaultTemplates() {
 
       if (fs.existsSync(poaPackPath)) {
         db.prepare(`
-          INSERT INTO templates (id, model, type, filename, filepath, file_hash, version, field_mappings, published_at)
+          INSERT OR IGNORE INTO templates (id, model, type, filename, filepath, file_hash, version, field_mappings, published_at)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run('tmpl_poa200_pack', 'POA200', 'packing', path.basename(poaPackPath), poaPackPath, getFileSha256(poaPackPath) || 'hash_poa_pack', 'v1.0', JSON.stringify({
           protectedRows: [1, 2] // row 1: main device, row 2: sensor
@@ -113,7 +112,7 @@ function seedDefaultTemplates() {
 
       if (fs.existsSync(dptCertPath)) {
         db.prepare(`
-          INSERT INTO templates (id, model, type, filename, filepath, file_hash, version, field_mappings, published_at)
+          INSERT OR IGNORE INTO templates (id, model, type, filename, filepath, file_hash, version, field_mappings, published_at)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run('tmpl_dpt810_cert', 'DPT810', 'cert', path.basename(dptCertPath), dptCertPath, getFileSha256(dptCertPath) || 'hash_dpt_cert', 'v1.0', JSON.stringify({
           singleFields: { deviceSn: 'Inst. SN.', ambientTemp: 'Ambient Temperature:', relativeHumidity: 'Relative Humidity' },
@@ -123,7 +122,7 @@ function seedDefaultTemplates() {
 
       if (fs.existsSync(cert990Path)) {
         db.prepare(`
-          INSERT INTO templates (id, model, type, filename, filepath, file_hash, version, field_mappings, published_at)
+          INSERT OR IGNORE INTO templates (id, model, type, filename, filepath, file_hash, version, field_mappings, published_at)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run('tmpl_990_cert', '990', 'cert', path.basename(cert990Path), cert990Path, getFileSha256(cert990Path) || 'hash_990_cert', 'v1.0', JSON.stringify({
           singleFields: { deviceSn: 'Inst. SN.', ambientTemp: 'Ambient Temperature:', relativeHumidity: 'Relative Humidity' },
@@ -241,14 +240,14 @@ app.get('/api/workers', (req, res) => {
 
     return {
       ...w,
-      status: isOnline ? 'ONLINE' : 'OFFLINE',
+      status: isOnline ? (w.status && w.status !== 'ONLINE' ? w.status : 'ONLINE') : 'OFFLINE',
       printers: printersList,
       printerDetails
     };
   });
 
   if (!showAll) {
-    return res.json(workers.filter(w => w.status === 'ONLINE'));
+    return res.json(workers.filter(w => w.status !== 'OFFLINE'));
   }
 
   res.json(workers);
@@ -289,7 +288,7 @@ app.post('/api/templates/upload', requireAdminAccess, upload.single('templateFil
     const now = new Date().toISOString();
 
     db.prepare(`
-      INSERT INTO templates (id, model, type, filename, filepath, file_hash, version, field_mappings, published_at)
+      INSERT OR IGNORE INTO templates (id, model, type, filename, filepath, file_hash, version, field_mappings, published_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, '{}', ?)
     `).run(tmplId, model.toUpperCase(), type, originalName, destPath, sha256, version, now);
 
@@ -410,7 +409,7 @@ app.post('/api/templates/publish', requireAdminAccess, (req, res) => {
   const mappingsJson = JSON.stringify(fieldMappings || {});
 
   db.prepare(`
-    INSERT INTO templates (id, model, type, filename, filepath, file_hash, version, field_mappings, published_at)
+    INSERT OR IGNORE INTO templates (id, model, type, filename, filepath, file_hash, version, field_mappings, published_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       filename = excluded.filename,
@@ -473,9 +472,15 @@ app.post('/api/tasks/submit', (req, res) => {
   const lastTimeMs = targetWorker && targetWorker.last_heartbeat ? new Date(targetWorker.last_heartbeat).getTime() : 0;
   const isWorkerOnline = targetWorker && (nowMs - lastTimeMs) < 15000;
 
-  if (!isWorkerOnline) {
+    if (!isWorkerOnline) {
     return res.status(400).json({
       error: `执行终端 [${workerId}] 当前不在线或心跳超时，拒绝受理任务！(J01, Q03)`
+    });
+  }
+
+  if (targetWorker.status === 'ERROR' || targetWorker.status === 'FAULT') {
+    return res.status(400).json({
+      error: `执行终端 [${workerId}] 处于故障状态 (${targetWorker.status})，无法接收任务！(J01, Q05)`
     });
   }
 
@@ -493,14 +498,24 @@ app.post('/api/tasks/submit', (req, res) => {
   }
 
   const hasPacking = model === 'POA200';
-  const ambientTemp = req.body.ambientTemp || '28.7';
-  const relativeHumidity = req.body.relativeHumidity || '63.2';
+  const ambientTemp = (req.body.ambientTemp !== undefined && req.body.ambientTemp !== null && req.body.ambientTemp !== '') ? String(req.body.ambientTemp) : '28.7';
+  const relativeHumidity = (req.body.relativeHumidity !== undefined && req.body.relativeHumidity !== null && req.body.relativeHumidity !== '') ? String(req.body.relativeHumidity) : '63.2';
+
+  // J03: Extract single source of truth for sensor SN from packing list sensor row if packing exists
+  let resolvedSensorSn = sensorSn;
+  if (hasPacking && Array.isArray(packingItems) && packingItems.length >= 2) {
+    const sensorRow = packingItems[1];
+    if (sensorRow && sensorRow.remark) {
+      const match = sensorRow.remark.match(/SN:\s*([A-Za-z0-9_-]+)/i);
+      resolvedSensorSn = match && match[1] ? match[1] : sensorRow.remark.replace(/^SN:\s*/i, '').trim();
+    }
+  }
 
   const acceptedAt = new Date().toISOString();
   const formData = JSON.stringify({
     shippingLocation,
     sensorModel,
-    sensorSn,
+    sensorSn: resolvedSensorSn,
     ambientTemp,
     relativeHumidity,
     hasPump: hasPacking ? hasPump : false,
