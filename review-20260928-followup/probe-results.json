@@ -1,0 +1,132 @@
+[
+  {
+    "case": "Actual 990 extraction",
+    "count": 1026,
+    "relatedTokens": [
+      {
+        "type": "cell",
+        "text": "NIST Traceable",
+        "tableIdx": 0,
+        "rowIdx": 394,
+        "colIdx": 0
+      },
+      {
+        "type": "cell",
+        "text": "Standard",
+        "tableIdx": 0,
+        "rowIdx": 394,
+        "colIdx": 1
+      },
+      {
+        "type": "cell",
+        "text": "Analyzer",
+        "tableIdx": 0,
+        "rowIdx": 395,
+        "colIdx": 1
+      }
+    ],
+    "nist": {
+      "label": "NIST Traceable Standard",
+      "matchCount": 2,
+      "candidates": [
+        {
+          "matchedLabel": "NIST Traceable",
+          "score": 0.8,
+          "location": {
+            "type": "cell",
+            "tableIdx": 0,
+            "rowIdx": 394,
+            "colIdx": 0
+          },
+          "context": "NIST Traceable",
+          "suggestedValueLocation": {
+            "tableIdx": 0,
+            "rowIdx": 394,
+            "colIdx": 1
+          },
+          "candidateValue": "Standard"
+        },
+        {
+          "matchedLabel": "Standard",
+          "score": 0.8,
+          "location": {
+            "type": "cell",
+            "tableIdx": 0,
+            "rowIdx": 394,
+            "colIdx": 1
+          },
+          "context": "Standard",
+          "suggestedValueLocation": null,
+          "candidateValue": ""
+        }
+      ]
+    },
+    "wrongPpm": {
+      "label": "Analyzer pv ppm",
+      "matchCount": 1,
+      "candidates": [
+        {
+          "matchedLabel": "Analyzer",
+          "score": 0.8,
+          "location": {
+            "type": "cell",
+            "tableIdx": 0,
+            "rowIdx": 395,
+            "colIdx": 1
+          },
+          "context": "Analyzer",
+          "suggestedValueLocation": null,
+          "candidateValue": ""
+        }
+      ]
+    }
+  },
+  {
+    "case": "Real multiline cell would match text",
+    "result": {
+      "label": "NIST Traceable Standard",
+      "matchCount": 1,
+      "candidates": [
+        {
+          "matchedLabel": "NIST Traceable\rStandard ℃ dp",
+          "score": 0.8,
+          "location": {
+            "type": "cell",
+            "tableIdx": 0,
+            "rowIdx": 0,
+            "colIdx": 1
+          },
+          "context": "NIST Traceable\rStandard ℃ dp",
+          "suggestedValueLocation": null,
+          "candidateValue": ""
+        }
+      ]
+    }
+  },
+  {
+    "case": "Add field",
+    "fetchCalls": 0,
+    "data": {
+      "targetLabels": [
+        "NIST Traceable Standard"
+      ],
+      "matchResults": {
+        "NIST Traceable Standard": {
+          "label": "NIST Traceable Standard",
+          "matchCount": 0,
+          "candidates": []
+        }
+      },
+      "docItems": []
+    },
+    "showsBoundWhileUnmatched": true
+  },
+  {
+    "case": "DPT sensor suffix",
+    "filename": "DPT810证书A10009999-20260928发成都订单-PSR-12-223(封装）.doc"
+  },
+  {
+    "case": "Empty matcher fixed",
+    "matchCount": 0
+  }
+]

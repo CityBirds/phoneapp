@@ -1,0 +1,77 @@
+{
+  "commit": "13eb7c5de5614690b7325edcd5bf079325d9713d",
+  "files": [
+    {
+      "path": "src/backend/db.js",
+      "sha256": "f9d758abf20a88c10c97c567b18282ff067e55e39c8595d00f510c40d15d1a25"
+    },
+    {
+      "path": "src/backend/preview.js",
+      "sha256": "4a9f16e025922d69292248a45bfea776b8bacdea7d5b4da15bc0609e870dc095"
+    },
+    {
+      "path": "src/backend/server.js",
+      "sha256": "2d5d8d6b34ef0675ee75e51e8651df88b729cf8efef10e1f4fb43ff072af0acb"
+    },
+    {
+      "path": "src/common/matcher.js",
+      "sha256": "4f339096c02c41dbb0a88944b4ca669ab99bed670f901ad8ddba1b418691c446"
+    },
+    {
+      "path": "src/common/naming.js",
+      "sha256": "e3401c6ed3fd7f0bfdc82dd2e844724ac110d5497a6dbb8951f3fcd357b8d863"
+    },
+    {
+      "path": "src/common/utils.js",
+      "sha256": "fefce525926bca56e72c6ebc6fa345ca1cfc897586e6c29d41657843b17eb9ee"
+    },
+    {
+      "path": "src/frontend/admin.css",
+      "sha256": "358af46da86b14ba71c75b53f24d19fdf122c1f6a9d3b33f3892c47596712cd2"
+    },
+    {
+      "path": "src/frontend/admin.html",
+      "sha256": "e79afdfbdc33ad21e232f3160e19df7ac1cbd10149976ffa9601620f94954337"
+    },
+    {
+      "path": "src/frontend/admin.js",
+      "sha256": "63c4d95f351f8cf2926e84975024c79d8f86295800c9ba75ed66b8ab33d2d7ed"
+    },
+    {
+      "path": "src/frontend/app.js",
+      "sha256": "d36ea70112d705013299ce3312a0e8ec377b6178386632ab875870799a37aad4"
+    },
+    {
+      "path": "src/frontend/index.html",
+      "sha256": "fa2fcbbe2846163218293f45fdb3a3773e0a995cb296d19920c046f10dbf1158"
+    },
+    {
+      "path": "src/frontend/styles.css",
+      "sha256": "84ada391049f757f9e4b3d13e833e3c8dc0e9f1a642ee6d0952e2b35b5debc30"
+    },
+    {
+      "path": "src/worker/conflict.js",
+      "sha256": "b5e6af8bcf27f5d2ed9e3dbb1d70f2d42610155cfa4abb7cf8d4b756aaa927d2"
+    },
+    {
+      "path": "src/worker/doc_processor.ps1",
+      "sha256": "8746907c5ba2bc4a3aebaaa89641ceb82891d8088fcd4797f5c506d3944245af"
+    },
+    {
+      "path": "src/worker/doc_processor.py",
+      "sha256": "03836b8b5fddfaa336ffed3f8594dd21419ab98eb74abcc81209b6504a31ee3e"
+    },
+    {
+      "path": "src/worker/security.js",
+      "sha256": "9879e13770549e06b38271e8bc8fe10aa3dcdd9076fd47395e1ad771a5a7f6bd"
+    },
+    {
+      "path": "src/worker/word_engine.js",
+      "sha256": "8c075253d4248b0f265204ab5e8082f47d4fa436f2251c1f34c29e84ef52c465"
+    },
+    {
+      "path": "src/worker/worker.js",
+      "sha256": "dd20b61677e967f073b910313c4dfaf39d4d51a48f69db922a450dc54c10f2e4"
+    }
+  ]
+}
