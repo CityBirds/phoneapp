@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 1130" width="800" height="1130" font-family="'Times New Roman', 'Arial', 'SimSun', sans-serif">
+  <!-- Paper Background -->
+  <rect x="0" y="0" width="800" height="1130" fill="#ffffff"/>
+  <rect x="40" y="40" width="720" height="1050" fill="#ffffff" stroke="#cbd5e1" stroke-width="1"/>
+
+  <!-- Logo/Header Area -->
+  <text x="60" y="80" font-size="20" font-weight="bold" fill="#003366" font-family="Arial">PhyMetrix</text>
+
+  <!-- Title -->
+  <text x="400" y="125" font-size="22" font-weight="bold" fill="#0f172a" text-anchor="middle">CERTIFICATE OF CONFORMANCE</text>
+  <text x="400" y="150" font-size="13" fill="#475569" text-anchor="middle">Calibration with NIST Traceable Certification</text>
+
+  <!-- Info Table -->
+  <rect x="60" y="180" width="680" height="190" fill="#ffffff" stroke="#1e293b" stroke-width="1"/>
+  
+  <line x1="60" y1="218" x2="740" y2="218" stroke="#1e293b" stroke-width="1"/>
+  <line x1="60" y1="256" x2="740" y2="256" stroke="#1e293b" stroke-width="1"/>
+  <line x1="60" y1="294" x2="740" y2="294" stroke="#1e293b" stroke-width="1"/>
+  <line x1="60" y1="332" x2="740" y2="332" stroke="#1e293b" stroke-width="1"/>
+
+  <line x1="220" y1="180" x2="220" y2="370" stroke="#1e293b" stroke-width="1"/>
+  <line x1="430" y1="180" x2="430" y2="370" stroke="#1e293b" stroke-width="1"/>
+  <line x1="580" y1="180" x2="580" y2="370" stroke="#1e293b" stroke-width="1"/>
+
+  <!-- Row 1 -->
+  <text x="70" y="205" font-size="13" font-weight="bold" fill="#0f172a">Customer</text>
+  <text x="230" y="205" font-size="13" fill="#0f172a">苏州</text>
+  <text x="440" y="205" font-size="13" font-weight="bold" fill="#0f172a">Date:</text>
+  <text x="590" y="205" font-size="13" fill="#0f172a">2026-09-28</text>
+
+  <!-- Row 2 -->
+  <text x="70" y="243" font-size="13" font-weight="bold" fill="#0f172a">Cust Ref #</text>
+  <text x="230" y="243" font-size="13" fill="#0f172a">-</text>
+  <text x="440" y="243" font-size="13" font-weight="bold" fill="#0f172a">Examiner:</text>
+  <text x="590" y="243" font-size="13" fill="#0f172a">TP</text>
+
+  <!-- Row 3 -->
+  <text x="70" y="281" font-size="13" font-weight="bold" fill="#0f172a">Instrument</text>
+  <text x="230" y="281" font-size="13" fill="#0f172a">DPT-990-Ex</text>
+  <text x="440" y="281" font-size="13" font-weight="bold" fill="#0f172a">Inst. SN.</text>
+  <text x="590" y="281" font-size="13" font-weight="bold" fill="#003366">EX-TEST</text>
+
+  <!-- Row 4 -->
+  <text x="70" y="319" font-size="13" font-weight="bold" fill="#0f172a">Ambient Temperature:</text>
+  <text x="230" y="319" font-size="13" fill="#0f172a">23.5 ℃</text>
+  <text x="440" y="319" font-size="13" font-weight="bold" fill="#0f172a">Relative Humidity</text>
+  <text x="590" y="319" font-size="13" fill="#0f172a">51.6%RH</text>
+
+  <!-- Row 5 -->
+  <text x="70" y="357" font-size="13" font-weight="bold" fill="#0f172a">Comments</text>
+  <text x="230" y="357" font-size="13" fill="#0f172a">Observations: PASSED</text>
+
+  <!-- Test Points Table Header -->
+  <rect x="60" y="395" width="680" height="35" fill="#f1f5f9" stroke="#1e293b" stroke-width="1"/>
+  <line x1="180" y1="395" x2="180" y2="430" stroke="#1e293b" stroke-width="1"/>
+  <line x1="520" y1="395" x2="520" y2="430" stroke="#1e293b" stroke-width="1"/>
+
+  <text x="120" y="418" font-size="13" font-weight="bold" fill="#0f172a" text-anchor="middle">Test point Number</text>
+  <text x="350" y="418" font-size="13" font-weight="bold" fill="#0f172a" text-anchor="middle">NIST Traceable Standard</text>
+  <text x="630" y="418" font-size="13" font-weight="bold" fill="#0f172a" text-anchor="middle">Analyzer Under Test</text>
+
+  <!-- Test Rows -->
+  
+      <rect x="60" y="430" width="680" height="30" fill="#ffffff" stroke="#1e293b" stroke-width="1"/>
+      <line x1="180" y1="430" x2="180" y2="460" stroke="#1e293b" stroke-width="1"/>
+      <line x1="520" y1="430" x2="520" y2="460" stroke="#1e293b" stroke-width="1"/>
+      <text x="120" y="450" font-size="13" fill="#0f172a" text-anchor="middle">1</text>
+      <text x="350" y="450" font-size="13" fill="#0f172a" text-anchor="middle">9.96 ppm (N2 balance)</text>
+      <text x="630" y="450" font-size="13" fill="#0f172a" font-weight="600" text-anchor="middle">9.93 ppm</text>
+    
+
+  <!-- Statement Paragraph -->
+  <text x="60" y="500" font-size="12" fill="#334155">
+    We hereby certify that the analyzer detailed above has been tested and calibrated by the
+  </text>
+  <text x="60" y="520" font-size="12" fill="#334155">
+    Undersigned, and its performance was found to meet our specifications unless noted otherwise in the comments section.
+  </text>
+
+  <!-- Signatures -->
+  <text x="60" y="570" font-size="13" font-weight="bold" fill="#0f172a">For and on behalf of PhyMetrix Ltd</text>
+  <text x="60" y="610" font-size="13" fill="#334155">For Quality Assurance Manager</text>
+
+  <!-- Footer -->
+  <line x1="60" y1="1040" x2="740" y2="1040" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="400" y="1065" font-size="11" fill="#64748b" text-anchor="middle">PhyMetrix Ltd. 120 West Beaver Creek Road #19, Richmond Hill, ON L4B 1L2 tel: (905)762-1616</text>
+</svg>

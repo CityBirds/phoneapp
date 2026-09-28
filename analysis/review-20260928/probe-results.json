@@ -1,0 +1,178 @@
+[
+  {
+    "probe": "DPT810 rows",
+    "actual": 2,
+    "expected": 10
+  },
+  {
+    "probe": "Added packing item name",
+    "actual": "自选辅料",
+    "nameEditorPresent": false
+  },
+  {
+    "probe": "Conflicting serial and offline worker submission",
+    "actual": [
+      {
+        "url": "http://test.invalid/api/tasks/submit",
+        "body": {
+          "reqId": "req_1790558926189_me167i",
+          "clientId": "",
+          "clientName": "",
+          "workerId": "offline-test",
+          "model": "POA200",
+          "deviceSn": "NEW-SN",
+          "shippingLocation": "苏州",
+          "sensorModel": "PSR-12-223(封装）",
+          "sensorSn": "NEW-SENSOR",
+          "hasPump": true,
+          "certDate": "2026-09-28",
+          "testPoints": [
+            {
+              "point": 1,
+              "std": "9.96",
+              "act": "9.88"
+            },
+            {
+              "point": 2,
+              "std": "",
+              "act": ""
+            }
+          ],
+          "packingItems": [
+            {
+              "index": 1,
+              "name": "主设备",
+              "spec": "POA200",
+              "count": 1,
+              "unit": "台",
+              "standard": "是",
+              "remark": "SN: AP10007513带泵",
+              "isProtectedMain": true
+            },
+            {
+              "index": 2,
+              "name": "传感器",
+              "spec": "PMT210SEN",
+              "count": 1,
+              "unit": "支",
+              "standard": "是",
+              "remark": "SN: 201N200258",
+              "isProtectedSensor": true
+            },
+            {
+              "index": 3,
+              "name": "仪器包装箱",
+              "spec": "ABS",
+              "count": 1,
+              "unit": "个",
+              "standard": "是",
+              "remark": ""
+            },
+            {
+              "index": 4,
+              "name": "用户手册",
+              "spec": "中英文",
+              "count": 1,
+              "unit": "份",
+              "standard": "是",
+              "remark": ""
+            },
+            {
+              "index": 5,
+              "name": "出厂合格证",
+              "spec": "中英文",
+              "count": 1,
+              "unit": "份",
+              "standard": "是",
+              "remark": ""
+            },
+            {
+              "index": 6,
+              "name": "电源适配器",
+              "spec": "902B",
+              "count": 1,
+              "unit": "个",
+              "standard": "是",
+              "remark": ""
+            },
+            {
+              "index": 7,
+              "name": "USB通讯线",
+              "spec": "标准",
+              "count": 1,
+              "unit": "根",
+              "standard": "是",
+              "remark": ""
+            },
+            {
+              "index": 8,
+              "name": "标定指示卡",
+              "spec": "标准",
+              "count": 1,
+              "unit": "张",
+              "standard": "是",
+              "remark": ""
+            },
+            {
+              "index": 9,
+              "name": "F46测试管",
+              "spec": "外径1/8英寸",
+              "count": 1,
+              "unit": "根",
+              "standard": "是",
+              "remark": ""
+            },
+            {
+              "index": 10,
+              "name": "自选辅料",
+              "spec": "标准配件",
+              "count": 1,
+              "unit": "件",
+              "standard": "否",
+              "remark": ""
+            }
+          ]
+        }
+      }
+    ],
+    "expected": "Reject invalid worker and conflicting device serial before submission"
+  },
+  {
+    "probe": "Blank cell matched to absent label",
+    "actual": {
+      "label": "AbsentField",
+      "matchCount": 1,
+      "candidates": [
+        {
+          "matchedLabel": "",
+          "score": 0.8,
+          "location": {
+            "type": "cell",
+            "tableIdx": 0,
+            "rowIdx": 0,
+            "colIdx": 0
+          },
+          "context": "",
+          "suggestedValueLocation": null,
+          "candidateValue": ""
+        }
+      ]
+    },
+    "expected": "zero candidates"
+  },
+  {
+    "probe": "Invalid Word still produces preview",
+    "actual": [
+      "/previews/preview_audit_cert-1.svg"
+    ],
+    "hardcodedTemperature": true,
+    "hardcodedHumidity": true,
+    "expected": "Reject invalid Word, render actual valid document only"
+  },
+  {
+    "probe": "Current upload middleware filename",
+    "expected": "990-Ex-EX10260902发货证书.doc",
+    "actual": "990-Ex-EX10260902åè´§è¯ä¹¦.doc",
+    "equal": false
+  }
+]
