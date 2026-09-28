@@ -87,19 +87,30 @@ try {
 
             # Smart label matching across all cells (handles merged cells robustly)
             # Customer is strictly PRESERVED as static template original (J02, J07)
+            $foundDate = $false
+            $foundSn = $false
+            $foundModel = $false
+            $foundTemp = $false
+            $foundHumidity = $false
+
             for ($i = 1; $i -lt $table.Range.Cells.Count; $i++) {
                 try {
                     $cellTxt = $table.Range.Cells.Item($i).Range.Text.Trim("`r", "`a", "`n", " ")
-                    if ($cellTxt -eq "Date:" -and $certDate) {
+                    if (-not $foundDate -and $cellTxt -eq "Date:" -and $certDate) {
                         $table.Range.Cells.Item($i + 1).Range.Text = $certDate
-                    } elseif ($cellTxt -eq "Inst. SN." -and $deviceSn) {
+                        $foundDate = $true
+                    } elseif (-not $foundSn -and $cellTxt -eq "Inst. SN." -and $deviceSn) {
                         $table.Range.Cells.Item($i + 1).Range.Text = $deviceSn
-                    } elseif ($cellTxt -eq "Instrument" -and $model) {
+                        $foundSn = $true
+                    } elseif (-not $foundModel -and $cellTxt -eq "Instrument" -and $model) {
                         $table.Range.Cells.Item($i + 1).Range.Text = $model
-                    } elseif (($cellTxt -like "*Ambient Temperature*" -or $cellTxt -like "*Ambient Temp*") -and $ambientTemp) {
+                        $foundModel = $true
+                    } elseif (-not $foundTemp -and ($cellTxt -like "*Ambient Temperature*" -or $cellTxt -like "*Ambient Temp*") -and $ambientTemp) {
                         $table.Range.Cells.Item($i + 1).Range.Text = if ($ambientTemp -like "*℃*") { $ambientTemp } else { "$ambientTemp ℃" }
-                    } elseif (($cellTxt -like "*Relative Humidity*" -or $cellTxt -like "*RH*") -and $relativeHumidity) {
+                        $foundTemp = $true
+                    } elseif (-not $foundHumidity -and ($cellTxt -eq "Relative Humidity" -or $cellTxt -like "*Relative Humidity*") -and $relativeHumidity) {
                         $table.Range.Cells.Item($i + 1).Range.Text = if ($relativeHumidity -like "*%RH*") { $relativeHumidity } else { "$relativeHumidity %RH" }
+                        $foundHumidity = $true
                     }
                 } catch {}
             }
