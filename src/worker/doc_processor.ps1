@@ -60,9 +60,11 @@ try {
     # Extract form fields
     $model = if ($formData.model) { [string]$formData.model } else { "" }
     $deviceSn = if ($formData.deviceSn) { [string]$formData.deviceSn } else { "" }
-    $shippingLocation = if ($formData.shippingLocation) { [string]$formData.shippingLocation } elseif ($formData.customer) { [string]$formData.customer } else { "" }
+    $shippingLocation = if ($formData.shippingLocation) { [string]$formData.shippingLocation } else { "" }
     $sensorModel = if ($formData.sensorModel) { [string]$formData.sensorModel } else { "" }
     $sensorSn = if ($formData.sensorSn) { [string]$formData.sensorSn } else { "" }
+    $ambientTemp = if ($formData.ambientTemp) { [string]$formData.ambientTemp } else { "28.7" }
+    $relativeHumidity = if ($formData.relativeHumidity) { [string]$formData.relativeHumidity } else { "63.2" }
     $certDate = if ($formData.certDate) { [string]$formData.certDate } elseif ($formData.date) { [string]$formData.date } else { "" }
     $hasPump = if ($null -ne $formData.hasPump) { [bool]$formData.hasPump } else { $true }
 
@@ -84,17 +86,20 @@ try {
             $table = $doc.Tables.Item(1)
 
             # Smart label matching across all cells (handles merged cells robustly)
+            # Customer is strictly PRESERVED as static template original (J02, J07)
             for ($i = 1; $i -lt $table.Range.Cells.Count; $i++) {
                 try {
                     $cellTxt = $table.Range.Cells.Item($i).Range.Text.Trim("`r", "`a", "`n", " ")
-                    if ($cellTxt -eq "Customer" -and $shippingLocation) {
-                        $table.Range.Cells.Item($i + 1).Range.Text = $shippingLocation
-                    } elseif ($cellTxt -eq "Date:" -and $certDate) {
+                    if ($cellTxt -eq "Date:" -and $certDate) {
                         $table.Range.Cells.Item($i + 1).Range.Text = $certDate
                     } elseif ($cellTxt -eq "Inst. SN." -and $deviceSn) {
                         $table.Range.Cells.Item($i + 1).Range.Text = $deviceSn
                     } elseif ($cellTxt -eq "Instrument" -and $model) {
                         $table.Range.Cells.Item($i + 1).Range.Text = $model
+                    } elseif (($cellTxt -like "*Ambient Temperature*" -or $cellTxt -like "*Ambient Temp*") -and $ambientTemp) {
+                        $table.Range.Cells.Item($i + 1).Range.Text = if ($ambientTemp -like "*℃*") { $ambientTemp } else { "$ambientTemp ℃" }
+                    } elseif (($cellTxt -like "*Relative Humidity*" -or $cellTxt -like "*RH*") -and $relativeHumidity) {
+                        $table.Range.Cells.Item($i + 1).Range.Text = if ($relativeHumidity -like "*%RH*") { $relativeHumidity } else { "$relativeHumidity %RH" }
                     }
                 } catch {}
             }

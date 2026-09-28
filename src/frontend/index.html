@@ -54,8 +54,9 @@
         <div class="form-group">
           <label>设备型号</label>
           <select id="model-select" class="form-control" onchange="onModelChange()">
-            <option value="POA200">POA200 便携式露点仪</option>
-            <option value="DPT810">DPT810 露点变送器</option>
+            <option value="POA200">POA200 便携式露点仪 (带清单)</option>
+            <option value="DPT810">DPT810 露点变送器 (仅证书)</option>
+            <option value="990">990-Ex 防爆露点仪 (仅证书)</option>
           </select>
         </div>
 
@@ -72,22 +73,26 @@
         <div class="card-title">共享与公共字段信息</div>
         <div class="form-group">
           <label>设备序列号 (Inst. SN.)</label>
-          <input type="text" id="device-sn" class="form-control" value="AP10007513" placeholder="例如: AP10007513">
+          <input type="text" id="device-sn" class="form-control" value="00001234" placeholder="例如: 00001234">
         </div>
-        <div class="form-group">
-          <label>发货目的地 (Customer)</label>
-          <input type="text" id="shipping-location" class="form-control" value="南京" placeholder="例如: 南京">
+        <div class="form-group" id="location-group">
+          <label>发货目的地</label>
+          <input type="text" id="shipping-location" class="form-control" value="苏州" placeholder="例如: 苏州">
         </div>
-        <div class="form-group">
-          <label>传感器型号</label>
+        <div class="form-group" id="sensor-model-group">
+          <label>传感器型号 (仅用于文件命名)</label>
           <select id="sensor-model" class="form-control">
             <option value="PSR-12-223(封装）">PSR-12-223(封装）</option>
             <option value="PMT210SEN">PMT210SEN</option>
           </select>
         </div>
         <div class="form-group">
-          <label>传感器序号</label>
-          <input type="text" id="sensor-sn" class="form-control" value="201N200258" placeholder="例如: 201N200258">
+          <label>环境温度 (Ambient Temperature)</label>
+          <input type="text" id="ambient-temp" class="form-control" value="28.7" placeholder="例如: 28.7">
+        </div>
+        <div class="form-group">
+          <label>相对湿度 (Relative Humidity)</label>
+          <input type="text" id="relative-humidity" class="form-control" value="63.2" placeholder="例如: 63.2">
         </div>
         <div class="form-group">
           <label>证书生成日期</label>
@@ -116,7 +121,7 @@
       </div>
 
       <!-- Packing List Table Card -->
-      <div class="card">
+      <div class="card" id="packing-section">
         <div class="card-title">
           <span>装箱清单明细管理</span>
           <button type="button" class="btn btn-sm" onclick="addPackingRow()">+ 添加物料</button>

@@ -194,9 +194,14 @@
               <h3 id="matcher-doc-title">匹配分析结果</h3>
               <small id="matcher-doc-meta" style="color: #64748b;"></small>
             </div>
-            <button type="button" class="btn btn-success" onclick="saveMatchedRules()">
-              💾 确认并发布字段映射规则
-            </button>
+            <div style="display: flex; gap: 8px;">
+              <button type="button" class="btn btn-secondary" onclick="saveMatchedRules(true)">
+                📝 保存草稿
+              </button>
+              <button type="button" class="btn btn-success" onclick="saveMatchedRules(false)">
+                💾 确认并正式发布
+              </button>
+            </div>
           </div>
           <div class="table-responsive">
             <table class="admin-table">

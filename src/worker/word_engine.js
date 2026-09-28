@@ -99,6 +99,14 @@ function generateWordDocument(templatePath, outputPath, taskData) {
     } catch (e) {}
   }
 
+  if (!processedSuccessfully) {
+    // Remove unmodified raw template copy if processing failed (J14, Q38)
+    if (fs.existsSync(outputPath)) {
+      try { fs.unlinkSync(outputPath); } catch (e) {}
+    }
+    throw new Error(`Word document processing failed: Neither PowerShell COM nor Python script completed writeback successfully! (J14, Q38)`);
+  }
+
   // Verify R17: Source template must remain completely unchanged
   const postTemplateHash = getFileSha256(templatePath);
   if (initialTemplateHash !== postTemplateHash) {

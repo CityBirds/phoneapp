@@ -251,11 +251,19 @@ function onModelChange() {
   state.currentModel = model;
 
   const pumpGroup = document.getElementById('pump-group');
-  if (model === 'DPT810') {
-    pumpGroup.style.display = 'none';
-    state.hasPump = false;
+  const packingSection = document.getElementById('packing-section');
+  const sensorModelGroup = document.getElementById('sensor-model-group');
+
+  if (model === 'POA200') {
+    if (pumpGroup) pumpGroup.style.display = 'block';
+    if (packingSection) packingSection.style.display = 'block';
+    if (sensorModelGroup) sensorModelGroup.style.display = 'block';
   } else {
-    pumpGroup.style.display = 'block';
+    // DPT810 and 990 have CERTIFICATE ONLY (J09)
+    if (pumpGroup) pumpGroup.style.display = 'none';
+    if (packingSection) packingSection.style.display = 'none';
+    if (sensorModelGroup) sensorModelGroup.style.display = 'none';
+    state.hasPump = false;
   }
 
   renderTestPoints();
@@ -269,43 +277,62 @@ function setPumpOption(hasPump) {
 
 function renderTestPoints() {
   const tbody = document.getElementById('test-points-body');
+  if (!tbody) return;
+
   if (state.currentModel === 'POA200') {
     tbody.innerHTML = `
       <tr>
-        <td>点 1 (ppm)</td>
-        <td><input type="text" id="tp-std-1" value="9.96(N2 balance)"></td>
-        <td><input type="text" id="tp-act-1" value="9.93"></td>
+        <td>测试点 1</td>
+        <td><input type="text" id="tp-std-1" class="form-control" value="9.96 ppm (N2 balance)"></td>
+        <td><input type="text" id="tp-act-1" class="form-control" value="9.88"></td>
       </tr>
     `;
-  } else {
-    tbody.innerHTML = `
+  } else if (state.currentModel === 'DPT810') {
+    // 10 test points for DPT810 (Standard: ℃ dp, Measured: mA) - J08
+    const stds = [-60.0, -50.0, -40.0, -30.0, -20.0, -10.0, 0.0, 10.0, 20.0, 30.0];
+    const acts = [6.61, 7.65, 8.78, 10.17, 11.30, 12.68, 13.81, 14.89, 16.06, 18.83];
+
+    tbody.innerHTML = stds.map((s, i) => `
       <tr>
-        <td>点 1 (-60℃)</td>
-        <td><input type="text" id="tp-std-1" value="4.00 mA"></td>
-        <td><input type="text" id="tp-act-1" value="3.99 mA"></td>
+        <td>测试点 ${i + 1}</td>
+        <td><input type="text" id="tp-std-${i + 1}" class="form-control" value="${s} ℃ dp"></td>
+        <td><input type="text" id="tp-act-${i + 1}" class="form-control" value="${acts[i]} mA"></td>
       </tr>
+    `).join('');
+  } else if (state.currentModel === '990') {
+    // 9 test points for 990-Ex (Header: Analyzer ℃ dp) - J08
+    const stds = [-80.75, -70.95, -60.42, -52.43, -42.15, -31.76, -21.24, -12.56, 12.19];
+    const acts = [-80.2, -70.3, -59.8, -52.0, -41.9, -31.5, -21.2, -11.9, 12.6];
+
+    tbody.innerHTML = stds.map((s, i) => `
       <tr>
-        <td>点 2 (+20℃)</td>
-        <td><input type="text" id="tp-std-2" value="20.00 mA"></td>
-        <td><input type="text" id="tp-act-2" value="19.98 mA"></td>
+        <td>测试点 ${i + 1}</td>
+        <td><input type="text" id="tp-std-${i + 1}" class="form-control" value="${s} ℃ dp"></td>
+        <td><input type="text" id="tp-act-${i + 1}" class="form-control" value="${acts[i]} ℃ dp"></td>
       </tr>
-    `;
+    `).join('');
   }
 }
 
 function renderPackingTable() {
   const tbody = document.getElementById('packing-items-body');
+  if (!tbody) return;
+
   tbody.innerHTML = state.packingItems.map((item, idx) => {
     const isProtected = idx < 2;
+    const nameInput = isProtected
+      ? `${item.name} <span class="badge badge-warning">保护行</span>`
+      : `<input type="text" class="form-control" value="${item.name}" placeholder="物料名称" onchange="updatePackingItem(${idx}, 'name', this.value)">`;
+
     return `
       <tr>
         <td>${item.index}</td>
-        <td>${item.name} ${isProtected ? '<span class="badge badge-warning">保护行</span>' : ''}</td>
-        <td><input type="text" value="${item.spec}" onchange="updatePackingItem(${idx}, 'spec', this.value)"></td>
-        <td><input type="number" style="width: 50px;" value="${item.count}" onchange="updatePackingItem(${idx}, 'count', this.value)"></td>
-        <td><input type="text" style="width: 50px;" value="${item.unit}" onchange="updatePackingItem(${idx}, 'unit', this.value)"></td>
+        <td>${nameInput}</td>
+        <td><input type="text" class="form-control" value="${item.spec}" onchange="updatePackingItem(${idx}, 'spec', this.value)"></td>
+        <td><input type="number" class="form-control" style="width: 60px;" value="${item.count}" onchange="updatePackingItem(${idx}, 'count', this.value)"></td>
+        <td><input type="text" class="form-control" style="width: 60px;" value="${item.unit}" onchange="updatePackingItem(${idx}, 'unit', this.value)"></td>
         <td>${item.standard}</td>
-        <td><input type="text" value="${item.remark}" onchange="updatePackingItem(${idx}, 'remark', this.value)"></td>
+        <td><input type="text" class="form-control" value="${item.remark}" onchange="updatePackingItem(${idx}, 'remark', this.value)"></td>
         <td>
           ${isProtected 
             ? '<span style="color: #94a3b8; font-size: 12px;">不可删</span>' 
@@ -324,7 +351,7 @@ function addPackingRow() {
   const newIdx = state.packingItems.length + 1;
   state.packingItems.push({
     index: newIdx,
-    name: '自选辅料',
+    name: '', // Empty name by default - user MUST enter custom name (J04)
     spec: '标准配件',
     count: 1,
     unit: '件',
@@ -351,22 +378,56 @@ async function submitTaskForm() {
 
   const model = document.getElementById('model-select').value;
   const deviceSn = document.getElementById('device-sn').value.trim();
-  const shippingLocation = document.getElementById('shipping-location').value.trim();
-  const sensorModel = document.getElementById('sensor-model').value;
-  const sensorSn = document.getElementById('sensor-sn').value.trim();
+  const shippingLocation = document.getElementById('shipping-location') ? document.getElementById('shipping-location').value.trim() : '苏州';
+  const sensorModelEl = document.getElementById('sensor-model');
+  const sensorModel = sensorModelEl ? sensorModelEl.value : 'PMT210SEN';
+
+  const ambientTempEl = document.getElementById('ambient-temp');
+  const relativeHumidityEl = document.getElementById('relative-humidity');
+  const ambientTemp = ambientTempEl ? ambientTempEl.value.trim() : '28.7';
+  const relativeHumidity = relativeHumidityEl ? relativeHumidityEl.value.trim() : '63.2';
   const certDate = document.getElementById('cert-date').value;
 
   if (!deviceSn) return alert('请填写设备序列号 (Inst. SN.)');
-  if (!shippingLocation) return alert('请填写发货目的地 (Customer)');
 
+  const hasPacking = model === 'POA200';
+
+  // Extract single source sensor SN from packing list sensor row if packing exists (J03)
+  let sensorSn = '009876';
+  if (hasPacking && state.packingItems.length >= 2) {
+    const sensorRow = state.packingItems[1];
+    if (sensorRow.remark) {
+      const match = sensorRow.remark.match(/SN:\s*([A-Za-z0-9_-]+)/i) || [null, sensorRow.remark];
+      sensorSn = match[1] || sensorRow.remark;
+    }
+  }
+
+  // Validate custom material names in packing list (J04)
+  if (hasPacking) {
+    for (let i = 0; i < state.packingItems.length; i++) {
+      const item = state.packingItems[i];
+      if (!item.name || !item.name.trim()) {
+        return alert(`第 ${i + 1} 行物料名称不能为空，请输入有效的自定义物料名称！`);
+      }
+    }
+    // Update main device SN in protected row 1
+    state.packingItems[0].remark = `SN: ${deviceSn}${state.hasPump ? '带泵' : ''}`;
+  }
+
+  // Gather dynamic test points (J08)
   const testPoints = [];
-  const tpStd1 = document.getElementById('tp-std-1');
-  const tpAct1 = document.getElementById('tp-act-1');
-  if (tpStd1 && tpAct1) testPoints.push({ point: 1, std: tpStd1.value, act: tpAct1.value });
-
-  const tpStd2 = document.getElementById('tp-std-2');
-  const tpAct2 = document.getElementById('tp-act-2');
-  if (tpStd2 && tpAct2) testPoints.push({ point: 2, std: tpStd2.value, act: tpAct2.value });
+  const totalPts = model === 'POA200' ? 1 : (model === 'DPT810' ? 10 : 9);
+  for (let i = 1; i <= totalPts; i++) {
+    const stdEl = document.getElementById(`tp-std-${i}`);
+    const actEl = document.getElementById(`tp-act-${i}`);
+    if (stdEl && actEl) {
+      testPoints.push({
+        point: i,
+        std: stdEl.value.trim(),
+        act: actEl.value.trim()
+      });
+    }
+  }
 
   const reqId = 'req_' + Date.now() + '_' + Math.random().toString(36).substring(2, 8);
 
@@ -380,10 +441,12 @@ async function submitTaskForm() {
     shippingLocation,
     sensorModel,
     sensorSn,
-    hasPump: state.hasPump,
+    ambientTemp,
+    relativeHumidity,
+    hasPump: hasPacking ? state.hasPump : false,
     certDate,
     testPoints,
-    packingItems: state.packingItems
+    packingItems: hasPacking ? state.packingItems : []
   };
 
   try {

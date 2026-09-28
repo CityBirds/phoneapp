@@ -1,7 +1,12 @@
-const test = require('node:test');
-const assert = require('node:assert');
 const path = require('path');
 const fs = require('fs');
+
+// Set isolated test database path before loading backend (J15, Q04)
+const testDbPath = path.resolve(__dirname, `../data/phoneapp_e2e_test_${Date.now()}.db`);
+process.env.DB_PATH = testDbPath;
+
+const test = require('node:test');
+const assert = require('node:assert');
 const app = require('../src/backend/server');
 const ExecutionWorker = require('../src/worker/worker');
 
@@ -16,6 +21,7 @@ test.before((done) => {
 
 test.after(() => {
   if (server) server.close();
+  try { if (fs.existsSync(testDbPath)) fs.unlinkSync(testDbPath); } catch (e) {}
 });
 
 test('End-to-End Task Flow, Worker Execution, Preview & History (C01-C14, M01-M15, E01-E11)', async () => {

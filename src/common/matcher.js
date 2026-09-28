@@ -22,9 +22,19 @@ function findFieldCandidates(targetLabel, docItems) {
   const normTarget = normalizeText(targetLabel);
   const candidates = [];
 
+  if (!normTarget || !docItems || !Array.isArray(docItems)) {
+    return {
+      label: targetLabel || '',
+      matchCount: 0,
+      candidates: []
+    };
+  }
+
   for (let i = 0; i < docItems.length; i++) {
     const item = docItems[i];
-    const normText = normalizeText(item.text);
+    const normText = normalizeText(item?.text);
+
+    if (!normText) continue; // Empty cells/text do NOT match anything (Q30)
 
     if (normText.includes(normTarget) || normTarget.includes(normText)) {
       // Find candidate value position (e.g., adjacent cell or next paragraph)

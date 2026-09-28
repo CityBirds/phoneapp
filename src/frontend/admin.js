@@ -289,55 +289,98 @@ async function runTemplateAnalyze() {
     document.getElementById('matcher-doc-title').innerText = `模板字段位置匹配清单: ${data.template.filename}`;
     document.getElementById('matcher-doc-meta').innerText = `型号: ${data.template.model} | 提取文本结构项: ${data.docItemsCount} 项`;
 
-    const matchResults = data.matchResults || {};
-    const keys = Object.keys(matchResults);
-
-    tbody.innerHTML = keys.map(key => {
-      const match = matchResults[key];
-      const best = match && match.candidates && match.candidates.length > 0 ? match.candidates[0] : null;
-
-      if (best) {
-        const locStr = best.location.type === 'cell' 
-          ? `单元格 [第 ${best.location.rowIdx + 1} 行, 第 ${best.location.colIdx + 1} 列]`
-          : `段落 #${best.location.paragraphIdx + 1}`;
-
-        const valLocStr = best.suggestedValueLocation 
-          ? (best.suggestedValueLocation.tableIdx !== undefined 
-              ? `相邻单元格 [第 ${best.suggestedValueLocation.rowIdx + 1} 行, 第 ${best.suggestedValueLocation.colIdx + 1} 列]` 
-              : `段落 #${best.suggestedValueLocation.paragraphIdx + 1}`)
-          : '自动右侧对齐';
-
-        return `
-          <tr>
-            <td><b style="color: #0f172a; font-size: 14px;">${key}</b></td>
-            <td><span class="badge badge-success">${Math.round(best.score * 100)}% 命中</span></td>
-            <td>${locStr}</td>
-            <td><b style="color: #0284c7;">${valLocStr}</b></td>
-            <td><code>${best.candidateValue || '待输入'}</code></td>
-            <td><span class="badge badge-success">已匹配候选</span></td>
-          </tr>
-        `;
-      } else {
-        return `
-          <tr>
-            <td><b>${key}</b></td>
-            <td><span class="badge badge-warning">待配置</span></td>
-            <td colspan="3" style="color: #94a3b8;">未自动定位，将在渲染时按标准表结构辅助排版</td>
-            <td><span class="badge badge-warning">自动兼容</span></td>
-          </tr>
-        `;
-      }
-    }).join('');
+    renderMatcherTable();
   } catch (err) {
     tbody.innerHTML = `<tr><td colspan="6">分析失败: ${err.message}</td></tr>`;
   }
 }
 
-async function saveMatchedRules() {
+function renderMatcherTable() {
+  if (!currentMatcherData) return;
+  const tbody = document.getElementById('matcher-tbody');
+  const matchResults = currentMatcherData.matchResults || {};
+  const targetLabels = currentMatcherData.targetLabels || Object.keys(matchResults);
+
+  tbody.innerHTML = targetLabels.map((key, idx) => {
+    const match = matchResults[key];
+    const candidates = match && match.candidates ? match.candidates : [];
+    const best = candidates.length > 0 ? candidates[0] : null;
+
+    let candidateOptions = '<option value="">-- 手动绑定 / 无匹配 --</option>';
+    candidates.forEach((c, cIdx) => {
+      const labelStr = c.location.type === 'cell' 
+        ? `[单元格 R${c.location.rowIdx + 1}C${c.location.colIdx + 1}] ${c.matchedLabel}` 
+        : `[段落 #${c.location.paragraphIdx + 1}] ${c.matchedLabel}`;
+      candidateOptions += `<option value="${cIdx}" ${cIdx === 0 ? 'selected' : ''}>${labelStr} (${Math.round(c.score * 100)}% 命中)</option>`;
+    });
+
+    const isBound = best !== null;
+
+    return `
+      <tr>
+        <td><b style="color: #0f172a; font-size: 14px;">${key}</b></td>
+        <td><span class="badge ${isBound ? 'badge-success' : 'badge-warning'}">${isBound ? Math.round(best.score * 100) + '% 命中' : '待配置'}</span></td>
+        <td>
+          <select class="form-control" style="font-size: 12px;" onchange="updateCandidateChoice('${key}', this.value)">
+            ${candidateOptions}
+          </select>
+        </td>
+        <td><b style="color: #0284c7;">${best && best.candidateValue ? best.candidateValue : '已绑定'}</b></td>
+        <td><code>${best ? best.context : '未命中'}</code></td>
+        <td style="text-align: right;">
+          <button type="button" class="btn btn-sm btn-danger" onclick="deleteMatcherField('${key}')">🗑️ 删除字段</button>
+        </td>
+      </tr>
+    `;
+  }).join('') + `
+    <tr>
+      <td colspan="6" style="background: #f8fafc; text-align: center; padding: 12px;">
+        <button type="button" class="btn btn-sm btn-outline" onclick="addMatcherField()">➕ 添加需要配置的字段</button>
+      </td>
+    </tr>
+  `;
+}
+
+function addMatcherField() {
+  const fieldName = prompt('请输入新新增要配置的字段名称:');
+  if (!fieldName || !fieldName.trim()) return;
+
+  const key = fieldName.trim();
+  if (!currentMatcherData.targetLabels) currentMatcherData.targetLabels = [];
+  if (!currentMatcherData.targetLabels.includes(key)) {
+    currentMatcherData.targetLabels.push(key);
+    currentMatcherData.matchResults[key] = { label: key, matchCount: 0, candidates: [] };
+  }
+  renderMatcherTable();
+}
+
+function deleteMatcherField(key) {
+  if (confirm(`确定要删除配置字段 [${key}] 吗？`)) {
+    currentMatcherData.targetLabels = currentMatcherData.targetLabels.filter(k => k !== key);
+    delete currentMatcherData.matchResults[key];
+    renderMatcherTable();
+  }
+}
+
+function updateCandidateChoice(key, candidateIdx) {
+  // Candidate choice update handler
+}
+
+async function saveMatchedRules(isDraft = false) {
   if (!currentMatcherData) return alert('当前没有可保存的匹配结果');
 
   const tmpl = currentMatcherData.template;
   const matchResults = currentMatcherData.matchResults || {};
+
+  const singleFields = currentMatcherData.targetLabels.map(lbl => {
+    const res = matchResults[lbl];
+    const best = res && res.candidates && res.candidates.length > 0 ? res.candidates[0] : null;
+    return {
+      label: lbl,
+      status: best ? 'bound' : 'unbound',
+      location: best ? best.location : null
+    };
+  });
 
   try {
     const res = await fetch(`${API_BASE}/api/templates/publish`, {
@@ -353,15 +396,18 @@ async function saveMatchedRules() {
         filename: tmpl.filename,
         fieldMappings: {
           analyzedAt: new Date().toISOString(),
+          singleFields,
           matches: matchResults
         },
-        version: tmpl.version
+        version: tmpl.version,
+        isDraft
       })
     });
-    if (!res.ok) throw new Error('保存失败');
-    alert('字段映射规则已成功发布至协调服务模板库！');
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || '保存失败');
+    alert(isDraft ? '已保存为草稿版本' : '字段映射规则已成功正式发布至协调服务模板库！');
   } catch (err) {
-    alert('发布失败: ' + err.message);
+    alert(err.message);
   }
 }
 

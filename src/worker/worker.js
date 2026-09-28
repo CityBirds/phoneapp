@@ -149,11 +149,19 @@ class ExecutionWorker {
         const samplesDir = path.resolve(__dirname, '../../samples');
         let templatePath = '';
         if (fileRec.file_type === 'cert') {
-          templatePath = task.model === 'DPT810'
-            ? path.join(samplesDir, 'DPT810证书(变送器-A010007031)-JM-26.8.28.doc')
-            : path.join(samplesDir, 'POA200证书AP10007513-20260403发南京订单-PSR-12-223(封装）带泵.doc');
-        } else {
-          templatePath = path.join(samplesDir, 'POA200(140)AP10007513发货清单20260403带泵.doc');
+          if (task.model === '990' || task.model === 'DPT-990-Ex') {
+            templatePath = path.join(samplesDir, '990-Ex-EX10260902发货证书.doc');
+          } else if (task.model === 'DPT810') {
+            templatePath = path.join(samplesDir, 'DPT810证书(变送器-A010007031)-JM-26.8.28.doc');
+          } else {
+            templatePath = path.join(samplesDir, 'POA200证书AP10007513-20260403发南京订单-PSR-12-223(封装）带泵.doc');
+          }
+        } else if (fileRec.file_type === 'packing') {
+          if (task.model === 'POA200') {
+            templatePath = path.join(samplesDir, 'POA200(140)AP10007513发货清单20260403带泵.doc');
+          } else {
+            throw new Error(`Model ${task.model} does not support packing list! (J09)`);
+          }
         }
 
         const officialFilename = fileRec.official_filename;
@@ -177,8 +185,19 @@ class ExecutionWorker {
 
       } catch (err) {
         console.error(`Task #${task.id} file ${fileRec.file_type} failed:`, err.message);
+        await this.reportFileFailed(task.id, fileRec.file_type, err.message);
       }
     }
+  }
+
+  async reportFileFailed(taskId, fileType, errorMsg) {
+    try {
+      await fetch(`${this.serverUrl}/api/worker/tasks/${taskId}/file-failed`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fileType, errorMsg })
+      });
+    } catch (e) {}
   }
 
   async uploadReturnedFile(taskId, fileType, officialFilename, filePath, sha256) {
@@ -186,10 +205,10 @@ class ExecutionWorker {
     const fileBuffer = fs.readFileSync(filePath);
     const blob = new Blob([fileBuffer], { type: 'application/msword' });
 
-    formData.append('wordFile', blob, officialFilename);
     formData.append('fileType', fileType);
     formData.append('officialFilename', officialFilename);
     formData.append('sha256', sha256 || getFileSha256(filePath));
+    formData.append('wordFile', blob, officialFilename);
 
     const res = await fetch(`${this.serverUrl}/api/worker/tasks/${taskId}/file-returned`, {
       method: 'POST',
@@ -232,14 +251,38 @@ class ExecutionWorker {
       body: JSON.stringify({ status: 'SUBMITTED_TO_QUEUE' })
     });
 
-    setTimeout(async () => {
+    try {
+      if (process.platform === 'win32') {
+        const batchItems = job.batch_items || [];
+        for (const item of batchItems) {
+          const copies = item.copies || 1;
+          const targetTaskFile = path.join(this.workingDir, `print_job_${job.id}_${item.fileType}.doc`);
+          if (fs.existsSync(targetTaskFile)) {
+            for (let c = 0; c < copies; c++) {
+              try {
+                execSync(`powershell -NoProfile -Command "Start-Process -FilePath '${targetTaskFile}' -Verb PrintTo -ArgumentList '${job.printer_name}'"`, {
+                  timeout: 10000,
+                  stdio: 'ignore'
+                });
+              } catch (e) {}
+            }
+          }
+        }
+      }
+
       await fetch(`${this.serverUrl}/api/print/${job.id}/status`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: 'PRINTED' })
       });
-      console.log(`Print Job #${job.id} marked as PRINTED.`);
-    }, 1000);
+      console.log(`Print Job #${job.id} dispatched to physical printer queue.`);
+    } catch (err) {
+      await fetch(`${this.serverUrl}/api/print/${job.id}/status`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'FAILED', errorMsg: err.message })
+      });
+    }
   }
 }
 

@@ -10,9 +10,9 @@ data/test_output/
 data/test_docs/
 data/returned/
 data/previews/
-data/phoneapp.db
-data/phoneapp.db-wal
-data/phoneapp.db-shm
+data/*.db
+data/*.db-wal
+data/*.db-shm
 backups/
 uploads/
 

@@ -20,12 +20,12 @@ if (!Database) {
   }
 }
 
-const dataDir = path.join(__dirname, '../../data');
-if (!fs.existsSync(dataDir)) {
-  fs.mkdirSync(dataDir, { recursive: true });
+const dbPath = process.env.DB_PATH || path.join(__dirname, '../../data/phoneapp.db');
+const targetDir = path.dirname(dbPath);
+if (!fs.existsSync(targetDir)) {
+  fs.mkdirSync(targetDir, { recursive: true });
 }
 
-const dbPath = path.join(dataDir, 'phoneapp.db');
 const db = new Database(dbPath);
 
 if (!db.pragma) {

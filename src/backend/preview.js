@@ -20,11 +20,13 @@ function escapeXml(unsafe) {
  */
 function generateCertSvg(info) {
   const model = escapeXml(info.model || 'POA200');
-  const deviceSn = escapeXml(info.deviceSn || 'AP10007513');
-  const location = escapeXml(info.shippingLocation || '南京');
+  const deviceSn = escapeXml(info.deviceSn || '00001234');
+  const customer = escapeXml(info.model === '990' ? 'YORK' : (info.customer || 'YORK'));
   const certDate = escapeXml(info.certDate || new Date().toISOString().slice(0, 10));
+  const ambientTemp = escapeXml(info.ambientTemp || '28.7');
+  const relativeHumidity = escapeXml(info.relativeHumidity || '63.2');
   const testPoints = info.testPoints && info.testPoints.length > 0 ? info.testPoints : [
-    { point: 1, std: '9.96 ppm (N2 balance)', act: '9.93 ppm' }
+    { point: 1, std: '9.96 ppm (N2 balance)', act: '9.88' }
   ];
 
   let testRowsSvg = '';
@@ -71,7 +73,7 @@ function generateCertSvg(info) {
 
   <!-- Row 1 -->
   <text x="70" y="205" font-size="13" font-weight="bold" fill="#0f172a">Customer</text>
-  <text x="230" y="205" font-size="13" fill="#0f172a">${location}</text>
+  <text x="230" y="205" font-size="13" fill="#0f172a">${customer}</text>
   <text x="440" y="205" font-size="13" font-weight="bold" fill="#0f172a">Date:</text>
   <text x="590" y="205" font-size="13" fill="#0f172a">${certDate}</text>
 
@@ -89,9 +91,9 @@ function generateCertSvg(info) {
 
   <!-- Row 4 -->
   <text x="70" y="319" font-size="13" font-weight="bold" fill="#0f172a">Ambient Temperature:</text>
-  <text x="230" y="319" font-size="13" fill="#0f172a">23.5 ℃</text>
+  <text x="230" y="319" font-size="13" fill="#0f172a">${ambientTemp} ℃</text>
   <text x="440" y="319" font-size="13" font-weight="bold" fill="#0f172a">Relative Humidity</text>
-  <text x="590" y="319" font-size="13" fill="#0f172a">51.6%RH</text>
+  <text x="590" y="319" font-size="13" fill="#0f172a">${relativeHumidity}%RH</text>
 
   <!-- Row 5 -->
   <text x="70" y="357" font-size="13" font-weight="bold" fill="#0f172a">Comments</text>
@@ -203,6 +205,12 @@ function generateDocumentPreview(wordFilePath, outputDir, fileId, extraContext =
     throw new Error(`Word file not found: ${wordFilePath}`);
   }
 
+  // Validate that input file is a Word document (.doc or .docx) - J12, Q33
+  const ext = path.extname(wordFilePath).toLowerCase();
+  if (ext !== '.doc' && ext !== '.docx') {
+    throw new Error(`Non-Word file rejected: ${wordFilePath} is not a valid .doc or .docx file! (J12, Q33)`);
+  }
+
   if (!fs.existsSync(outputDir)) {
     fs.mkdirSync(outputDir, { recursive: true });
   }
@@ -234,10 +242,12 @@ function generateDocumentPreview(wordFilePath, outputDir, fileId, extraContext =
     taskId: task ? task.id : fileId,
     clientName: task ? task.client_name : '操作员',
     model: task ? task.model : (formData.model || 'POA200'),
-    deviceSn: task ? task.device_sn : (formData.deviceSn || 'AP10007513'),
-    shippingLocation: formData.shippingLocation || '南京',
+    deviceSn: task ? task.device_sn : (formData.deviceSn || '00001234'),
+    shippingLocation: formData.shippingLocation || '苏州',
     sensorModel: formData.sensorModel || 'PSR-12-223(封装）',
-    sensorSn: formData.sensorSn || '201N200258',
+    sensorSn: formData.sensorSn || '009876',
+    ambientTemp: formData.ambientTemp || '28.7',
+    relativeHumidity: formData.relativeHumidity || '63.2',
     hasPump: formData.hasPump !== false,
     certDate: formData.certDate || new Date().toISOString().slice(0, 10),
     testPoints: formData.testPoints || [],
