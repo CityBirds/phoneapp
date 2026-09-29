@@ -1,0 +1,506 @@
+[
+  {
+    "row": 1,
+    "col": 1,
+    "table": 1,
+    "text": "序号"
+  },
+  {
+    "row": 1,
+    "col": 2,
+    "table": 1,
+    "text": "名称"
+  },
+  {
+    "row": 1,
+    "col": 3,
+    "table": 1,
+    "text": "规格/型号"
+  },
+  {
+    "row": 1,
+    "col": 4,
+    "table": 1,
+    "text": "数量"
+  },
+  {
+    "row": 1,
+    "col": 5,
+    "table": 1,
+    "text": "单位"
+  },
+  {
+    "row": 1,
+    "col": 6,
+    "table": 1,
+    "text": "标配"
+  },
+  {
+    "row": 1,
+    "col": 7,
+    "table": 1,
+    "text": "备注"
+  },
+  {
+    "row": 2,
+    "col": 1,
+    "table": 1,
+    "text": "1"
+  },
+  {
+    "row": 2,
+    "col": 2,
+    "table": 1,
+    "text": "主设备"
+  },
+  {
+    "row": 2,
+    "col": 3,
+    "table": 1,
+    "text": "DPT-990-Ex"
+  },
+  {
+    "row": 2,
+    "col": 4,
+    "table": 1,
+    "text": "1"
+  },
+  {
+    "row": 2,
+    "col": 5,
+    "table": 1,
+    "text": "台"
+  },
+  {
+    "row": 2,
+    "col": 6,
+    "table": 1,
+    "text": "是"
+  },
+  {
+    "row": 2,
+    "col": 7,
+    "table": 1,
+    "text": "SN：EX10260902"
+  },
+  {
+    "row": 3,
+    "col": 1,
+    "table": 1,
+    "text": "2"
+  },
+  {
+    "row": 3,
+    "col": 2,
+    "table": 1,
+    "text": "计量证书"
+  },
+  {
+    "row": 3,
+    "col": 3,
+    "table": 1,
+    "text": "英文"
+  },
+  {
+    "row": 3,
+    "col": 4,
+    "table": 1,
+    "text": "1"
+  },
+  {
+    "row": 3,
+    "col": 5,
+    "table": 1,
+    "text": "份"
+  },
+  {
+    "row": 3,
+    "col": 6,
+    "table": 1,
+    "text": "是"
+  },
+  {
+    "row": 3,
+    "col": 7,
+    "table": 1,
+    "text": ""
+  },
+  {
+    "row": 4,
+    "col": 1,
+    "table": 1,
+    "text": "3"
+  },
+  {
+    "row": 4,
+    "col": 2,
+    "table": 1,
+    "text": "用户手册"
+  },
+  {
+    "row": 4,
+    "col": 3,
+    "table": 1,
+    "text": "中英文"
+  },
+  {
+    "row": 4,
+    "col": 4,
+    "table": 1,
+    "text": "1"
+  },
+  {
+    "row": 4,
+    "col": 5,
+    "table": 1,
+    "text": "份"
+  },
+  {
+    "row": 4,
+    "col": 6,
+    "table": 1,
+    "text": "是"
+  },
+  {
+    "row": 4,
+    "col": 7,
+    "table": 1,
+    "text": "纸质"
+  },
+  {
+    "row": 5,
+    "col": 1,
+    "table": 1,
+    "text": "4"
+  },
+  {
+    "row": 5,
+    "col": 2,
+    "table": 1,
+    "text": "操作说明"
+  },
+  {
+    "row": 5,
+    "col": 3,
+    "table": 1,
+    "text": "中文"
+  },
+  {
+    "row": 5,
+    "col": 4,
+    "table": 1,
+    "text": "1"
+  },
+  {
+    "row": 5,
+    "col": 5,
+    "table": 1,
+    "text": "份"
+  },
+  {
+    "row": 5,
+    "col": 6,
+    "table": 1,
+    "text": "是"
+  },
+  {
+    "row": 5,
+    "col": 7,
+    "table": 1,
+    "text": ""
+  },
+  {
+    "row": 6,
+    "col": 1,
+    "table": 1,
+    "text": "5"
+  },
+  {
+    "row": 6,
+    "col": 2,
+    "table": 1,
+    "text": "防爆证书"
+  },
+  {
+    "row": 6,
+    "col": 3,
+    "table": 1,
+    "text": "英文"
+  },
+  {
+    "row": 6,
+    "col": 4,
+    "table": 1,
+    "text": "1"
+  },
+  {
+    "row": 6,
+    "col": 5,
+    "table": 1,
+    "text": "份"
+  },
+  {
+    "row": 6,
+    "col": 6,
+    "table": 1,
+    "text": "是"
+  },
+  {
+    "row": 6,
+    "col": 7,
+    "table": 1,
+    "text": ""
+  },
+  {
+    "row": 7,
+    "col": 1,
+    "table": 1,
+    "text": "6"
+  },
+  {
+    "row": 7,
+    "col": 2,
+    "table": 1,
+    "text": "安装螺钉"
+  },
+  {
+    "row": 7,
+    "col": 3,
+    "table": 1,
+    "text": ""
+  },
+  {
+    "row": 7,
+    "col": 4,
+    "table": 1,
+    "text": "1"
+  },
+  {
+    "row": 7,
+    "col": 5,
+    "table": 1,
+    "text": "包"
+  },
+  {
+    "row": 7,
+    "col": 6,
+    "table": 1,
+    "text": "是"
+  },
+  {
+    "row": 7,
+    "col": 7,
+    "table": 1,
+    "text": ""
+  },
+  {
+    "row": 8,
+    "col": 1,
+    "table": 1,
+    "text": "7"
+  },
+  {
+    "row": 8,
+    "col": 2,
+    "table": 1,
+    "text": "干燥装置"
+  },
+  {
+    "row": 8,
+    "col": 3,
+    "table": 1,
+    "text": ""
+  },
+  {
+    "row": 8,
+    "col": 4,
+    "table": 1,
+    "text": "1"
+  },
+  {
+    "row": 8,
+    "col": 5,
+    "table": 1,
+    "text": "个"
+  },
+  {
+    "row": 8,
+    "col": 6,
+    "table": 1,
+    "text": "否"
+  },
+  {
+    "row": 8,
+    "col": 7,
+    "table": 1,
+    "text": ""
+  },
+  {
+    "row": 9,
+    "col": 1,
+    "table": 1,
+    "text": "8"
+  },
+  {
+    "row": 9,
+    "col": 2,
+    "table": 1,
+    "text": "堵头"
+  },
+  {
+    "row": 9,
+    "col": 3,
+    "table": 1,
+    "text": ""
+  },
+  {
+    "row": 9,
+    "col": 4,
+    "table": 1,
+    "text": "1"
+  },
+  {
+    "row": 9,
+    "col": 5,
+    "table": 1,
+    "text": "个"
+  },
+  {
+    "row": 9,
+    "col": 6,
+    "table": 1,
+    "text": "否"
+  },
+  {
+    "row": 9,
+    "col": 7,
+    "table": 1,
+    "text": ""
+  },
+  {
+    "row": 10,
+    "col": 1,
+    "table": 1,
+    "text": "9"
+  },
+  {
+    "row": 10,
+    "col": 2,
+    "table": 1,
+    "text": "卡套螺母组"
+  },
+  {
+    "row": 10,
+    "col": 3,
+    "table": 1,
+    "text": "1/4"
+  },
+  {
+    "row": 10,
+    "col": 4,
+    "table": 1,
+    "text": "2"
+  },
+  {
+    "row": 10,
+    "col": 5,
+    "table": 1,
+    "text": "套"
+  },
+  {
+    "row": 10,
+    "col": 6,
+    "table": 1,
+    "text": "否"
+  },
+  {
+    "row": 10,
+    "col": 7,
+    "table": 1,
+    "text": ""
+  },
+  {
+    "row": 11,
+    "col": 1,
+    "table": 1,
+    "text": "10"
+  },
+  {
+    "row": 11,
+    "col": 2,
+    "table": 1,
+    "text": "防爆电缆接头"
+  },
+  {
+    "row": 11,
+    "col": 3,
+    "table": 1,
+    "text": ""
+  },
+  {
+    "row": 11,
+    "col": 4,
+    "table": 1,
+    "text": "2"
+  },
+  {
+    "row": 11,
+    "col": 5,
+    "table": 1,
+    "text": "个"
+  },
+  {
+    "row": 11,
+    "col": 6,
+    "table": 1,
+    "text": "否"
+  },
+  {
+    "row": 11,
+    "col": 7,
+    "table": 1,
+    "text": ""
+  },
+  {
+    "row": 12,
+    "col": 1,
+    "table": 1,
+    "text": "11"
+  },
+  {
+    "row": 12,
+    "col": 2,
+    "table": 1,
+    "text": "电源/信号线"
+  },
+  {
+    "row": 12,
+    "col": 3,
+    "table": 1,
+    "text": ""
+  },
+  {
+    "row": 12,
+    "col": 4,
+    "table": 1,
+    "text": "2"
+  },
+  {
+    "row": 12,
+    "col": 5,
+    "table": 1,
+    "text": "根"
+  },
+  {
+    "row": 12,
+    "col": 6,
+    "table": 1,
+    "text": "否"
+  },
+  {
+    "row": 12,
+    "col": 7,
+    "table": 1,
+    "text": ""
+  }
+]

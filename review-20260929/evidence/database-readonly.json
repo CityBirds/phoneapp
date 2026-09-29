@@ -1,0 +1,56 @@
+{
+  "task": [
+    {
+      "id": 35,
+      "model": "990",
+      "device_sn": "EX10260999",
+      "status": "FAILED",
+      "accepted_at": "2026-09-29T00:56:55.730Z",
+      "error_msg": "Source template file not found: D:\\York\\phoneApp\\samples\\990-Ex-EX10260902发货证书.doc"
+    }
+  ],
+  "files": [
+    {
+      "id": 64,
+      "task_id": 35,
+      "file_type": "cert",
+      "official_filename": "990证书EX10260999-20260929发上海订单-PSR-12-223(封装）.doc",
+      "worker_filepath": null,
+      "server_filepath": null,
+      "sha256": null,
+      "preview_images": "[]",
+      "status": "FAILED",
+      "error_msg": "Source template file not found: D:\\York\\phoneApp\\samples\\990-Ex-EX10260902发货证书.doc"
+    }
+  ],
+  "templates": [
+    {
+      "id": "tmpl_poa200_pack",
+      "model": "POA200",
+      "type": "packing",
+      "filename": "POA200(140)AP10007513发货清单20260403带泵.doc",
+      "version": "v1.0"
+    },
+    {
+      "id": "tmpl_dpt810_cert",
+      "model": "DPT810",
+      "type": "cert",
+      "filename": "DPT810证书(变送器-A010007031)-JM-26.8.28.doc",
+      "version": "v1.0"
+    },
+    {
+      "id": "tmpl_dpt-990-ex_cert_1790643152567",
+      "model": "DPT-990-EX",
+      "type": "cert",
+      "filename": "990-Ex-EX10260902发货证书.doc",
+      "version": "v1.0"
+    },
+    {
+      "id": "tmpl_dpt-990-ex_packing_1790643903708",
+      "model": "DPT-990-EX",
+      "type": "packing",
+      "filename": "990-Ex-EX10260902装箱清单.doc",
+      "version": "v1.0"
+    }
+  ]
+}
