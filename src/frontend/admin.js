@@ -361,10 +361,10 @@ function renderMatcherTable() {
     const isNamingOnly = key === 'sensorModel' || key === '传感器型号';
 
     let fieldCategory = '单值字段';
-    if (key.includes('Analyzer') || key.includes('Test') || key.includes('Standard')) {
-      fieldCategory = '表格列数据区';
-    } else if (isNamingOnly) {
+    if (isNamingOnly) {
       fieldCategory = '命名业务参数 (无Word坐标)';
+    } else if ((chosenCandidate && chosenCandidate.sampleValues && chosenCandidate.sampleValues.length > 0) || (match && match.inferredType === 'table')) {
+      fieldCategory = '表格列数据区';
     }
 
     let statusBadge = '<span class="badge badge-danger">未绑定</span>';

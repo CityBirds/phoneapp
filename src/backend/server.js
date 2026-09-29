@@ -680,14 +680,14 @@ app.get('/api/templates/:id/analyze', (req, res) => {
   let targetLabels = [];
   if (tmpl.type === 'cert') {
     if (tmpl.model === '990') {
-      targetLabels = ['Inst. SN.', 'Instrument', 'Date:', 'Ambient Temperature:', 'Relative Humidity', 'Test point Number', 'NIST Traceable Standard ℃ dp', 'Analyzer ℃ dp'];
+      targetLabels = ['Inst. SN.', 'Instrument', 'Date:', 'Ambient Temperature:', 'Relative Humidity', 'NIST Traceable Standard ℃ dp', 'Analyzer ℃ dp'];
     } else if (tmpl.model === 'DPT810') {
       targetLabels = ['Inst. SN.', 'Instrument', 'Date:', 'Ambient Temperature:', 'Relative Humidity', 'Analyzer Under Test mA'];
     } else {
       targetLabels = ['Inst. SN.', 'Instrument', 'Date:', 'Ambient Temperature:', 'Relative Humidity', 'Analyzer pv ppm'];
     }
   } else {
-    targetLabels = ['主设备', '传感器', '序号', '名称', '规格', '数量', '备注'];
+    targetLabels = ['主设备', '传感器', '名称', '规格', '数量', '备注'];
   }
 
   const matchResults = {};

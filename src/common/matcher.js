@@ -16,6 +16,7 @@ const ALIAS_MAP = {
 };
 
 const KNOWN_UNITS = ['ppm', '℃ dp', '℃', '°c', 'ma', '%rh', 'rh'];
+const FOOTER_TEXT_REGEX = /(we hereby certify|comments\s*&\s*observations|for and on behalf of|phymetrix|manager|authorized signature|印章|签名)/i;
 
 /**
  * Check if label has explicit date meaning
@@ -31,9 +32,18 @@ function isDateFieldLabel(label) {
 
 function normalizeText(text) {
   if (!text) return '';
-  return String(text)
-    .replace(/[\r\n\t]/g, ' ')
-    .replace(/[:：]/g, '')
+  let str = String(text)
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/[:：]/g, '');
+
+  // Normalize Chinese character spacing e.g. "序 号" -> "序号"
+  str = str.replace(/([\u4e00-\u9fa5])\s+([\u4e00-\u9fa5])/g, '$1$2');
+  str = str.replace(/([\u4e00-\u9fa5])\s+([\u4e00-\u9fa5])/g, '$1$2');
+
+  // Normalize unit spacing e.g. "Analyzer℃ dp" -> "analyzer ℃ dp"
+  str = str.replace(/\s*(℃|°c|%rh|ppm|ma)/gi, ' $1');
+
+  return str
     .replace(/\s+/g, ' ')
     .trim()
     .toLowerCase();
@@ -48,6 +58,77 @@ function extractUnits(text) {
     }
   }
   return found;
+}
+
+function isTableColumnHeaderLabel(label) {
+  const norm = normalizeText(label);
+  return norm.includes('test point number') || norm.includes('nist') || norm.includes('analyzer') ||
+         norm === '序号' || norm === '名称' || norm.includes('规格') || norm === '数量' || norm === '单位' || norm === '标配' || norm === '备注';
+}
+
+function getTableColumnDataCells(item, docItems, targetLabel) {
+  if (!item || !docItems || !Array.isArray(docItems)) return [];
+
+  const normTarget = normalizeText(targetLabel || item.text);
+  if (!isTableColumnHeaderLabel(targetLabel) && !isTableColumnHeaderLabel(item.text)) {
+    return [];
+  }
+
+  const tableIdx = item.tableIdx;
+  const rowIdx = item.rowIdx;
+  const colIdx = item.colIdx;
+
+  const tableCells = docItems.filter(x => x.type === 'cell' && x.tableIdx === tableIdx);
+  const rowIndicesBelow = [...new Set(tableCells.map(x => x.rowIdx))]
+    .filter(r => r > rowIdx)
+    .sort((a, b) => a - b);
+
+  const gridDataCells = [];
+  let prevRow = rowIdx;
+  for (const r of rowIndicesBelow) {
+    if (r !== prevRow + 1) break;
+    const rowCells = tableCells.filter(x => x.rowIdx === r);
+    if (rowCells.some(c => FOOTER_TEXT_REGEX.test(c.text || ''))) break;
+    const colCell = rowCells.find(c => c.colIdx === colIdx);
+    if (colCell) {
+      gridDataCells.push(colCell);
+      prevRow = r;
+    } else {
+      break;
+    }
+  }
+
+  if (gridDataCells.length > 0) {
+    return gridDataCells;
+  }
+
+  // Sequential Stride Fallback
+  const cellItems = docItems.filter(x => x.type === 'cell');
+  const itemIdx = cellItems.findIndex(x => x === item || (x.tableIdx === item.tableIdx && x.rowIdx === item.rowIdx && x.colIdx === item.colIdx && x.text === item.text));
+  if (itemIdx < 0) return [];
+
+  const seqStartIdx = cellItems.findIndex((x, idx) => idx > itemIdx && x.text === '1');
+  if (seqStartIdx < 0) return [];
+
+  const isPacking = cellItems.some(x => x.text.includes('主设备') || x.text.includes('装箱清单'));
+  const numCols = isPacking ? 7 : 3;
+
+  let colOffset = 0;
+  if (normTarget.includes('test point number') || normTarget === '序号') colOffset = 0;
+  else if (normTarget.includes('nist') || normTarget === '名称') colOffset = 1;
+  else if (normTarget.includes('analyzer') || normTarget.includes('规格')) colOffset = 2;
+  else if (normTarget === '数量') colOffset = 3;
+  else if (normTarget === '单位') colOffset = 4;
+  else if (normTarget === '标配') colOffset = 5;
+  else if (normTarget === '备注') colOffset = 6;
+
+  const sequentialCells = [];
+  for (let i = seqStartIdx; i < cellItems.length; i += numCols) {
+    const targetCell = cellItems[i + colOffset];
+    if (!targetCell || FOOTER_TEXT_REGEX.test(targetCell.text || '')) break;
+    sequentialCells.push(targetCell);
+  }
+  return sequentialCells;
 }
 
 /**
@@ -149,28 +230,36 @@ function findFieldCandidates(targetLabel, docItems) {
       }
 
       // Find candidate value location & sample values
-      let candidateValue = '';
+      let candidateValue = null;
       let valueLocation = null;
       let sampleValues = [];
 
       if (item.type === 'cell') {
-        // 1. Right cell in same row for single value fields
-        const rightCell = docItems.find(
-          x => x.type === 'cell' && x.tableIdx === item.tableIdx && x.rowIdx === item.rowIdx && x.colIdx === item.colIdx + 1
-        );
-        if (rightCell) {
-          candidateValue = rightCell.text ? rightCell.text.trim() : '空';
-          valueLocation = { type: 'cell', tableIdx: rightCell.tableIdx, rowIdx: rightCell.rowIdx, colIdx: rightCell.colIdx };
-        } else {
-          candidateValue = '未绑定';
-        }
+        const tableIdx = item.tableIdx;
+        const rowIdx = item.rowIdx;
+        const colIdx = item.colIdx;
 
-        // 2. Below cells in same column for table data areas (e.g. test points or packing list columns)
-        const columnCellsBelow = docItems.filter(
-          x => x.type === 'cell' && x.tableIdx === item.tableIdx && x.colIdx === item.colIdx && x.rowIdx > item.rowIdx
-        );
-        if (columnCellsBelow.length > 0) {
-          sampleValues = columnCellsBelow.map(c => c.text ? c.text.trim() : '空').slice(0, 5);
+        const dataCellsBelow = getTableColumnDataCells(item, docItems, targetLabel);
+
+        const isSeqNumCol = normTarget === '序号' || normTarget.includes('test point number') || isTestPointMatch;
+
+        if (dataCellsBelow.length > 0) {
+          if (isSeqNumCol) {
+            sampleValues = dataCellsBelow.map((c, idx) => String(idx + 1)).slice(0, 5);
+          } else {
+            sampleValues = dataCellsBelow.map(c => (c.text ? c.text.trim() : '空')).filter(Boolean).slice(0, 5);
+          }
+          candidateValue = null;
+          valueLocation = { type: 'table_column', tableIdx, colIdx, startRow: rowIdx + 1, endRow: rowIdx + dataCellsBelow.length };
+        } else {
+          const tableCells = docItems.filter(x => x.type === 'cell' && x.tableIdx === tableIdx);
+          const rightCell = tableCells.find(x => x.rowIdx === rowIdx && x.colIdx === colIdx + 1);
+          if (rightCell) {
+            candidateValue = rightCell.text ? rightCell.text.trim() : '空';
+            valueLocation = { type: 'cell', tableIdx, rowIdx, colIdx: colIdx + 1 };
+          } else {
+            candidateValue = '未绑定';
+          }
         }
       } else if (item.type === 'paragraph') {
         if (i + 1 < docItems.length) {
@@ -208,7 +297,7 @@ function findFieldCandidates(targetLabel, docItems) {
 
   return {
     label: targetLabel,
-    inferredType,
+    inferredType: candidates.length > 0 && candidates[0].sampleValues?.length > 0 ? 'table' : inferredType,
     matchCount: candidates.length,
     matchStatus,
     candidates

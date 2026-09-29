@@ -2,6 +2,14 @@ const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
 
+function isValidDocumentText(text) {
+  if (!text) return false;
+  const clean = text.replace(/[\uE000-\uF8FF\uFFF0-\uFFFF\uD800-\uDFFF]/g, '').trim();
+  if (!clean) return false;
+  const validMatches = clean.match(/[\u4e00-\u9fa5A-Za-z0-9°℃%#:\-\.\(\)\/（）,\*\"\:\s]/g) || [];
+  return (validMatches.length / clean.length) >= 0.7;
+}
+
 /**
  * Extract Document Structure for .doc and .docx files
  * Returns array of docItems:
@@ -23,7 +31,7 @@ function extractDocumentStructure(filepath) {
         const output = execSync(`powershell -NoProfile -ExecutionPolicy Bypass -Command "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; & '${psScript.replace(/'/g, "''")}' '${filepath.replace(/'/g, "''")}'"`, {
           encoding: 'utf-8',
           timeout: 15000,
-          stdio: ['ignore', 'pipe', 'ignore']
+          stdio: ['ignore', 'pipe', 'pipe']
         });
         const trimmed = output.trim();
         if (trimmed && trimmed.startsWith('[')) {
@@ -33,7 +41,7 @@ function extractDocumentStructure(filepath) {
           }
         }
       } catch (e) {
-        // Fallback to JS extraction if PS fails
+        console.warn(`Real document structure extraction notice: PowerShell COM extraction failed or unavailable (${e.message}). Falling back to stream parser.`);
       }
     }
   }
@@ -66,42 +74,33 @@ function extractDocBinaryStructure(buffer) {
 
   for (let i = 0; i < rawTokens.length; i++) {
     let token = rawTokens[i];
+    const hasRowEnd = token.includes('\r');
 
     // Clean control chars except \r \n
-    token = token.replace(/[\x00-\x06\x08-\x09\x0b-\x1f\x7f]/g, '');
+    let cleanToken = token.replace(/[\x00-\x06\x08-\x09\x0b-\x1f\x7f]/g, '');
 
-    if (!token) continue;
-
-    // Filter out binary OLE storage headers/garbage
-    if (binaryGarbageRegex.test(token)) continue;
-
-    const cleanedText = token
+    const cleanedText = cleanToken
       .replace(/[\uFEFF\uFFFE\uE000-\uF8FF\uD800-\uDFFF]/g, '')
       .replace(/^\r+|\r+$/g, '')
-      .replace(/\r\n/g, '\r')
       .replace(/[\r\n]+/g, ' ')
       .replace(/\s+/g, ' ')
       .trim();
 
-    if (!cleanedText) continue;
-
-    // Must contain valid Chinese, English alphanumeric, or standard document punctuation
-    if (!/[\u4e00-\u9fa5A-Za-z0-9°℃%#:\-\.\(\)\/（）]/.test(cleanedText)) continue;
-
-    // Skip excessively long binary noise tokens (>300 chars without spaces)
-    if (cleanedText.length > 300 && !cleanedText.includes(' ')) continue;
-
-    items.push({
-      type: 'cell',
-      text: cleanedText,
-      rawText: token,
-      tableIdx: currentTableIdx,
-      rowIdx: currentRowIdx,
-      colIdx: currentColIdx
-    });
+    if (cleanedText && !binaryGarbageRegex.test(cleanedText) && cleanedText.length <= 300) {
+      if (isValidDocumentText(cleanedText)) {
+        items.push({
+          type: 'cell',
+          text: cleanedText,
+          rawText: token,
+          tableIdx: currentTableIdx,
+          rowIdx: currentRowIdx,
+          colIdx: currentColIdx
+        });
+      }
+    }
 
     currentColIdx++;
-    if (token.includes('\r')) {
+    if (hasRowEnd) {
       currentColIdx = 0;
       currentRowIdx++;
     }
@@ -142,14 +141,16 @@ function extractDocxStructure(buffer) {
 
           const cleanText = text.replace(/\s+/g, ' ').trim();
 
-          items.push({
-            type: 'cell',
-            text: cleanText,
-            rawText: text,
-            tableIdx,
-            rowIdx,
-            colIdx
-          });
+          if (isValidDocumentText(cleanText)) {
+            items.push({
+              type: 'cell',
+              text: cleanText,
+              rawText: text,
+              tableIdx,
+              rowIdx,
+              colIdx
+            });
+          }
 
           colIdx++;
         }
@@ -170,7 +171,7 @@ function extractDocxStructure(buffer) {
         const text = textMatches.map(t => t.replace(/<[^>]+>/g, '')).join(' ').trim();
         const cleanText = text.replace(/\s+/g, ' ').trim();
 
-        if (cleanText) {
+        if (cleanText && isValidDocumentText(cleanText)) {
           items.push({
             type: 'paragraph',
             text: cleanText,
