@@ -6,6 +6,7 @@ const fs = require('fs');
 const db = require('./db');
 const { generateCertFilename, generatePackingListFilename } = require('../common/naming');
 const { findFieldCandidates } = require('../common/matcher');
+const { extractDocumentStructure } = require('../common/doc_structure');
 const { getBeijingCalendarRange, generateUUID, getFileSha256 } = require('../common/utils');
 const { generateDocumentPreview } = require('./preview');
 
@@ -327,23 +328,10 @@ app.get('/api/templates/:id/analyze', (req, res) => {
   if (!tmpl) return res.status(404).json({ error: 'Template not found' });
 
   // Extract real structural items from template file
-  const docItems = [];
+  let docItems = [];
   if (fs.existsSync(tmpl.filepath)) {
     try {
-      const raw = fs.readFileSync(tmpl.filepath);
-      const str16 = raw.toString('utf16le');
-      const tokens = str16.match(/[\u4e00-\u9fa5A-Za-z0-9_\-\.:()（）/ ]{2,}/g) || [];
-      const cleaned = tokens.map(t => t.trim()).filter(t => t.length > 0);
-
-      cleaned.forEach((t, idx) => {
-        docItems.push({
-          type: 'cell',
-          text: t,
-          tableIdx: 0,
-          rowIdx: Math.floor(idx / 2),
-          colIdx: idx % 2
-        });
-      });
+      docItems = extractDocumentStructure(tmpl.filepath);
     } catch (e) {
       console.warn('Doc item extraction error:', e.message);
     }
@@ -484,16 +472,39 @@ app.post('/api/tasks/submit', (req, res) => {
     });
   }
 
-  // J05: Validate Device SN consistency across fields (no conflicting SNs permitted)
+  // F10: Sensor model isolation and validation
+  if (model !== 'POA200') {
+    if (req.body.sensorModel && String(req.body.sensorModel).trim() !== '') {
+      return res.status(400).json({
+        error: `非 POA200 型号 (${model}) 严禁提交 sensorModel 传感器参数！(F10)`
+      });
+    }
+  } else {
+    // POA200 sensor model options validation against published template configuration
+    try {
+      const tmpl = db.prepare("SELECT * FROM templates WHERE model = 'POA200' AND type = 'cert'").get();
+      if (tmpl && tmpl.field_mappings) {
+        const mappings = JSON.parse(tmpl.field_mappings);
+        const options = mappings.sensorModelConfig?.options || [];
+        if (options.length > 0 && req.body.sensorModel) {
+          if (!options.includes(req.body.sensorModel)) {
+            return res.status(400).json({
+              error: `传感器型号 [${req.body.sensorModel}] 不属于已发布的有效选项列表 (${options.join(', ')})！(F10)`
+            });
+          }
+        }
+      }
+    } catch (e) {}
+  }
+
+  // J05: Validate Device SN consistency across fields (no conflicting SNs permitted, supporting half/full-width colon)
   if (Array.isArray(packingItems) && packingItems.length > 0) {
     const mainRemark = packingItems[0].remark || '';
-    if (mainRemark.includes('SN:')) {
-      const match = mainRemark.match(/SN:\s*([A-Za-z0-9_-]+)/i);
-      if (match && match[1] && match[1] !== deviceSn) {
-        return res.status(400).json({
-          error: `设备序列号数据冲突：顶层序列号 (${deviceSn}) 与清单主设备序列号 (${match[1]}) 不一致！(J05, Q13)`
-        });
-      }
+    const match = mainRemark.match(/SN[:：]\s*([A-Za-z0-9_-]+)/i);
+    if (match && match[1] && match[1] !== deviceSn) {
+      return res.status(400).json({
+        error: `设备序列号数据冲突：顶层序列号 (${deviceSn}) 与清单主设备序列号 (${match[1]}) 不一致！(J05, Q13)`
+      });
     }
   }
 

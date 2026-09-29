@@ -1,10 +1,7 @@
-const { execSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const { extractDocumentStructure } = require('../common/doc_structure');
 
-/**
- * Escape XML/SVG special characters
- */
 function escapeXml(unsafe) {
   if (unsafe == null) return '';
   return String(unsafe)
@@ -16,35 +13,109 @@ function escapeXml(unsafe) {
 }
 
 /**
- * Generate high-fidelity SVG for Certificate (.doc / .docx)
+ * Generate Real Word Document Paged Preview based on actual extracted document structure
+ * Rules: C11, R21, R22, F14, G12
  */
-function generateCertSvg(info) {
-  const model = escapeXml(info.model || 'POA200');
-  const deviceSn = escapeXml(info.deviceSn || '00001234');
-  const customer = escapeXml(info.model === '990' ? 'YORK' : (info.customer || 'YORK'));
-  const certDate = escapeXml(info.certDate || new Date().toISOString().slice(0, 10));
-  const ambientTemp = escapeXml(info.ambientTemp || '28.7');
-  const relativeHumidity = escapeXml(info.relativeHumidity || '63.2');
-  const testPoints = info.testPoints && info.testPoints.length > 0 ? info.testPoints : [
-    { point: 1, std: '9.96 ppm (N2 balance)', act: '9.88' }
-  ];
+function generateDocumentPreview(wordFilePath, outputDir, fileId, extraContext = {}) {
+  if (!fs.existsSync(wordFilePath)) {
+    throw new Error(`Word file not found: ${wordFilePath}`);
+  }
+
+  // Validate file extension (J12, Q33)
+  const ext = path.extname(wordFilePath).toLowerCase();
+  if (ext !== '.doc' && ext !== '.docx') {
+    throw new Error(`Non-Word file rejected: ${wordFilePath} is not a valid .doc or .docx file! (J12, Q33)`);
+  }
+
+  if (!fs.existsSync(outputDir)) {
+    fs.mkdirSync(outputDir, { recursive: true });
+  }
+
+  const fileBaseName = `preview_${fileId}`;
+  const images = [];
+
+  // Extract actual document structure from the generated Word file
+  let docItems = [];
+  try {
+    docItems = extractDocumentStructure(wordFilePath);
+  } catch (e) {
+    console.warn('Preview structure extraction error:', e.message);
+  }
+
+  // Identify document type from filename or context
+  const fileType = extraContext.fileType || (fileId.includes('cert') ? 'cert' : 'packing');
+
+  // Build high-fidelity SVG preview based on actual extracted cell texts
+  let svgContent = '';
+  if (fileType === 'cert') {
+    svgContent = renderCertSvgFromDocItems(docItems, extraContext);
+  } else {
+    svgContent = renderPackingSvgFromDocItems(docItems, extraContext);
+  }
+
+  const svgFilePath = path.join(outputDir, `${fileBaseName}-1.svg`);
+  fs.writeFileSync(svgFilePath, svgContent, 'utf-8');
+  images.push(`/previews/${fileBaseName}-1.svg`);
+
+  return images;
+}
+
+function renderCertSvgFromDocItems(docItems, extraContext) {
+  // Extract values directly from docItems
+  let customer = 'YORK';
+  let certDate = '';
+  let model = extraContext.task ? extraContext.task.model : 'POA200';
+  let deviceSn = extraContext.task ? extraContext.task.device_sn : '';
+  let ambientTemp = '';
+  let relativeHumidity = '';
+
+  for (let i = 0; i < docItems.length; i++) {
+    const text = docItems[i].text;
+    if (text === 'Customer' && i + 1 < docItems.length) {
+      customer = docItems[i + 1].text || customer;
+    } else if (text === 'Date:' && i + 1 < docItems.length) {
+      certDate = docItems[i + 1].text || certDate;
+    } else if (text === 'Instrument' && i + 1 < docItems.length) {
+      model = docItems[i + 1].text || model;
+    } else if (text === 'Inst. SN.' && i + 1 < docItems.length) {
+      deviceSn = docItems[i + 1].text || deviceSn;
+    } else if (text.includes('Ambient Temperature') && i + 1 < docItems.length) {
+      ambientTemp = docItems[i + 1].text || ambientTemp;
+    } else if (text.includes('Relative Humidity') && i + 1 < docItems.length) {
+      relativeHumidity = docItems[i + 1].text || relativeHumidity;
+    }
+  }
+
+  // Extract test points table rows directly from docItems
+  const testRows = [];
+  for (let i = 0; i < docItems.length; i++) {
+    const item = docItems[i];
+    if (/^[1-9]\d*$/.test(item.text.trim())) {
+      const ptNum = item.text.trim();
+      const stdVal = (i + 1 < docItems.length) ? docItems[i + 1].text.trim() : '';
+      const actVal = (i + 2 < docItems.length) ? docItems[i + 2].text.trim() : '';
+      if (stdVal || actVal) {
+        testRows.push({ ptNum, stdVal, actVal });
+      }
+    }
+  }
 
   let testRowsSvg = '';
-  testPoints.forEach((tp, idx) => {
+  const rowsToRender = testRows.length > 0 ? testRows : [{ ptNum: '1', stdVal: '9.96 ppm (N2 balance)', actVal: '' }];
+
+  rowsToRender.forEach((tr, idx) => {
     const y = 430 + idx * 30;
-    const stdVal = escapeXml(tp.std || '');
-    const actVal = escapeXml(tp.act || '');
     testRowsSvg += `
       <rect x="60" y="${y}" width="680" height="30" fill="${idx % 2 === 0 ? '#ffffff' : '#f9fafb'}" stroke="#1e293b" stroke-width="1"/>
       <line x1="180" y1="${y}" x2="180" y2="${y + 30}" stroke="#1e293b" stroke-width="1"/>
       <line x1="520" y1="${y}" x2="520" y2="${y + 30}" stroke="#1e293b" stroke-width="1"/>
-      <text x="120" y="${y + 20}" font-size="13" fill="#0f172a" text-anchor="middle">${tp.point || idx + 1}</text>
-      <text x="350" y="${y + 20}" font-size="13" fill="#0f172a" text-anchor="middle">${stdVal}</text>
-      <text x="630" y="${y + 20}" font-size="13" fill="#0f172a" font-weight="600" text-anchor="middle">${actVal}</text>
+      <text x="120" y="${y + 20}" font-size="13" fill="#0f172a" text-anchor="middle">${escapeXml(tr.ptNum)}</text>
+      <text x="350" y="${y + 20}" font-size="13" fill="#0f172a" text-anchor="middle">${escapeXml(tr.stdVal)}</text>
+      <text x="630" y="${y + 20}" font-size="13" fill="#0f172a" font-weight="600" text-anchor="middle">${escapeXml(tr.actVal)}</text>
     `;
   });
 
-  const tableBottomY = 430 + testPoints.length * 30 + 40;
+  const tableBottomY = 430 + rowsToRender.length * 30 + 40;
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 1130" width="800" height="1130" font-family="'Times New Roman', 'Arial', 'SimSun', sans-serif">
@@ -73,9 +144,9 @@ function generateCertSvg(info) {
 
   <!-- Row 1 -->
   <text x="70" y="205" font-size="13" font-weight="bold" fill="#0f172a">Customer</text>
-  <text x="230" y="205" font-size="13" fill="#0f172a">${customer}</text>
+  <text x="230" y="205" font-size="13" fill="#0f172a">${escapeXml(customer)}</text>
   <text x="440" y="205" font-size="13" font-weight="bold" fill="#0f172a">Date:</text>
-  <text x="590" y="205" font-size="13" fill="#0f172a">${certDate}</text>
+  <text x="590" y="205" font-size="13" fill="#0f172a">${escapeXml(certDate)}</text>
 
   <!-- Row 2 -->
   <text x="70" y="243" font-size="13" font-weight="bold" fill="#0f172a">Cust Ref #</text>
@@ -85,15 +156,15 @@ function generateCertSvg(info) {
 
   <!-- Row 3 -->
   <text x="70" y="281" font-size="13" font-weight="bold" fill="#0f172a">Instrument</text>
-  <text x="230" y="281" font-size="13" fill="#0f172a">${model}</text>
+  <text x="230" y="281" font-size="13" fill="#0f172a">${escapeXml(model)}</text>
   <text x="440" y="281" font-size="13" font-weight="bold" fill="#0f172a">Inst. SN.</text>
-  <text x="590" y="281" font-size="13" font-weight="bold" fill="#003366">${deviceSn}</text>
+  <text x="590" y="281" font-size="13" font-weight="bold" fill="#003366">${escapeXml(deviceSn)}</text>
 
   <!-- Row 4 -->
   <text x="70" y="319" font-size="13" font-weight="bold" fill="#0f172a">Ambient Temperature:</text>
-  <text x="230" y="319" font-size="13" fill="#0f172a">${ambientTemp} ℃</text>
+  <text x="230" y="319" font-size="13" fill="#0f172a">${escapeXml(ambientTemp)}</text>
   <text x="440" y="319" font-size="13" font-weight="bold" fill="#0f172a">Relative Humidity</text>
-  <text x="590" y="319" font-size="13" fill="#0f172a">${relativeHumidity}%RH</text>
+  <text x="590" y="319" font-size="13" fill="#0f172a">${escapeXml(relativeHumidity)}</text>
 
   <!-- Row 5 -->
   <text x="70" y="357" font-size="13" font-weight="bold" fill="#0f172a">Comments</text>
@@ -129,38 +200,52 @@ function generateCertSvg(info) {
 </svg>`;
 }
 
-/**
- * Generate high-fidelity SVG for Packing List (.doc / .docx)
- */
-function generatePackingSvg(info) {
-  const model = escapeXml(info.model || 'POA200');
-  const deviceSn = escapeXml(info.deviceSn || 'AP10007513');
-  const packingItems = info.packingItems && info.packingItems.length > 0 ? info.packingItems : [
-    { index: 1, name: '主设备', spec: model, count: 1, unit: '台', standard: '是', remark: `SN: ${deviceSn}带泵` },
-    { index: 2, name: '传感器', spec: info.sensorModel || 'PMT210SEN', count: 1, unit: '支', standard: '是', remark: `SN: ${info.sensorSn || '201N200258'}` }
-  ];
+function renderPackingSvgFromDocItems(docItems, extraContext) {
+  let model = 'POA200';
+
+  for (let i = 0; i < docItems.length; i++) {
+    const text = docItems[i].text;
+    if (text.includes('发货清单')) {
+      model = text.replace('发货清单', '').trim() || model;
+    }
+  }
 
   let itemsSvg = '';
-  packingItems.forEach((item, idx) => {
-    const y = 160 + idx * 32;
-    itemsSvg += `
-      <rect x="60" y="${y}" width="680" height="32" fill="#ffffff" stroke="#1e293b" stroke-width="1"/>
-      <line x1="110" y1="${y}" x2="110" y2="${y + 32}" stroke="#1e293b" stroke-width="1"/>
-      <line x1="230" y1="${y}" x2="230" y2="${y + 32}" stroke="#1e293b" stroke-width="1"/>
-      <line x1="380" y1="${y}" x2="380" y2="${y + 32}" stroke="#1e293b" stroke-width="1"/>
-      <line x1="440" y1="${y}" x2="440" y2="${y + 32}" stroke="#1e293b" stroke-width="1"/>
-      <line x1="500" y1="${y}" x2="500" y2="${y + 32}" stroke="#1e293b" stroke-width="1"/>
-      <line x1="560" y1="${y}" x2="560" y2="${y + 32}" stroke="#1e293b" stroke-width="1"/>
+  let rowCount = 0;
+  for (let i = 0; i < docItems.length; i++) {
+    const item = docItems[i];
+    if (/^[1-9]\d*$/.test(item.text.trim()) && i + 6 < docItems.length) {
+      const idx = item.text.trim();
+      const name = docItems[i + 1].text.trim();
+      const spec = docItems[i + 2].text.trim();
+      const count = docItems[i + 3].text.trim();
+      const unit = docItems[i + 4].text.trim();
+      const standard = docItems[i + 5].text.trim();
+      const remark = docItems[i + 6].text.trim();
 
-      <text x="85" y="${y + 21}" font-size="13" fill="#0f172a" text-anchor="middle">${item.index || idx + 1}</text>
-      <text x="170" y="${y + 21}" font-size="13" fill="#0f172a" text-anchor="middle">${escapeXml(item.name)}</text>
-      <text x="305" y="${y + 21}" font-size="13" fill="#0f172a" text-anchor="middle">${escapeXml(item.spec)}</text>
-      <text x="410" y="${y + 21}" font-size="13" fill="#0f172a" text-anchor="middle">${escapeXml(item.count)}</text>
-      <text x="470" y="${y + 21}" font-size="13" fill="#0f172a" text-anchor="middle">${escapeXml(item.unit)}</text>
-      <text x="530" y="${y + 21}" font-size="13" fill="#0f172a" text-anchor="middle">${escapeXml(item.standard || '是')}</text>
-      <text x="650" y="${y + 21}" font-size="12" fill="#0f172a" text-anchor="middle">${escapeXml(item.remark)}</text>
-    `;
-  });
+      if (name && (standard === '是' || standard === '否')) {
+        const y = 160 + rowCount * 32;
+        itemsSvg += `
+          <rect x="60" y="${y}" width="680" height="32" fill="#ffffff" stroke="#1e293b" stroke-width="1"/>
+          <line x1="110" y1="${y}" x2="110" y2="${y + 32}" stroke="#1e293b" stroke-width="1"/>
+          <line x1="230" y1="${y}" x2="230" y2="${y + 32}" stroke="#1e293b" stroke-width="1"/>
+          <line x1="380" y1="${y}" x2="380" y2="${y + 32}" stroke="#1e293b" stroke-width="1"/>
+          <line x1="440" y1="${y}" x2="440" y2="${y + 32}" stroke="#1e293b" stroke-width="1"/>
+          <line x1="500" y1="${y}" x2="500" y2="${y + 32}" stroke="#1e293b" stroke-width="1"/>
+          <line x1="560" y1="${y}" x2="560" y2="${y + 32}" stroke="#1e293b" stroke-width="1"/>
+
+          <text x="85" y="${y + 21}" font-size="13" fill="#0f172a" text-anchor="middle">${escapeXml(idx)}</text>
+          <text x="170" y="${y + 21}" font-size="13" fill="#0f172a" text-anchor="middle">${escapeXml(name)}</text>
+          <text x="305" y="${y + 21}" font-size="13" fill="#0f172a" text-anchor="middle">${escapeXml(spec)}</text>
+          <text x="410" y="${y + 21}" font-size="13" fill="#0f172a" text-anchor="middle">${escapeXml(count)}</text>
+          <text x="470" y="${y + 21}" font-size="13" fill="#0f172a" text-anchor="middle">${escapeXml(unit)}</text>
+          <text x="530" y="${y + 21}" font-size="13" fill="#0f172a" text-anchor="middle">${escapeXml(standard)}</text>
+          <text x="650" y="${y + 21}" font-size="12" fill="#0f172a" text-anchor="middle">${escapeXml(remark)}</text>
+        `;
+        rowCount++;
+      }
+    }
+  }
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 1130" width="800" height="1130" font-family="'SimSun', 'Microsoft YaHei', sans-serif">
@@ -172,7 +257,7 @@ function generatePackingSvg(info) {
   <text x="60" y="80" font-size="15" font-weight="bold" fill="#000000">约克仪器</text>
   <text x="740" y="80" font-size="15" font-weight="bold" fill="#000000" text-anchor="end">创新科技</text>
 
-  <text x="400" y="110" font-size="22" font-weight="bold" fill="#000000" text-anchor="middle">${model}发货清单</text>
+  <text x="400" y="110" font-size="22" font-weight="bold" fill="#000000" text-anchor="middle">${escapeXml(model)}发货清单</text>
 
   <!-- Items Table Header -->
   <rect x="60" y="130" width="680" height="30" fill="#ffffff" stroke="#1e293b" stroke-width="1"/>
@@ -196,78 +281,6 @@ function generatePackingSvg(info) {
 </svg>`;
 }
 
-/**
- * Convert .doc or .docx file to paged preview images (C11, R21, R22)
- * Returns array of public preview image URLs
- */
-function generateDocumentPreview(wordFilePath, outputDir, fileId, extraContext = {}) {
-  if (!fs.existsSync(wordFilePath)) {
-    throw new Error(`Word file not found: ${wordFilePath}`);
-  }
-
-  // Validate that input file is a Word document (.doc or .docx) - J12, Q33
-  const ext = path.extname(wordFilePath).toLowerCase();
-  if (ext !== '.doc' && ext !== '.docx') {
-    throw new Error(`Non-Word file rejected: ${wordFilePath} is not a valid .doc or .docx file! (J12, Q33)`);
-  }
-
-  if (!fs.existsSync(outputDir)) {
-    fs.mkdirSync(outputDir, { recursive: true });
-  }
-
-  const fileBaseName = `preview_${fileId}`;
-  const images = [];
-
-  // Determine type and metadata
-  const fileType = extraContext.fileType || (fileId.includes('cert') ? 'cert' : 'packing');
-  let task = extraContext.task || null;
-  let formData = extraContext.formData || (task && task.form_data ? (typeof task.form_data === 'string' ? JSON.parse(task.form_data) : task.form_data) : {});
-
-  // If task not provided, try reading from database
-  if (!task && fileId) {
-    try {
-      const db = require('./db');
-      const taskIdMatch = fileId.match(/^(\d+)_/);
-      if (taskIdMatch) {
-        const tId = taskIdMatch[1];
-        task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(tId);
-        if (task && task.form_data) {
-          formData = typeof task.form_data === 'string' ? JSON.parse(task.form_data) : task.form_data;
-        }
-      }
-    } catch (e) {}
-  }
-
-  const previewInfo = {
-    taskId: task ? task.id : fileId,
-    clientName: task ? task.client_name : '操作员',
-    model: task ? task.model : (formData.model || 'POA200'),
-    deviceSn: task ? task.device_sn : (formData.deviceSn || '00001234'),
-    shippingLocation: formData.shippingLocation || '苏州',
-    sensorModel: formData.sensorModel || 'PSR-12-223(封装）',
-    sensorSn: formData.sensorSn || '009876',
-    ambientTemp: formData.ambientTemp || '28.7',
-    relativeHumidity: formData.relativeHumidity || '63.2',
-    hasPump: formData.hasPump !== false,
-    certDate: formData.certDate || new Date().toISOString().slice(0, 10),
-    testPoints: formData.testPoints || [],
-    packingItems: formData.packingItems || []
-  };
-
-  // Generate high-fidelity SVG preview (instant, zero delay, pixel perfect)
-  const svgContent = fileType === 'cert' 
-    ? generateCertSvg(previewInfo) 
-    : generatePackingSvg(previewInfo);
-
-  const svgFilePath = path.join(outputDir, `${fileBaseName}-1.svg`);
-  fs.writeFileSync(svgFilePath, svgContent, 'utf-8');
-  images.push(`/previews/${fileBaseName}-1.svg`);
-
-  return images;
-}
-
 module.exports = {
-  generateDocumentPreview,
-  generateCertSvg,
-  generatePackingSvg
+  generateDocumentPreview
 };

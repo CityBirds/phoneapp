@@ -208,17 +208,43 @@
               <thead>
                 <tr>
                   <th>目标业务字段</th>
+                  <th>字段用途 / 类别</th>
                   <th>匹配置信度</th>
-                  <th>识别标签位置 (坐标)</th>
-                  <th>推荐赋值位置 (坐标)</th>
+                  <th>候选及位置匹配 (坐标)</th>
                   <th>识别候选参考值</th>
-                  <th>匹配状态</th>
+                  <th>绑定状态</th>
+                  <th style="width: 100px; text-align: right;">操作</th>
                 </tr>
               </thead>
               <tbody id="matcher-tbody">
                 <!-- Dynamically loaded -->
               </tbody>
             </table>
+          </div>
+        </div>
+
+        <div id="sensor-model-config-card" class="card" style="margin-top: 20px; display: none;">
+          <h3>⚙️ POA200 传感器型号下拉选项配置 (仅用于文件命名)</h3>
+          <p style="font-size: 13px; color: #64748b; margin-top: 4px;">
+            针对 POA200 模板配置传感器型号下拉选项（支持中文逗号“，”或英文逗号“,”分隔）。仅用于发货证书文件命名，不写入 Word 正文，不强求 Word 位置坐标。
+          </p>
+          <div style="display: grid; grid-template-columns: 2fr 1fr; gap: 16px; margin-top: 12px; align-items: start;">
+            <div class="form-group">
+              <label>传感器型号选项 (输入格式：型号A， 型号B,型号A,, 型号C)</label>
+              <input type="text" id="sensor-options-input" class="form-control" value="PSR-12-223(封装）， PMT210SEN" oninput="previewSensorOptions()">
+            </div>
+            <div class="form-group">
+              <label>默认选中的型号（可选）</label>
+              <select id="sensor-default-select" class="form-control">
+                <option value="">(无默认值)</option>
+              </select>
+            </div>
+          </div>
+          <div style="margin-top: 10px;">
+            <b>解析去重选项预览：</b>
+            <div id="sensor-options-preview-pills" style="margin-top: 6px; display: flex; gap: 8px; flex-wrap: wrap;">
+              <!-- Dynamic Pills -->
+            </div>
           </div>
         </div>
       </section>

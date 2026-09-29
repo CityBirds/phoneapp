@@ -85,8 +85,8 @@ def process_word_document(template_path, output_path, data):
                     if doc_type == 'cert':
                         # Customer is strictly PRESERVED as static template original (J02, J07)
                         # Write Ambient Temperature & Relative Humidity (J06)
-                        ambient_temp = str(form_data.get('ambientTemp', '28.7'))
-                        relative_humidity = str(form_data.get('relativeHumidity', '63.2'))
+                        ambient_temp = str(form_data.get('ambientTemp', '')) if form_data.get('ambientTemp') is not None else ''
+                        relative_humidity = str(form_data.get('relativeHumidity', '')) if form_data.get('relativeHumidity') is not None else ''
 
                         # Row 4 Col 6: Date / certDate
                         if cert_date and table.Rows.Count >= 4 and table.Columns.Count >= 6:

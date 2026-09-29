@@ -1,6 +1,6 @@
 /**
  * phoneApp Coordinator Server Admin Console Logic (协调服务主机专用控制台)
- * Rules: C01, C02, C03, C04, C05, C13
+ * Rules: C01, C02, C03, C04, C05, C13, F01-F16, G01-G12
  */
 
 const API_BASE = window.location.origin;
@@ -271,6 +271,36 @@ function goToMatcher(tmplId) {
   }
 }
 
+function previewSensorOptions() {
+  const inputEl = document.getElementById('sensor-options-input');
+  const defaultSelect = document.getElementById('sensor-default-select');
+  const pillsBox = document.getElementById('sensor-options-preview-pills');
+  if (!inputEl || !pillsBox) return [];
+
+  const rawVal = inputEl.value || '';
+  const tokens = rawVal.split(/[，,]/);
+  const options = [];
+  tokens.forEach(t => {
+    const cleaned = t.trim();
+    if (cleaned && !options.includes(cleaned)) {
+      options.push(cleaned);
+    }
+  });
+
+  pillsBox.innerHTML = options.length > 0
+    ? options.map(opt => `<span class="badge badge-warning">${opt}</span>`).join('')
+    : '<span style="font-size: 12px; color: #94a3b8;">未配置有效选项</span>';
+
+  if (defaultSelect) {
+    const currentDefault = defaultSelect.value;
+    defaultSelect.innerHTML = '<option value="">(无默认值)</option>' + options.map(o => `
+      <option value="${o}" ${o === currentDefault ? 'selected' : ''}>${o}</option>
+    `).join('');
+  }
+
+  return options;
+}
+
 async function runTemplateAnalyze() {
   const select = document.getElementById('matcher-select-template');
   const tmplId = select ? select.value : '';
@@ -278,20 +308,30 @@ async function runTemplateAnalyze() {
 
   const container = document.getElementById('matcher-results-container');
   const tbody = document.getElementById('matcher-tbody');
+  const sensorCard = document.getElementById('sensor-model-config-card');
+
   container.style.display = 'block';
-  tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; padding: 20px;">🤖 正在深度解析 Word 结构并提取单元格与段落...</td></tr>';
+  tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; padding: 20px;">🤖 正在深度解析 Word 结构并提取单元格与段落...</td></tr>';
 
   try {
     const res = await fetch(`${API_BASE}/api/templates/${tmplId}/analyze`);
     const data = await res.json();
     currentMatcherData = data;
+    currentMatcherData.selectedChoices = {};
 
     document.getElementById('matcher-doc-title').innerText = `模板字段位置匹配清单: ${data.template.filename}`;
     document.getElementById('matcher-doc-meta').innerText = `型号: ${data.template.model} | 提取文本结构项: ${data.docItemsCount} 项`;
 
+    if (data.template.model === 'POA200' && data.template.type === 'cert') {
+      if (sensorCard) sensorCard.style.display = 'block';
+      previewSensorOptions();
+    } else {
+      if (sensorCard) sensorCard.style.display = 'none';
+    }
+
     renderMatcherTable();
   } catch (err) {
-    tbody.innerHTML = `<tr><td colspan="6">分析失败: ${err.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="7">分析失败: ${err.message}</td></tr>`;
   }
 }
 
@@ -300,57 +340,104 @@ function renderMatcherTable() {
   const tbody = document.getElementById('matcher-tbody');
   const matchResults = currentMatcherData.matchResults || {};
   const targetLabels = currentMatcherData.targetLabels || Object.keys(matchResults);
+  const choices = currentMatcherData.selectedChoices || {};
 
   tbody.innerHTML = targetLabels.map((key, idx) => {
     const match = matchResults[key];
     const candidates = match && match.candidates ? match.candidates : [];
-    const best = candidates.length > 0 ? candidates[0] : null;
 
-    let candidateOptions = '<option value="">-- 手动绑定 / 无匹配 --</option>';
+    const chosenIdx = choices[key] !== undefined ? choices[key] : (candidates.length > 0 ? 0 : -1);
+    const chosenCandidate = chosenIdx >= 0 && chosenIdx < candidates.length ? candidates[chosenIdx] : null;
+
+    let candidateOptions = '<option value="-1">-- 未绑定 / 手动绑定 --</option>';
     candidates.forEach((c, cIdx) => {
       const labelStr = c.location.type === 'cell' 
         ? `[单元格 R${c.location.rowIdx + 1}C${c.location.colIdx + 1}] ${c.matchedLabel}` 
         : `[段落 #${c.location.paragraphIdx + 1}] ${c.matchedLabel}`;
-      candidateOptions += `<option value="${cIdx}" ${cIdx === 0 ? 'selected' : ''}>${labelStr} (${Math.round(c.score * 100)}% 命中)</option>`;
+      candidateOptions += `<option value="${cIdx}" ${cIdx === chosenIdx ? 'selected' : ''}>${labelStr} (${c.reason || '匹配'})</option>`;
     });
 
-    const isBound = best !== null;
+    const isBound = chosenCandidate !== null;
+    const isNamingOnly = key === 'sensorModel' || key === '传感器型号';
+
+    let fieldCategory = '单值字段';
+    if (key.includes('Analyzer') || key.includes('Test')) {
+      fieldCategory = '表格列数据区';
+    } else if (isNamingOnly) {
+      fieldCategory = '命名业务参数 (无Word坐标)';
+    }
+
+    let statusBadge = '<span class="badge badge-danger">未绑定</span>';
+    if (isNamingOnly) {
+      statusBadge = '<span class="badge badge-success">仅命名参数</span>';
+    } else if (isBound) {
+      const scorePct = Math.round(chosenCandidate.score * 100);
+      statusBadge = `<span class="badge ${chosenCandidate.score >= 0.9 ? 'badge-success' : 'badge-warning'}">${scorePct}% ${chosenCandidate.reason || '已绑定'}</span>`;
+    }
+
+    const valueDisp = isBound 
+      ? (chosenCandidate.candidateValue || '已指定位置') 
+      : (isNamingOnly ? '用作发货证书文件名' : '<span style="color: #ef4444;">未绑定</span>');
 
     return `
       <tr>
         <td><b style="color: #0f172a; font-size: 14px;">${key}</b></td>
-        <td><span class="badge ${isBound ? 'badge-success' : 'badge-warning'}">${isBound ? Math.round(best.score * 100) + '% 命中' : '待配置'}</span></td>
+        <td><span class="badge badge-secondary" style="font-size: 11px;">${fieldCategory}</span></td>
+        <td>${statusBadge}</td>
         <td>
-          <select class="form-control" style="font-size: 12px;" onchange="updateCandidateChoice('${key}', this.value)">
-            ${candidateOptions}
-          </select>
+          ${isNamingOnly ? '<span style="color: #64748b; font-size: 12px;">(不需Word单元格坐标)</span>' : `
+            <select class="form-control" style="font-size: 12px;" onchange="updateCandidateChoice('${key}', this.value)">
+              ${candidateOptions}
+            </select>
+          `}
         </td>
-        <td><b style="color: #0284c7;">${best && best.candidateValue ? best.candidateValue : '已绑定'}</b></td>
-        <td><code>${best ? best.context : '未命中'}</code></td>
+        <td><code>${valueDisp}</code></td>
+        <td><b style="color: ${isBound ? '#0284c7' : '#94a3b8'};">${isBound ? '已绑定' : (isNamingOnly ? '已配置' : '未绑定')}</b></td>
         <td style="text-align: right;">
-          <button type="button" class="btn btn-sm btn-danger" onclick="deleteMatcherField('${key}')">🗑️ 删除字段</button>
+          <button type="button" class="btn btn-sm btn-danger" onclick="deleteMatcherField('${key}')">🗑️ 删除</button>
         </td>
       </tr>
     `;
   }).join('') + `
     <tr>
-      <td colspan="6" style="background: #f8fafc; text-align: center; padding: 12px;">
+      <td colspan="7" style="background: #f8fafc; text-align: center; padding: 12px;">
         <button type="button" class="btn btn-sm btn-outline" onclick="addMatcherField()">➕ 添加需要配置的字段</button>
       </td>
     </tr>
   `;
 }
 
-function addMatcherField() {
-  const fieldName = prompt('请输入新新增要配置的字段名称:');
+async function addMatcherField() {
+  const fieldName = prompt('请输入新增要配置的字段名称:');
   if (!fieldName || !fieldName.trim()) return;
 
   const key = fieldName.trim();
   if (!currentMatcherData.targetLabels) currentMatcherData.targetLabels = [];
   if (!currentMatcherData.targetLabels.includes(key)) {
     currentMatcherData.targetLabels.push(key);
-    currentMatcherData.matchResults[key] = { label: key, matchCount: 0, candidates: [] };
   }
+
+  try {
+    const res = await fetch(`${API_BASE}/api/templates/match-candidates`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        targetLabel: key,
+        docItems: currentMatcherData.docItems || []
+      })
+    });
+    const result = await res.json();
+    currentMatcherData.matchResults[key] = result;
+    if (result.candidates && result.candidates.length > 0) {
+      currentMatcherData.selectedChoices[key] = 0;
+    } else {
+      currentMatcherData.selectedChoices[key] = -1;
+    }
+  } catch (e) {
+    currentMatcherData.matchResults[key] = { label: key, matchCount: 0, candidates: [] };
+    currentMatcherData.selectedChoices[key] = -1;
+  }
+
   renderMatcherTable();
 }
 
@@ -358,12 +445,18 @@ function deleteMatcherField(key) {
   if (confirm(`确定要删除配置字段 [${key}] 吗？`)) {
     currentMatcherData.targetLabels = currentMatcherData.targetLabels.filter(k => k !== key);
     delete currentMatcherData.matchResults[key];
+    delete currentMatcherData.selectedChoices[key];
     renderMatcherTable();
   }
 }
 
-function updateCandidateChoice(key, candidateIdx) {
-  // Candidate choice update handler
+function updateCandidateChoice(key, choiceVal) {
+  if (!currentMatcherData) return;
+  if (!currentMatcherData.selectedChoices) currentMatcherData.selectedChoices = {};
+
+  const idx = parseInt(choiceVal);
+  currentMatcherData.selectedChoices[key] = idx;
+  renderMatcherTable();
 }
 
 async function saveMatchedRules(isDraft = false) {
@@ -371,16 +464,43 @@ async function saveMatchedRules(isDraft = false) {
 
   const tmpl = currentMatcherData.template;
   const matchResults = currentMatcherData.matchResults || {};
+  const choices = currentMatcherData.selectedChoices || {};
 
-  const singleFields = currentMatcherData.targetLabels.map(lbl => {
-    const res = matchResults[lbl];
-    const best = res && res.candidates && res.candidates.length > 0 ? res.candidates[0] : null;
-    return {
+  let sensorOptions = [];
+  let sensorDefault = '';
+  if (tmpl.model === 'POA200' && tmpl.type === 'cert') {
+    sensorOptions = previewSensorOptions();
+    const defaultSelect = document.getElementById('sensor-default-select');
+    sensorDefault = defaultSelect ? defaultSelect.value : '';
+  }
+
+  const unboundFields = [];
+  const singleFields = [];
+
+  currentMatcherData.targetLabels.forEach(lbl => {
+    const isNamingOnly = lbl === 'sensorModel' || lbl === '传感器型号';
+    const match = matchResults[lbl];
+    const candidates = match && match.candidates ? match.candidates : [];
+    const chosenIdx = choices[lbl] !== undefined ? choices[lbl] : (candidates.length > 0 ? 0 : -1);
+    const chosen = chosenIdx >= 0 && chosenIdx < candidates.length ? candidates[chosenIdx] : null;
+
+    if (!isNamingOnly && !chosen) {
+      unboundFields.push(lbl);
+    }
+
+    singleFields.push({
       label: lbl,
-      status: best ? 'bound' : 'unbound',
-      location: best ? best.location : null
-    };
+      status: chosen ? 'bound' : (isNamingOnly ? 'naming_only' : 'unbound'),
+      location: chosen ? chosen.location : null,
+      valueLocation: chosen ? chosen.suggestedValueLocation : null,
+      candidateValue: chosen ? chosen.candidateValue : null
+    });
   });
+
+  // Validate formal publish requirement (F04, J11, Q32)
+  if (!isDraft && unboundFields.length > 0) {
+    return alert(`存在未绑定且需写回 Word 的字段 (${unboundFields.join(', ')})！\n严禁正式发布未绑定的模板逻辑。请先完成字段绑定或保存为草稿。`);
+  }
 
   try {
     const res = await fetch(`${API_BASE}/api/templates/publish`, {
@@ -397,17 +517,24 @@ async function saveMatchedRules(isDraft = false) {
         fieldMappings: {
           analyzedAt: new Date().toISOString(),
           singleFields,
-          matches: matchResults
+          sensorModelConfig: {
+            options: sensorOptions,
+            defaultValue: sensorDefault
+          },
+          matches: matchResults,
+          choices
         },
         version: tmpl.version,
         isDraft
       })
     });
+
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || '保存失败');
-    alert(isDraft ? '已保存为草稿版本' : '字段映射规则已成功正式发布至协调服务模板库！');
+
+    alert(isDraft ? '已成功保存为草稿版本 (Draft)' : '模板规则与绑定映射已成功正式发布！');
   } catch (err) {
-    alert(err.message);
+    alert('保存失败: ' + err.message);
   }
 }
 

@@ -138,6 +138,39 @@ class ExecutionWorker {
     }
   }
 
+  async fetchTemplateForTask(model, fileType) {
+    try {
+      const res = await fetch(`${this.serverUrl}/api/templates`);
+      if (res.ok) {
+        const tmpls = await res.json();
+        const found = tmpls.find(t => t.model === model && t.type === fileType);
+        if (found && found.filepath && fs.existsSync(found.filepath)) {
+          return found;
+        }
+      }
+    } catch (e) {}
+
+    const samplesDir = path.resolve(__dirname, '../../samples');
+    let fallbackPath = '';
+    if (fileType === 'cert') {
+      if (model === '990' || model === 'DPT-990-Ex') {
+        fallbackPath = path.join(samplesDir, '990-Ex-EX10260902发货证书.doc');
+      } else if (model === 'DPT810') {
+        fallbackPath = path.join(samplesDir, 'DPT810证书(变送器-A010007031)-JM-26.8.28.doc');
+      } else {
+        fallbackPath = path.join(samplesDir, 'POA200证书AP10007513-20260403发南京订单-PSR-12-223(封装）带泵.doc');
+      }
+    } else if (fileType === 'packing') {
+      if (model === 'POA200') {
+        fallbackPath = path.join(samplesDir, 'POA200(140)AP10007513发货清单20260403带泵.doc');
+      } else {
+        throw new Error(`Model ${model} does not support packing list! (J09)`);
+      }
+    }
+
+    return { filepath: fallbackPath, field_mappings: {} };
+  }
+
   async processTask(task) {
     console.log(`[${this.name}] 正在处理发货任务 #${task.id} (${task.model} ${task.device_sn})`);
 
@@ -146,22 +179,12 @@ class ExecutionWorker {
 
     for (const fileRec of files) {
       try {
-        const samplesDir = path.resolve(__dirname, '../../samples');
-        let templatePath = '';
-        if (fileRec.file_type === 'cert') {
-          if (task.model === '990' || task.model === 'DPT-990-Ex') {
-            templatePath = path.join(samplesDir, '990-Ex-EX10260902发货证书.doc');
-          } else if (task.model === 'DPT810') {
-            templatePath = path.join(samplesDir, 'DPT810证书(变送器-A010007031)-JM-26.8.28.doc');
-          } else {
-            templatePath = path.join(samplesDir, 'POA200证书AP10007513-20260403发南京订单-PSR-12-223(封装）带泵.doc');
-          }
-        } else if (fileRec.file_type === 'packing') {
-          if (task.model === 'POA200') {
-            templatePath = path.join(samplesDir, 'POA200(140)AP10007513发货清单20260403带泵.doc');
-          } else {
-            throw new Error(`Model ${task.model} does not support packing list! (J09)`);
-          }
+        const tmplObj = await this.fetchTemplateForTask(task.model, fileRec.file_type);
+        const templatePath = tmplObj.filepath;
+        const fieldMappings = tmplObj.field_mappings || {};
+
+        if (!templatePath || !fs.existsSync(templatePath)) {
+          throw new Error(`Template path not found for model ${task.model} (${fileRec.file_type})`);
         }
 
         const officialFilename = fileRec.official_filename;

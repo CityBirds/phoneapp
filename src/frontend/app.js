@@ -1,6 +1,6 @@
 /**
  * phoneApp Mobile & Workstation Client Logic (手机/车间作业端)
- * Rules: M01 - M15
+ * Rules: M01 - M15, F01-F16, G01-G12
  */
 
 const API_BASE = window.location.origin;
@@ -10,6 +10,7 @@ const state = {
   clientName: localStorage.getItem('phoneapp_user_name') || '',
   selectedWorker: null,
   workers: [],
+  templates: [],
   currentModel: 'POA200',
   hasPump: true,
   currentTask: null,
@@ -32,13 +33,13 @@ const state = {
 window.addEventListener('DOMContentLoaded', async () => {
   initClientIdentity();
   initFormDefaults();
+  await loadPublishedTemplates();
   renderTestPoints();
   renderPackingTable();
   
   await loadWorkers();
   await syncClientNameFromServer();
 
-  // If user previously selected a worker that is online, select it
   const savedWorkerId = localStorage.getItem('phoneapp_selected_worker_id');
   if (savedWorkerId) {
     const found = state.workers.find(w => w.id === savedWorkerId && w.status === 'ONLINE');
@@ -47,12 +48,10 @@ window.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  // If still no worker selected, open workers tab first
   if (!state.selectedWorker) {
     switchNavTab('workers');
   }
 
-  // Periodic poll for workers and client name updates from coordination server
   setInterval(loadWorkers, 5000);
   setInterval(syncClientNameFromServer, 5000);
 });
@@ -131,7 +130,6 @@ async function loadWorkers() {
 
     renderWorkerCards(workers);
 
-    // Update active worker indicator if currently selected
     if (state.selectedWorker) {
       const current = workers.find(w => w.id === state.selectedWorker.id);
       if (current) {
@@ -234,16 +232,44 @@ function updateWorkerUI(worker) {
     submitBtn.innerText = worker ? `确认并提交至 [${worker.name}] 排队处理` : '请先选择执行终端';
   }
 
-  // Update printer select in Preview & Print Tab
   if (worker) {
     updatePrinterDropdown(worker.printers || []);
   }
 }
 
-// ==================== FORM SETUP ====================
+// ==================== TEMPLATES & DYNAMIC FORM SETUP ====================
+async function loadPublishedTemplates() {
+  try {
+    const res = await fetch(`${API_BASE}/api/templates`);
+    state.templates = await res.json();
+    populateSensorModelOptions();
+  } catch (e) {}
+}
+
+function populateSensorModelOptions() {
+  const select = document.getElementById('sensor-model');
+  if (!select) return;
+
+  const poaTmpl = state.templates.find(t => t.model === 'POA200' && t.type === 'cert');
+  let options = ['PSR-12-223(封装）', 'PMT210SEN'];
+  let defaultVal = 'PSR-12-223(封装）';
+
+  if (poaTmpl && poaTmpl.field_mappings) {
+    const config = poaTmpl.field_mappings.sensorModelConfig;
+    if (config && Array.isArray(config.options) && config.options.length > 0) {
+      options = config.options;
+      if (config.defaultValue) defaultVal = config.defaultValue;
+    }
+  }
+
+  select.innerHTML = options.map(opt => `<option value="${opt}" ${opt === defaultVal ? 'selected' : ''}>${opt}</option>`).join('');
+}
+
 function initFormDefaults() {
   const today = new Date().toISOString().slice(0, 10);
   document.getElementById('cert-date').value = today;
+  if (document.getElementById('ambient-temp')) document.getElementById('ambient-temp').value = '';
+  if (document.getElementById('relative-humidity')) document.getElementById('relative-humidity').value = '';
 }
 
 function onModelChange() {
@@ -258,8 +284,8 @@ function onModelChange() {
     if (pumpGroup) pumpGroup.style.display = 'block';
     if (packingSection) packingSection.style.display = 'block';
     if (sensorModelGroup) sensorModelGroup.style.display = 'block';
+    populateSensorModelOptions();
   } else {
-    // DPT810 and 990 have CERTIFICATE ONLY (J09)
     if (pumpGroup) pumpGroup.style.display = 'none';
     if (packingSection) packingSection.style.display = 'none';
     if (sensorModelGroup) sensorModelGroup.style.display = 'none';
@@ -284,31 +310,29 @@ function renderTestPoints() {
       <tr>
         <td>测试点 1</td>
         <td><input type="text" id="tp-std-1" class="form-control" value="9.96 ppm (N2 balance)"></td>
-        <td><input type="text" id="tp-act-1" class="form-control" value="9.88"></td>
+        <td><input type="text" id="tp-act-1" class="form-control" value="" placeholder="实测值 (待填)"></td>
       </tr>
     `;
   } else if (state.currentModel === 'DPT810') {
-    // 10 test points for DPT810 (Standard: ℃ dp, Measured: mA) - J08
-    const stds = [-60.0, -50.0, -40.0, -30.0, -20.0, -10.0, 0.0, 10.0, 20.0, 30.0];
-    const acts = [6.61, 7.65, 8.78, 10.17, 11.30, 12.68, 13.81, 14.89, 16.06, 18.83];
+    // 10 test points from DPT810 sample: [-89.00,-80.12,-70.81,-60.23,-50.82,-40.91,-30.45,-21.90,-12.26,10.25] (F13, G05)
+    const stds = [-89.00, -80.12, -70.81, -60.23, -50.82, -40.91, -30.45, -21.90, -12.26, 10.25];
 
     tbody.innerHTML = stds.map((s, i) => `
       <tr>
         <td>测试点 ${i + 1}</td>
         <td><input type="text" id="tp-std-${i + 1}" class="form-control" value="${s} ℃ dp"></td>
-        <td><input type="text" id="tp-act-${i + 1}" class="form-control" value="${acts[i]} mA"></td>
+        <td><input type="text" id="tp-act-${i + 1}" class="form-control" value="" placeholder="实测值 mA (待填)"></td>
       </tr>
     `).join('');
   } else if (state.currentModel === '990') {
-    // 9 test points for 990-Ex (Header: Analyzer ℃ dp) - J08
+    // 9 test points for 990-Ex: [-80.75, -70.95, -60.42, -52.43, -42.15, -31.76, -21.24, -12.56, 12.19]
     const stds = [-80.75, -70.95, -60.42, -52.43, -42.15, -31.76, -21.24, -12.56, 12.19];
-    const acts = [-80.2, -70.3, -59.8, -52.0, -41.9, -31.5, -21.2, -11.9, 12.6];
 
     tbody.innerHTML = stds.map((s, i) => `
       <tr>
         <td>测试点 ${i + 1}</td>
         <td><input type="text" id="tp-std-${i + 1}" class="form-control" value="${s} ℃ dp"></td>
-        <td><input type="text" id="tp-act-${i + 1}" class="form-control" value="${acts[i]} ℃ dp"></td>
+        <td><input type="text" id="tp-act-${i + 1}" class="form-control" value="" placeholder="实测值 ℃ dp (待填)"></td>
       </tr>
     `).join('');
   }
@@ -351,7 +375,7 @@ function addPackingRow() {
   const newIdx = state.packingItems.length + 1;
   state.packingItems.push({
     index: newIdx,
-    name: '', // Empty name by default - user MUST enter custom name (J04)
+    name: '', // Empty custom name by default (J04)
     spec: '标准配件',
     count: 1,
     unit: '件',
@@ -379,25 +403,29 @@ async function submitTaskForm() {
   const model = document.getElementById('model-select').value;
   const deviceSn = document.getElementById('device-sn').value.trim();
   const shippingLocation = document.getElementById('shipping-location') ? document.getElementById('shipping-location').value.trim() : '苏州';
-  const sensorModelEl = document.getElementById('sensor-model');
-  const sensorModel = sensorModelEl ? sensorModelEl.value : 'PMT210SEN';
 
   const ambientTempEl = document.getElementById('ambient-temp');
   const relativeHumidityEl = document.getElementById('relative-humidity');
-  const ambientTemp = ambientTempEl ? ambientTempEl.value.trim() : '28.7';
-  const relativeHumidity = relativeHumidityEl ? relativeHumidityEl.value.trim() : '63.2';
+  const ambientTemp = ambientTempEl ? ambientTempEl.value.trim() : '';
+  const relativeHumidity = relativeHumidityEl ? relativeHumidityEl.value.trim() : '';
   const certDate = document.getElementById('cert-date').value;
 
   if (!deviceSn) return alert('请填写设备序列号 (Inst. SN.)');
 
   const hasPacking = model === 'POA200';
 
-  // Extract single source sensor SN from packing list sensor row if packing exists (J03)
-  let sensorSn = '009876';
+  // Sensor Model handling: ONLY for POA200 (F09, F10)
+  let sensorModel = undefined;
+  if (hasPacking) {
+    const sensorModelEl = document.getElementById('sensor-model');
+    sensorModel = sensorModelEl ? sensorModelEl.value : 'PMT210SEN';
+  }
+
+  let sensorSn = '';
   if (hasPacking && state.packingItems.length >= 2) {
     const sensorRow = state.packingItems[1];
     if (sensorRow.remark) {
-      const match = sensorRow.remark.match(/SN:\s*([A-Za-z0-9_-]+)/i) || [null, sensorRow.remark];
+      const match = sensorRow.remark.match(/SN[:：]\s*([A-Za-z0-9_-]+)/i) || [null, sensorRow.remark];
       sensorSn = match[1] || sensorRow.remark;
     }
   }
@@ -410,7 +438,6 @@ async function submitTaskForm() {
         return alert(`第 ${i + 1} 行物料名称不能为空，请输入有效的自定义物料名称！`);
       }
     }
-    // Update main device SN in protected row 1
     state.packingItems[0].remark = `SN: ${deviceSn}${state.hasPump ? '带泵' : ''}`;
   }
 
@@ -439,8 +466,6 @@ async function submitTaskForm() {
     model,
     deviceSn,
     shippingLocation,
-    sensorModel,
-    sensorSn,
     ambientTemp,
     relativeHumidity,
     hasPump: hasPacking ? state.hasPump : false,
@@ -448,6 +473,11 @@ async function submitTaskForm() {
     testPoints,
     packingItems: hasPacking ? state.packingItems : []
   };
+
+  if (hasPacking && sensorModel) {
+    payload.sensorModel = sensorModel;
+    payload.sensorSn = sensorSn;
+  }
 
   try {
     const res = await fetch(`${API_BASE}/api/tasks/submit`, {
@@ -457,13 +487,14 @@ async function submitTaskForm() {
     });
 
     const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.error || '提交任务失败');
+    }
     state.currentTask = data.task;
 
-    // Switch to preview tab immediately
     switchNavTab('preview');
     renderPreviewLoading();
 
-    // Start smart fast polling (700ms) until previews are ready
     pollTaskPreview(data.task.id);
   } catch (err) {
     alert('提交任务失败: ' + err.message);
@@ -541,7 +572,6 @@ function renderPreviewBox() {
     return;
   }
 
-  // Update download button
   const downloadUrl = `${API_BASE}/api/tasks/${state.currentTask.id}/files/${state.activePreviewType}/download`;
   if (btnBox) {
     btnBox.innerHTML = `

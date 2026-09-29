@@ -30,10 +30,13 @@ function generateCertFilename(params) {
   } = params;
 
   const dateStr = formatBeijingDate(acceptedDate);
-  const pumpSuffix = hasPump ? '带泵' : '';
+  const pumpSuffix = (hasPump && model === 'POA200') ? '带泵' : '';
   const ext = extension.startsWith('.') ? extension : `.${extension}`;
 
-  return `${model}证书${deviceSn}-${dateStr}发${shippingLocation}订单-${sensorModel}${pumpSuffix}${ext}`;
+  const cleanedSensorModel = (sensorModel && model === 'POA200') ? String(sensorModel).trim() : '';
+  const sensorPart = cleanedSensorModel ? `-${cleanedSensorModel}` : '';
+
+  return `${model}证书${deviceSn}-${dateStr}发${shippingLocation}订单${sensorPart}${pumpSuffix}${ext}`;
 }
 
 /**

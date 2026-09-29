@@ -63,8 +63,8 @@ try {
     $shippingLocation = if ($formData.shippingLocation) { [string]$formData.shippingLocation } else { "" }
     $sensorModel = if ($formData.sensorModel) { [string]$formData.sensorModel } else { "" }
     $sensorSn = if ($formData.sensorSn) { [string]$formData.sensorSn } else { "" }
-    $ambientTemp = if ($formData.ambientTemp) { [string]$formData.ambientTemp } else { "28.7" }
-    $relativeHumidity = if ($formData.relativeHumidity) { [string]$formData.relativeHumidity } else { "63.2" }
+    $ambientTemp = if ($null -ne $formData.ambientTemp) { [string]$formData.ambientTemp } else { "" }
+    $relativeHumidity = if ($null -ne $formData.relativeHumidity) { [string]$formData.relativeHumidity } else { "" }
     $certDate = if ($formData.certDate) { [string]$formData.certDate } elseif ($formData.date) { [string]$formData.date } else { "" }
     $hasPump = if ($null -ne $formData.hasPump) { [bool]$formData.hasPump } else { $true }
 
