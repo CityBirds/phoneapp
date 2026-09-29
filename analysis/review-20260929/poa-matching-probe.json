@@ -1,0 +1,96 @@
+{
+  "fallbackCount": 30,
+  "fallbackHeaders": [
+    {
+      "type": "cell",
+      "text": "TestPointNumber",
+      "rawText": "TestPointNumber",
+      "tableIdx": 0,
+      "rowIdx": 0,
+      "colIdx": 16
+    },
+    {
+      "type": "cell",
+      "text": "NIST Tracea汢൥瑓湡慤摲朠獡瀍浰䄇慮祬敺⁲癰ഠ灰ݭ܇܇ܱ⸹㘹丨′慢慬据⥥㤇㤮ܳ܇܇圍⁥敨扲⁹散瑲晩⁹桴瑡琠敨愠慮祬敺⁲敤慴汩摥愠潢敶栠獡戠敥⁮整瑳摥愠摮挠污扩慲整⁤祢琠敨唍摮牥楳湧摥‬湡⁤瑩⁳数晲牯慭据⁥慷⁳潦湵⁤潴洠敥⁴畯⁲灳捥晩捩瑡潩獮甠汮獥⁳潮整⁤瑯敨睲獩⁥湩琠敨挠浯敭瑮⁳敳瑣潩⹮‍††††††††††††††††††††††䘠牯愠摮漠⁮敢慨晬漠⁦桐䵹瑥楲⁸瑌⹤‍††††††††††††††††††††† ††††††††††††‍†††††††††††††††††††††††䘠牯儠慵楬祴䄠獳牵湡散䴠湡条牥഍܇",
+      "rawText": "NIST Tracea汢൥瑓湡慤摲朠獡瀍浰䄇慮祬敺⁲癰ഠ灰ݭ܇܇ܱ⸹㘹丨′慢慬据⥥㤇㤮ܳ܇܇圍⁥敨扲⁹散瑲晩⁹桴瑡琠敨愠慮祬敺⁲敤慴汩摥愠潢敶栠獡戠敥⁮整瑳摥愠摮挠污扩慲整⁤祢琠敨唍摮牥楳湧摥‬湡⁤瑩⁳数晲牯慭据⁥慷⁳潦湵⁤潴洠敥⁴畯⁲灳捥晩捩瑡潩獮甠汮獥⁳潮整⁤瑯敨睲獩⁥湩琠敨挠浯敭瑮⁳敳瑣潩⹮‍††††††††††††††††††††††䘠牯愠摮漠⁮敢慨晬漠⁦桐䵹瑥楲⁸瑌⹤‍††††††††††††††††††††† ††††††††††††‍†††††††††††††††††††††††䘠牯儠慵楬祴䄠獳牵湡散䴠湡条牥഍܇",
+      "tableIdx": 0,
+      "rowIdx": 0,
+      "colIdx": 17
+    }
+  ],
+  "results": [
+    {
+      "label": "Analyzer pv ppm",
+      "source": "real",
+      "count": 1,
+      "candidates": [
+        {
+          "matchedLabel": "Analyzer pv \rppm",
+          "score": 1,
+          "status": "FULL_MATCH",
+          "reason": "完整匹配",
+          "location": {
+            "type": "cell",
+            "tableIdx": 0,
+            "rowIdx": 11,
+            "colIdx": 3
+          },
+          "context": "Analyzer pv \rppm",
+          "suggestedValueLocation": {
+            "type": "cell",
+            "tableIdx": 0,
+            "rowIdx": 11,
+            "colIdx": 4
+          },
+          "candidateValue": "空",
+          "sampleValues": [
+            "9.93"
+          ]
+        }
+      ]
+    },
+    {
+      "label": "Analyzer pv ppm",
+      "source": "fallback",
+      "count": 0,
+      "candidates": []
+    },
+    {
+      "label": "NIST Traceable Standard gas ppm",
+      "source": "real",
+      "count": 1,
+      "candidates": [
+        {
+          "matchedLabel": "NIST Traceable\rStandard gas\rppm",
+          "score": 1,
+          "status": "FULL_MATCH",
+          "reason": "完整匹配",
+          "location": {
+            "type": "cell",
+            "tableIdx": 0,
+            "rowIdx": 11,
+            "colIdx": 2
+          },
+          "context": "NIST Traceable\rStandard gas\rppm",
+          "suggestedValueLocation": {
+            "type": "cell",
+            "tableIdx": 0,
+            "rowIdx": 11,
+            "colIdx": 3
+          },
+          "candidateValue": "Analyzer pv \rppm",
+          "sampleValues": [
+            "9.96(N2 balance)",
+            "空"
+          ]
+        }
+      ]
+    },
+    {
+      "label": "NIST Traceable Standard gas ppm",
+      "source": "fallback",
+      "count": 0,
+      "candidates": []
+    }
+  ]
+}
