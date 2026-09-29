@@ -110,7 +110,178 @@ function resolveModelAlias(inputModel) {
   return { modelId: `model_${upper.toLowerCase()}`, displayName: upper };
 }
 
-// Seed Default Models, Templates and Published Bundles
+// Three-in-One Template Validation Helper
+function validateTemplateThreeInOne(tmpl) {
+  if (!tmpl || !tmpl.filepath || !tmpl.file_hash) {
+    return { valid: false, reason: '模板记录不存在或结构为空' };
+  }
+  if (!fs.existsSync(tmpl.filepath)) {
+    return { valid: false, reason: `磁盘物理文件缺失: ${tmpl.filepath}` };
+  }
+  const currentHash = getFileSha256(tmpl.filepath);
+  if (!currentHash || currentHash !== tmpl.file_hash) {
+    return { valid: false, reason: `模板文件 SHA256 哈希校验不匹配 (${currentHash} vs ${tmpl.file_hash})` };
+  }
+  let mappings = {};
+  try {
+    mappings = typeof tmpl.field_mappings === 'string' ? JSON.parse(tmpl.field_mappings || '{}') : (tmpl.field_mappings || {});
+  } catch (e) {
+    return { valid: false, reason: 'field_mappings JSON 解析错误' };
+  }
+
+  const singleFields = Array.isArray(mappings.singleFields) ? mappings.singleFields : [];
+  const unbound = singleFields.filter(f => f.status === 'unbound');
+  if (unbound.length > 0) {
+    return { valid: false, reason: `存在未绑定写回字段: ${unbound.map(u => u.label).join(', ')}` };
+  }
+
+  return { valid: true, mappings };
+}
+
+// Dynamic Document Combo Builder for Model
+function syncPublishedBundlesForModel(modelName) {
+  const resolved = resolveModelAlias(modelName);
+  const mName = resolved.displayName;
+
+  const allTemplates = db.prepare("SELECT * FROM templates WHERE model = ?").all(mName);
+  
+  const validCertTmpls = [];
+  const validPackTmpls = [];
+
+  allTemplates.forEach(tmpl => {
+    const v = validateTemplateThreeInOne(tmpl);
+    if (v.valid) {
+      if (tmpl.type === 'cert') validCertTmpls.push({ ...tmpl, mappings: v.mappings });
+      if (tmpl.type === 'packing') validPackTmpls.push({ ...tmpl, mappings: v.mappings });
+    }
+  });
+
+  const now = new Date().toISOString();
+
+  if (validCertTmpls.length === 0 && validPackTmpls.length === 0) {
+    db.prepare("UPDATE published_bundles SET status = 'UNAVAILABLE' WHERE model_id = ?").run(resolved.modelId);
+    return;
+  }
+
+  const generatedBundleIds = new Set();
+
+  if (validCertTmpls.length > 0 && validPackTmpls.length > 0) {
+    validCertTmpls.forEach(certTmpl => {
+      validPackTmpls.forEach(packTmpl => {
+        const bundleId = `bundle_${mName.toLowerCase()}_full`;
+        const optionName = mName === 'POA200' ? '带泵' : '带清单';
+        const configSnapshot = {
+          model: mName,
+          docCombo: 'cert_and_packing',
+          certTemplate: { ...certTmpl, field_mappings: certTmpl.mappings },
+          packingTemplate: { ...packTmpl, field_mappings: packTmpl.mappings },
+          testPoints: certTmpl.mappings.testPoints || [],
+          packingItems: packTmpl.mappings.packingItems || [],
+          sensorModelConfig: certTmpl.mappings.sensorModelConfig || {}
+        };
+
+        db.prepare(`
+          INSERT INTO published_bundles (id, bundle_id, version, model_id, model_display, option_name, doc_combo, cert_template_id, packing_template_id, status, published_at, config_snapshot)
+          VALUES (?, ?, ?, ?, ?, ?, 'cert_and_packing', ?, ?, 'PUBLISHED', ?, ?)
+          ON CONFLICT(id) DO UPDATE SET
+            bundle_id = excluded.bundle_id,
+            version = excluded.version,
+            model_id = excluded.model_id,
+            model_display = excluded.model_display,
+            option_name = excluded.option_name,
+            doc_combo = excluded.doc_combo,
+            cert_template_id = excluded.cert_template_id,
+            packing_template_id = excluded.packing_template_id,
+            status = 'PUBLISHED',
+            published_at = excluded.published_at,
+            config_snapshot = excluded.config_snapshot
+        `).run(bundleId, bundleId, certTmpl.version || 'v1.0', resolved.modelId, mName, optionName, certTmpl.id, packTmpl.id, now, JSON.stringify(configSnapshot));
+
+        generatedBundleIds.add(bundleId);
+      });
+    });
+  } else if (validCertTmpls.length > 0) {
+    validCertTmpls.forEach(certTmpl => {
+      const bundleId = `bundle_${mName.toLowerCase()}_cert`;
+      const optionName = '仅证书';
+      const configSnapshot = {
+        model: mName,
+        docCombo: 'cert_only',
+        certTemplate: { ...certTmpl, field_mappings: certTmpl.mappings },
+        packingTemplate: null,
+        testPoints: certTmpl.mappings.testPoints || [],
+        packingItems: [],
+        sensorModelConfig: certTmpl.mappings.sensorModelConfig || {}
+      };
+
+      db.prepare(`
+        INSERT INTO published_bundles (id, bundle_id, version, model_id, model_display, option_name, doc_combo, cert_template_id, packing_template_id, status, published_at, config_snapshot)
+        VALUES (?, ?, ?, ?, ?, ?, 'cert_only', ?, NULL, 'PUBLISHED', ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          bundle_id = excluded.bundle_id,
+          version = excluded.version,
+          model_id = excluded.model_id,
+          model_display = excluded.model_display,
+          option_name = excluded.option_name,
+          doc_combo = excluded.doc_combo,
+          cert_template_id = excluded.cert_template_id,
+          packing_template_id = excluded.packing_template_id,
+          status = 'PUBLISHED',
+          published_at = excluded.published_at,
+          config_snapshot = excluded.config_snapshot
+      `).run(bundleId, bundleId, certTmpl.version || 'v1.0', resolved.modelId, mName, optionName, certTmpl.id, now, JSON.stringify(configSnapshot));
+
+      generatedBundleIds.add(bundleId);
+    });
+  } else if (validPackTmpls.length > 0) {
+    validPackTmpls.forEach(packTmpl => {
+      const bundleId = `bundle_${mName.toLowerCase()}_pack`;
+      const optionName = '仅清单';
+      const configSnapshot = {
+        model: mName,
+        docCombo: 'packing_only',
+        certTemplate: null,
+        packingTemplate: { ...packTmpl, field_mappings: packTmpl.mappings },
+        testPoints: [],
+        packingItems: packTmpl.mappings.packingItems || [],
+        sensorModelConfig: {}
+      };
+
+      db.prepare(`
+        INSERT INTO published_bundles (id, bundle_id, version, model_id, model_display, option_name, doc_combo, cert_template_id, packing_template_id, status, published_at, config_snapshot)
+        VALUES (?, ?, ?, ?, ?, ?, 'packing_only', NULL, ?, 'PUBLISHED', ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          bundle_id = excluded.bundle_id,
+          version = excluded.version,
+          model_id = excluded.model_id,
+          model_display = excluded.model_display,
+          option_name = excluded.option_name,
+          doc_combo = excluded.doc_combo,
+          cert_template_id = excluded.cert_template_id,
+          packing_template_id = excluded.packing_template_id,
+          status = 'PUBLISHED',
+          published_at = excluded.published_at,
+          config_snapshot = excluded.config_snapshot
+      `).run(bundleId, bundleId, packTmpl.version || 'v1.0', resolved.modelId, mName, optionName, packTmpl.id, now, JSON.stringify(configSnapshot));
+
+      generatedBundleIds.add(bundleId);
+    });
+  }
+
+  const modelBundles = db.prepare("SELECT * FROM published_bundles WHERE model_id = ?").all(resolved.modelId);
+  modelBundles.forEach(b => {
+    if (!generatedBundleIds.has(b.id)) {
+      db.prepare("UPDATE published_bundles SET status = 'UNAVAILABLE' WHERE id = ?").run(b.id);
+    }
+  });
+}
+
+function syncPublishedBundlesAll() {
+  const models = db.prepare("SELECT DISTINCT model FROM templates").all().map(r => r.model);
+  models.forEach(m => syncPublishedBundlesForModel(m));
+}
+
+// Seed Default Models and Templates dynamically
 function seedDefaultTemplates() {
   const now = new Date().toISOString();
 
@@ -130,7 +301,7 @@ function seedDefaultTemplates() {
     VALUES (?, ?, ?, ?)
   `).run('model_990', '990', JSON.stringify(['990', '990-Ex', 'DPT-990-EX']), now);
 
-  // 2. Seed Templates & Published Bundles
+  // 2. Seed Templates
   const samplesDir = path.join(__dirname, '../../samples');
   if (fs.existsSync(samplesDir)) {
     const poaCertPath = path.join(samplesDir, 'POA200证书AP10007513-20260403发南京订单-PSR-12-223(封装）带泵.doc');
@@ -141,44 +312,84 @@ function seedDefaultTemplates() {
 
     if (fs.existsSync(poaCertPath)) {
       db.prepare(`
-        INSERT OR IGNORE INTO templates (id, model, type, filename, filepath, file_hash, version, field_mappings, published_at)
+        INSERT INTO templates (id, model, type, filename, filepath, file_hash, version, field_mappings, published_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          file_hash = excluded.file_hash,
+          field_mappings = excluded.field_mappings
       `).run('tmpl_poa200_cert', 'POA200', 'cert', path.basename(poaCertPath), poaCertPath, getFileSha256(poaCertPath) || 'hash_poa_cert', 'v1.0', JSON.stringify({
         singleFields: [
           { label: 'Inst. SN.', status: 'bound' },
           { label: 'Ambient Temperature:', status: 'bound' },
-          { label: 'Relative Humidity', status: 'bound' }
+          { label: 'Relative Humidity', status: 'bound' },
+          { label: 'Date:', status: 'bound' }
         ],
-        sensorModelConfig: { options: ['PSR-12-223(封装）', 'PMT210SEN'], defaultValue: 'PSR-12-223(封装）' }
+        sensorModelConfig: { options: ['PSR-12-223(封装）', 'PMT210SEN'], defaultValue: 'PSR-12-223(封装）' },
+        testPoints: [
+          { point: 1, std: '9.96 ppm (N2 balance)' }
+        ]
       }), now);
     }
 
     if (fs.existsSync(poaPackPath)) {
       db.prepare(`
-        INSERT OR IGNORE INTO templates (id, model, type, filename, filepath, file_hash, version, field_mappings, published_at)
+        INSERT INTO templates (id, model, type, filename, filepath, file_hash, version, field_mappings, published_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          file_hash = excluded.file_hash,
+          field_mappings = excluded.field_mappings
       `).run('tmpl_poa200_pack', 'POA200', 'packing', path.basename(poaPackPath), poaPackPath, getFileSha256(poaPackPath) || 'hash_poa_pack', 'v1.0', JSON.stringify({
-        protectedRows: [1, 2] // row 1: main device, row 2: sensor
+        protectedRows: [1, 2],
+        packingItems: [
+          { index: 1, name: '主设备', spec: 'POA200', count: 1, unit: '台', standard: '是', remark: 'SN: AP10007513带泵', isProtected: true },
+          { index: 2, name: '传感器', spec: 'PMT210SEN', count: 1, unit: '支', standard: '是', remark: 'SN: 201N200258', isProtected: true },
+          { index: 3, name: '仪器包装箱', spec: 'ABS', count: 1, unit: '个', standard: '是', remark: '' },
+          { index: 4, name: '用户手册', spec: '中英文', count: 1, unit: '份', standard: '是', remark: '' },
+          { index: 5, name: '出厂合格证', spec: '中英文', count: 1, unit: '份', standard: '是', remark: '' },
+          { index: 6, name: '电源适配器', spec: '902B', count: 1, unit: '个', standard: '是', remark: '' },
+          { index: 7, name: 'USB通讯线', spec: '标准', count: 1, unit: '根', standard: '是', remark: '' },
+          { index: 8, name: '标定指示卡', spec: '标准', count: 1, unit: '张', standard: '是', remark: '' },
+          { index: 9, name: 'F46测试管', spec: '外径1/8英寸', count: 1, unit: '根', standard: '是', remark: '' }
+        ]
       }), now);
     }
 
     if (fs.existsSync(dptCertPath)) {
       db.prepare(`
-        INSERT OR IGNORE INTO templates (id, model, type, filename, filepath, file_hash, version, field_mappings, published_at)
+        INSERT INTO templates (id, model, type, filename, filepath, file_hash, version, field_mappings, published_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          file_hash = excluded.file_hash,
+          field_mappings = excluded.field_mappings
       `).run('tmpl_dpt810_cert', 'DPT810', 'cert', path.basename(dptCertPath), dptCertPath, getFileSha256(dptCertPath) || 'hash_dpt_cert', 'v1.0', JSON.stringify({
         singleFields: [
           { label: 'Inst. SN.', status: 'bound' },
           { label: 'Ambient Temperature:', status: 'bound' },
-          { label: 'Relative Humidity', status: 'bound' }
+          { label: 'Relative Humidity', status: 'bound' },
+          { label: 'Date:', status: 'bound' }
+        ],
+        testPoints: [
+          { point: 1, std: '-89.00 ℃ dp' },
+          { point: 2, std: '-80.12 ℃ dp' },
+          { point: 3, std: '-70.81 ℃ dp' },
+          { point: 4, std: '-60.23 ℃ dp' },
+          { point: 5, std: '-50.82 ℃ dp' },
+          { point: 6, std: '-40.91 ℃ dp' },
+          { point: 7, std: '-30.45 ℃ dp' },
+          { point: 8, std: '-21.90 ℃ dp' },
+          { point: 9, std: '-12.26 ℃ dp' },
+          { point: 10, std: '10.25 ℃ dp' }
         ]
       }), now);
     }
 
     if (fs.existsSync(cert990Path)) {
       db.prepare(`
-        INSERT OR IGNORE INTO templates (id, model, type, filename, filepath, file_hash, version, field_mappings, published_at)
+        INSERT INTO templates (id, model, type, filename, filepath, file_hash, version, field_mappings, published_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          file_hash = excluded.file_hash,
+          field_mappings = excluded.field_mappings
       `).run('tmpl_990_cert', '990', 'cert', path.basename(cert990Path), cert990Path, getFileSha256(cert990Path) || 'hash_990_cert', 'v1.0', JSON.stringify({
         singleFields: [
           { label: 'Inst. SN.', status: 'bound' },
@@ -186,49 +397,48 @@ function seedDefaultTemplates() {
           { label: 'Instrument', status: 'bound' },
           { label: 'Ambient Temperature:', status: 'bound' },
           { label: 'Relative Humidity', status: 'bound' }
+        ],
+        testPoints: [
+          { point: 1, std: '-80.75 ℃ dp' },
+          { point: 2, std: '-70.95 ℃ dp' },
+          { point: 3, std: '-60.42 ℃ dp' },
+          { point: 4, std: '-52.43 ℃ dp' },
+          { point: 5, std: '-42.15 ℃ dp' },
+          { point: 6, std: '-31.76 ℃ dp' },
+          { point: 7, std: '-21.24 ℃ dp' },
+          { point: 8, std: '-12.56 ℃ dp' },
+          { point: 9, std: '12.19 ℃ dp' }
         ]
       }), now);
     }
 
     if (fs.existsSync(pack990Path)) {
       db.prepare(`
-        INSERT OR IGNORE INTO templates (id, model, type, filename, filepath, file_hash, version, field_mappings, published_at)
+        INSERT INTO templates (id, model, type, filename, filepath, file_hash, version, field_mappings, published_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          file_hash = excluded.file_hash,
+          field_mappings = excluded.field_mappings
       `).run('tmpl_990_pack', '990', 'packing', path.basename(pack990Path), pack990Path, getFileSha256(pack990Path) || 'hash_990_pack', 'v1.0', JSON.stringify({
-        protectedRows: [1] // row 1: main device (DPT-990-Ex)
+        protectedRows: [1],
+        packingItems: [
+          { index: 1, name: '主设备', spec: 'DPT-990-Ex', count: 1, unit: '台', standard: '是', remark: 'SN: EX10260902', isProtected: true },
+          { index: 2, name: '计量证书', spec: '英文', count: 1, unit: '份', standard: '是', remark: '' },
+          { index: 3, name: '用户手册', spec: '中英文', count: 1, unit: '本', standard: '是', remark: '' },
+          { index: 4, name: '操作说明', spec: '中英文', count: 1, unit: '份', standard: '是', remark: '' },
+          { index: 5, name: '防爆证书', spec: '英文', count: 1, unit: '份', standard: '是', remark: '' },
+          { index: 6, name: '安装螺钉', spec: 'M3*8', count: 4, unit: '个', standard: '是', remark: '' },
+          { index: 7, name: '干燥装置', spec: 'DPT-990-Ex', count: 1, unit: '套', standard: '是', remark: '' },
+          { index: 8, name: '堵头', spec: '1/8NPT', count: 1, unit: '个', standard: '是', remark: '' },
+          { index: 9, name: '卡套螺母组', spec: '1/8”', count: 2, unit: '组', standard: '是', remark: '' },
+          { index: 10, name: '防爆电缆接头', spec: 'M12*1.5', count: 1, unit: '个', standard: '是', remark: '' },
+          { index: 11, name: '电源/信号线', spec: '2米', count: 1, unit: '根', standard: '是', remark: '' }
+        ]
       }), now);
     }
 
-    // Seed Published Bundles
-    // 1. POA200 Cert + Packing
-    db.prepare(`
-      INSERT OR IGNORE INTO published_bundles (id, bundle_id, version, model_id, model_display, option_name, doc_combo, cert_template_id, packing_template_id, status, published_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run('bundle_poa200_full', 'bundle_poa200', 'v1.0', 'model_poa200', 'POA200', '带泵', 'cert_and_packing', 'tmpl_poa200_cert', 'tmpl_poa200_pack', 'PUBLISHED', now);
-
-    // 2. DPT810 Cert Only
-    db.prepare(`
-      INSERT OR IGNORE INTO published_bundles (id, bundle_id, version, model_id, model_display, option_name, doc_combo, cert_template_id, packing_template_id, status, published_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run('bundle_dpt810_cert', 'bundle_dpt810', 'v1.0', 'model_dpt810', 'DPT810', '通用', 'cert_only', 'tmpl_dpt810_cert', null, 'PUBLISHED', now);
-
-    // 3. 990 Cert + Packing (Full Combo)
-    db.prepare(`
-      INSERT OR IGNORE INTO published_bundles (id, bundle_id, version, model_id, model_display, option_name, doc_combo, cert_template_id, packing_template_id, status, published_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run('bundle_990_full', 'bundle_990', 'v1.0', 'model_990', '990', '带清单', 'cert_and_packing', 'tmpl_990_cert', 'tmpl_990_pack', 'PUBLISHED', now);
-
-    // 4. 990 Cert Only
-    db.prepare(`
-      INSERT OR IGNORE INTO published_bundles (id, bundle_id, version, model_id, model_display, option_name, doc_combo, cert_template_id, packing_template_id, status, published_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run('bundle_990_cert_only', 'bundle_990_cert', 'v1.0', 'model_990', '990', '仅证书', 'cert_only', 'tmpl_990_cert', null, 'PUBLISHED', now);
-
-    // 5. 990 Packing Only
-    db.prepare(`
-      INSERT OR IGNORE INTO published_bundles (id, bundle_id, version, model_id, model_display, option_name, doc_combo, cert_template_id, packing_template_id, status, published_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run('bundle_990_pack_only', 'bundle_990_pack', 'v1.0', 'model_990', '990', '仅清单', 'packing_only', null, 'tmpl_990_pack', 'PUBLISHED', now);
+    // Dynamic bundle calculation from real templates
+    syncPublishedBundlesAll();
   }
 }
 seedDefaultTemplates();
@@ -348,18 +558,42 @@ app.get('/api/workers', (req, res) => {
 
 // ==================== PUBLISHED BUNDLES & MODELS ====================
 app.get('/api/published-bundles', (req, res) => {
-  const bundles = db.prepare("SELECT * FROM published_bundles WHERE status = 'PUBLISHED' ORDER BY id ASC").all().map(b => {
+  const rawBundles = db.prepare("SELECT * FROM published_bundles WHERE status = 'PUBLISHED' ORDER BY id ASC").all();
+  const validBundles = [];
+
+  rawBundles.forEach(b => {
     const certTmpl = b.cert_template_id ? db.prepare('SELECT * FROM templates WHERE id = ?').get(b.cert_template_id) : null;
     const packTmpl = b.packing_template_id ? db.prepare('SELECT * FROM templates WHERE id = ?').get(b.packing_template_id) : null;
 
-    return {
+    let certValid = true;
+    let packValid = true;
+
+    if (b.doc_combo === 'cert_and_packing' || b.doc_combo === 'cert_only') {
+      const v = validateTemplateThreeInOne(certTmpl);
+      if (!v.valid) certValid = false;
+    }
+    if (b.doc_combo === 'cert_and_packing' || b.doc_combo === 'packing_only') {
+      const v = validateTemplateThreeInOne(packTmpl);
+      if (!v.valid) packValid = false;
+    }
+
+    if (!certValid || !packValid) {
+      db.prepare("UPDATE published_bundles SET status = 'UNAVAILABLE' WHERE id = ?").run(b.id);
+      return;
+    }
+
+    let configSnapshot = {};
+    try { configSnapshot = JSON.parse(b.config_snapshot || '{}'); } catch (e) {}
+
+    validBundles.push({
       ...b,
+      config_snapshot: configSnapshot,
       certTemplate: certTmpl ? { ...certTmpl, field_mappings: JSON.parse(certTmpl.field_mappings || '{}') } : null,
       packingTemplate: packTmpl ? { ...packTmpl, field_mappings: JSON.parse(packTmpl.field_mappings || '{}') } : null
-    };
+    });
   });
 
-  res.json(bundles);
+  res.json(validBundles);
 });
 
 app.get('/api/models', (req, res) => {
@@ -423,6 +657,9 @@ app.delete('/api/templates/:id', requireAdminAccess, (req, res) => {
   if (fs.existsSync(tmpl.filepath)) {
     try { fs.unlinkSync(tmpl.filepath); } catch (e) {}
   }
+
+  syncPublishedBundlesForModel(tmpl.model);
+
   logAudit(null, 'ADMIN', 'Admin', 'DELETE_TEMPLATE', { id: req.params.id });
   res.json({ success: true, id: req.params.id });
 });
@@ -482,6 +719,13 @@ app.post('/api/templates/publish', requireAdminAccess, (req, res) => {
   const { id, model, type, filename, fieldMappings, version = 'v1.0', isDraft = false } = req.body;
   if (!model || !type || !filename) return res.status(400).json({ error: 'Missing required parameters' });
 
+  let existingTmpl = id ? db.prepare('SELECT * FROM templates WHERE id = ?').get(id) : null;
+  if (!existingTmpl) {
+    existingTmpl = db.prepare('SELECT * FROM templates WHERE model = ? AND type = ?').get(model, type);
+  }
+
+  const filePath = existingTmpl ? existingTmpl.filepath : path.join(uploadDir, filename);
+
   if (!isDraft) {
     const mappings = fieldMappings || {};
     const singleFields = Array.isArray(mappings.singleFields) ? mappings.singleFields : [];
@@ -491,23 +735,40 @@ app.post('/api/templates/publish', requireAdminAccess, (req, res) => {
         error: `存在未绑定字段 (${unbound.map(u => u.label).join(', ')})，不能正式发布！请先完成字段绑定或保存为草稿。`
       });
     }
+
+    // Three-in-One Check
+    if (!fs.existsSync(filePath) && !existingTmpl) {
+      return res.status(400).json({ error: `无法发布：物理文件在磁盘上不存在 (${filePath})` });
+    }
+    if (fs.existsSync(filePath) && existingTmpl && existingTmpl.file_hash) {
+      const currentHash = getFileSha256(filePath);
+      if (currentHash !== existingTmpl.file_hash) {
+        return res.status(400).json({ error: `无法发布：模板文件 SHA256 哈希校验失败 (磁盘 ${currentHash} vs 数据库 ${existingTmpl.file_hash})` });
+      }
+    }
   }
 
-  const tmplId = id || `tmpl_${model.toLowerCase()}_${type}`;
+  const tmplId = id || (existingTmpl ? existingTmpl.id : `tmpl_${model.toLowerCase()}_${type}`);
   const now = new Date().toISOString();
-  const mappingsJson = JSON.stringify(fieldMappings || {});
+  const fileHash = getFileSha256(filePath) || (existingTmpl ? existingTmpl.file_hash : 'hash_' + Date.now());
+
+  const mergedMappings = { ...(existingTmpl && existingTmpl.field_mappings ? JSON.parse(existingTmpl.field_mappings) : {}), ...fieldMappings };
 
   db.prepare(`
-    INSERT OR IGNORE INTO templates (id, model, type, filename, filepath, file_hash, version, field_mappings, published_at)
+    INSERT INTO templates (id, model, type, filename, filepath, file_hash, version, field_mappings, published_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       filename = excluded.filename,
+      filepath = excluded.filepath,
+      file_hash = excluded.file_hash,
       version = excluded.version,
       field_mappings = excluded.field_mappings,
       published_at = excluded.published_at
-  `).run(tmplId, model, type, filename, filename, 'hash_' + Date.now(), version, mappingsJson, now);
+  `).run(tmplId, model, type, filename, filePath, fileHash, version, JSON.stringify(mergedMappings), now);
 
-  logAudit(null, 'ADMIN', 'System', 'PUBLISH_TEMPLATE', { tmplId, model, type, version });
+  syncPublishedBundlesForModel(model);
+
+  logAudit(null, 'ADMIN', 'System', 'PUBLISH_TEMPLATE', { tmplId, model, type, version, isDraft });
   res.json({ success: true, tmplId, version });
 });
 
@@ -928,8 +1189,13 @@ if (require.main === module) {
     console.log('协调服务 (Coordination Service) 启动成功！');
     console.log('====================================================');
     console.log(`- 服务端口: ${PORT}`);
+    console.log(`- 关键 API 路由已就绪:`);
+    console.log(`  * GET  /api/published-bundles (获取已发布型号与文档组合配置)`);
+    console.log(`  * POST /api/tasks/submit       (任务提交与重复校验)`);
+    console.log(`  * GET  /api/workers            (执行终端心跳与状态列表)`);
+    console.log(`  * POST /api/templates/publish  (模板三合一严格校验与动态组合生成)`);
     console.log(`- 协调管理控制台 (仅限协调服务电脑本机): http://localhost:${PORT}/admin`);
-    console.log(`- 手机端发货作业地址 (车间局域网操作): http://<你的局域网IP>:${PORT}/frontend`);
+    console.log(`- 手机端发货作业地址 (车间局域网操作): http://<局域网IP>:${PORT}/frontend`);
     console.log(`- 数据存储目录: ${path.join(__dirname, '../../data')}`);
     console.log('====================================================');
     console.log('等待手机端/前端连接，以及执行端 (worker.js) 上线...');

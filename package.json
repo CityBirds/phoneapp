@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node src/backend/server.js",
     "worker": "node src/worker/worker.js",
-    "test": "node --test tests/*.test.js"
+    "test": "node --test --test-concurrency=1 tests/*.test.js"
   },
   "dependencies": {
     "cors": "^2.8.5",

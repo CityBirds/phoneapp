@@ -56,6 +56,8 @@
           <select id="model-select" class="form-control" onchange="onModelChange()">
             <!-- Dynamically populated from /api/published-bundles -->
           </select>
+          <div id="model-load-status" class="status-tip" style="display: none; margin-top: 8px; font-size: 13px;"></div>
+          <button type="button" id="btn-retry-bundles" class="btn btn-sm btn-primary" style="display: none; margin-top: 8px;" onclick="loadPublishedBundles()">🔄 重试加载</button>
         </div>
 
         <div class="form-group" id="pump-group" style="display: none;">
