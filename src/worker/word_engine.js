@@ -5,7 +5,7 @@ const { getFileSha256 } = require('../common/utils');
 
 /**
  * Generate Word Document (.doc / .docx)
- * Rules: E04, E05, E06, R17, T06, T10
+ * Rules: E04, E05, E06, R17, T06, T10, 03-Spec Section 8
  */
 function generateWordDocument(templatePath, outputPath, taskData) {
   if (!fs.existsSync(templatePath)) {
@@ -15,14 +15,19 @@ function generateWordDocument(templatePath, outputPath, taskData) {
   // Calculate source template hash before processing to verify R17
   const initialTemplateHash = getFileSha256(templatePath);
 
-  // Validate Packing List Protected Rows if type is 'packing' (E06, T06)
+  // Validate Packing List Protected Rows if type is 'packing'
   if (taskData.type === 'packing') {
     const packingItems = taskData.formData?.packingItems || [];
+    const model = taskData.formData?.model || '';
+    const isPOA200 = !model || model.toUpperCase().includes('POA');
+
     const hasMainDevice = packingItems.some(item => item.name === '主设备' || item.isProtectedMain);
     const hasSensor = packingItems.some(item => item.name === '传感器' || item.isProtectedSensor);
 
-    if (packingItems.length > 0 && (!hasMainDevice || !hasSensor)) {
-      throw new Error('Packing list generation rejected: Missing protected main device or sensor row (E06, T06)');
+    if (packingItems.length > 0) {
+      if (!hasMainDevice || (isPOA200 && !hasSensor)) {
+        throw new Error('Packing list generation rejected: Missing protected main device or sensor row (E06, T06)');
+      }
     }
   }
 
@@ -52,7 +57,7 @@ function generateWordDocument(templatePath, outputPath, taskData) {
 
   let processedSuccessfully = false;
 
-  // On Windows, prioritize native PowerShell COM execution (doc_processor.ps1) with zero third-party dependencies
+  // On Windows, prioritize native PowerShell COM execution (doc_processor.ps1)
   if (process.platform === 'win32') {
     const psScriptPath = path.join(__dirname, 'doc_processor.ps1');
     if (fs.existsSync(psScriptPath)) {
@@ -68,7 +73,7 @@ function generateWordDocument(templatePath, outputPath, taskData) {
     }
   }
 
-  // Secondary fallback: Python doc_processor.py if PowerShell did not run or on non-Windows platforms
+  // Secondary fallback: Python doc_processor.py if PowerShell did not run or on non-Windows
   if (!processedSuccessfully) {
     const pyScriptPath = path.join(__dirname, 'doc_processor.py');
     const pythonCmd = process.platform === 'win32' ? 'python' : 'python3';
@@ -100,7 +105,6 @@ function generateWordDocument(templatePath, outputPath, taskData) {
   }
 
   if (!processedSuccessfully) {
-    // Remove unmodified raw template copy if processing failed (J14, Q38)
     if (fs.existsSync(outputPath)) {
       try { fs.unlinkSync(outputPath); } catch (e) {}
     }

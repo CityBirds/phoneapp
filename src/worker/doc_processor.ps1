@@ -1,5 +1,6 @@
-﻿# PowerShell Native Word/WPS COM Document Processor
-# Rules: E05, E06, R17, T03, T04, T05, T06
+﻿[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+# PowerShell Native Word/WPS COM Document Processor
+# Rules: E05, E06, R17, T03, T04, T05, T06, 03-Spec Sec 8-9
 
 param(
     [string]$templatePath,
@@ -20,6 +21,7 @@ if (-not (Test-Path $jsonPath)) {
 $jsonData = Get-Content -Path $jsonPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $type = $jsonData.type
 $formData = $jsonData.formData
+$fieldMappings = $jsonData.fieldMappings
 
 # Auto-detect and prioritize WPS Office (KWps.Application) or MS Word (Word.Application)
 $app = $null
@@ -67,6 +69,7 @@ try {
     $relativeHumidity = if ($null -ne $formData.relativeHumidity) { [string]$formData.relativeHumidity } else { "" }
     $certDate = if ($formData.certDate) { [string]$formData.certDate } elseif ($formData.date) { [string]$formData.date } else { "" }
     $hasPump = if ($null -ne $formData.hasPump) { [bool]$formData.hasPump } else { $true }
+    $isPOA200 = $model -like "*POA*"
 
     # Global text replacement for default SN AP10007513 in StoryRanges
     if ($deviceSn -and $deviceSn -ne "AP10007513") {
@@ -96,7 +99,7 @@ try {
             for ($i = 1; $i -lt $table.Range.Cells.Count; $i++) {
                 try {
                     $cellTxt = $table.Range.Cells.Item($i).Range.Text.Trim("`r", "`a", "`n", " ")
-                    if (-not $foundDate -and $cellTxt -eq "Date:" -and $certDate) {
+                    if (-not $foundDate -and ($cellTxt -eq "Date:" -or $cellTxt -like "*Date*") -and $certDate) {
                         $table.Range.Cells.Item($i + 1).Range.Text = $certDate
                         $foundDate = $true
                     } elseif (-not $foundSn -and $cellTxt -eq "Inst. SN." -and $deviceSn) {
@@ -115,7 +118,7 @@ try {
                 } catch {}
             }
 
-            # Update Test Points in Table 1
+            # Update Test Points in Table
             $testPoints = $formData.testPoints
             if ($testPoints -and $testPoints.Count -gt 0) {
                 for ($p = 0; $p -lt $testPoints.Count; $p++) {
@@ -142,18 +145,18 @@ try {
         if ($doc.Tables.Count -ge 1) {
             $table = $doc.Tables.Item(1)
 
-            $pumpStr = if ($hasPump) { "带泵" } else { "" }
+            $pumpStr = if ($isPOA200 -and $hasPump) { "带泵" } else { "" }
             $mainRemark = if ($pumpStr) { "SN: $deviceSn $pumpStr" } else { "SN: $deviceSn" }
             $sensorRemarkStr = if ($sensorSn) { "SN: $sensorSn" } else { "" }
 
-            # Update protected Row 2 (Main Device) and Row 3 (Sensor)
+            # Update protected Row 2 (Main Device) and Row 3 (Sensor for POA200 only)
             for ($r = 2; $r -le $table.Rows.Count; $r++) {
                 try {
                     $cName = $table.Cell($r, 2).Range.Text.Trim("`r", "`a", "`n", " ")
                     if ($cName -eq "主设备") {
                         if ($model) { $table.Cell($r, 3).Range.Text = $model }
                         $table.Cell($r, 7).Range.Text = $mainRemark
-                    } elseif ($cName -eq "传感器") {
+                    } elseif ($isPOA200 -and $cName -eq "传感器") {
                         if ($sensorModel) { $table.Cell($r, 3).Range.Text = $sensorModel }
                         $table.Cell($r, 7).Range.Text = $sensorRemarkStr
                     }
@@ -168,7 +171,7 @@ try {
                 while ($table.Rows.Count -lt $neededRows) {
                     [void]$table.Rows.Add()
                 }
-                while ($table.Rows.Count -gt $neededRows -and $table.Rows.Count -gt 3) {
+                while ($table.Rows.Count -gt $neededRows -and $table.Rows.Count -gt 2) {
                     $table.Rows.Item($table.Rows.Count).Delete()
                 }
 
@@ -183,7 +186,7 @@ try {
                             # Model / Spec
                             if ($idx -eq 0 -and $model) {
                                 $table.Cell($r, 3).Range.Text = $model
-                            } elseif ($idx -eq 1 -and $sensorModel) {
+                            } elseif ($isPOA200 -and $idx -eq 1 -and $sensorModel) {
                                 $table.Cell($r, 3).Range.Text = $sensorModel
                             } elseif ($null -ne $item.spec) {
                                 $table.Cell($r, 3).Range.Text = [string]$item.spec
@@ -196,7 +199,7 @@ try {
                             # Remarks
                             if ($idx -eq 0) {
                                 $table.Cell($r, 7).Range.Text = $mainRemark
-                            } elseif ($idx -eq 1) {
+                            } elseif ($isPOA200 -and $idx -eq 1) {
                                 $table.Cell($r, 7).Range.Text = $sensorRemarkStr
                             } elseif ($null -ne $item.remark) {
                                 $table.Cell($r, 7).Range.Text = [string]$item.remark

@@ -14,7 +14,7 @@ function escapeXml(unsafe) {
 
 /**
  * Generate Real Word Document Paged Preview based on actual extracted document structure
- * Rules: C11, R21, R22, F14, G12
+ * Rules: C11, R21, R22, F14, G12, 03-Spec Section 9
  */
 function generateDocumentPreview(wordFilePath, outputDir, fileId, extraContext = {}) {
   if (!fs.existsSync(wordFilePath)) {
@@ -42,10 +42,8 @@ function generateDocumentPreview(wordFilePath, outputDir, fileId, extraContext =
     console.warn('Preview structure extraction error:', e.message);
   }
 
-  // Identify document type from filename or context
   const fileType = extraContext.fileType || (fileId.includes('cert') ? 'cert' : 'packing');
 
-  // Build high-fidelity SVG preview based on actual extracted cell texts
   let svgContent = '';
   if (fileType === 'cert') {
     svgContent = renderCertSvgFromDocItems(docItems, extraContext);
@@ -61,10 +59,9 @@ function generateDocumentPreview(wordFilePath, outputDir, fileId, extraContext =
 }
 
 function renderCertSvgFromDocItems(docItems, extraContext) {
-  // Extract values directly from docItems
   let customer = 'YORK';
   let certDate = '';
-  let model = extraContext.task ? extraContext.task.model : 'POA200';
+  let model = extraContext.task ? extraContext.task.model : '990';
   let deviceSn = extraContext.task ? extraContext.task.device_sn : '';
   let ambientTemp = '';
   let relativeHumidity = '';
@@ -73,7 +70,7 @@ function renderCertSvgFromDocItems(docItems, extraContext) {
     const text = docItems[i].text;
     if (text === 'Customer' && i + 1 < docItems.length) {
       customer = docItems[i + 1].text || customer;
-    } else if (text === 'Date:' && i + 1 < docItems.length) {
+    } else if ((text === 'Date:' || text === 'Date') && i + 1 < docItems.length) {
       certDate = docItems[i + 1].text || certDate;
     } else if (text === 'Instrument' && i + 1 < docItems.length) {
       model = docItems[i + 1].text || model;
@@ -101,7 +98,7 @@ function renderCertSvgFromDocItems(docItems, extraContext) {
   }
 
   let testRowsSvg = '';
-  const rowsToRender = testRows.length > 0 ? testRows : [{ ptNum: '1', stdVal: '9.96 ppm (N2 balance)', actVal: '' }];
+  const rowsToRender = testRows.length > 0 ? testRows : [{ ptNum: '1', stdVal: '-80.75 ℃ dp', actVal: '' }];
 
   rowsToRender.forEach((tr, idx) => {
     const y = 430 + idx * 30;
@@ -201,12 +198,12 @@ function renderCertSvgFromDocItems(docItems, extraContext) {
 }
 
 function renderPackingSvgFromDocItems(docItems, extraContext) {
-  let model = 'POA200';
+  let model = extraContext.task ? extraContext.task.model : 'DPT-990-Ex';
 
   for (let i = 0; i < docItems.length; i++) {
     const text = docItems[i].text;
-    if (text.includes('发货清单')) {
-      model = text.replace('发货清单', '').trim() || model;
+    if (text.includes('发货清单') || text.includes('装箱清单')) {
+      model = text.replace(/发货清单|装箱清单/g, '').trim() || model;
     }
   }
 

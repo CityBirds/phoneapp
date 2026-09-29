@@ -5,7 +5,7 @@ const path = require('path');
 const fs = require('fs');
 const db = require('./db');
 const { generateCertFilename, generatePackingListFilename } = require('../common/naming');
-const { findFieldCandidates } = require('../common/matcher');
+const { findFieldCandidates, inferFieldType } = require('../common/matcher');
 const { extractDocumentStructure } = require('../common/doc_structure');
 const { getBeijingCalendarRange, generateUUID, getFileSha256 } = require('../common/utils');
 const { generateDocumentPreview } = require('./preview');
@@ -34,7 +34,7 @@ app.get('/admin', (req, res) => res.sendFile(path.join(__dirname, '../frontend/a
 
 const upload = multer({ dest: uploadDir });
 
-// Helper to fix Multer filename encoding (UTF-8 parsing of Latin1 bytes)
+// Helper to fix Multer filename encoding
 function fixMulterFilename(filename) {
   if (!filename) return '';
   try {
@@ -63,8 +63,7 @@ function requireAdminAccess(req, res, next) {
   next();
 }
 
-
-// Audit Logger Helper (C13, R33)
+// Audit Logger Helper
 function logAudit(reqId, clientId, clientName, action, details) {
   const stmt = db.prepare(`
     INSERT INTO audit_logs (req_id, client_id, client_name, action, details, timestamp)
@@ -82,60 +81,159 @@ function cleanupStaleWorkers() {
 }
 cleanupStaleWorkers();
 
-// Default Seed Templates (POA200, DPT810, 990) if empty
-function seedDefaultTemplates() {
-  if (true) {
-    const samplesDir = path.join(__dirname, '../../samples');
-    if (fs.existsSync(samplesDir)) {
-      const poaCertPath = path.join(samplesDir, 'POA200证书AP10007513-20260403发南京订单-PSR-12-223(封装）带泵.doc');
-      const poaPackPath = path.join(samplesDir, 'POA200(140)AP10007513发货清单20260403带泵.doc');
-      const dptCertPath = path.join(samplesDir, 'DPT810证书(变送器-A010007031)-JM-26.8.28.doc');
-      const cert990Path = path.join(samplesDir, '990-Ex-EX10260902发货证书.doc');
+// Model Alias Resolver
+function resolveModelAlias(inputModel) {
+  if (!inputModel) return { modelId: 'model_unknown', displayName: 'UNKNOWN' };
+  const str = String(inputModel).trim();
 
-      if (fs.existsSync(poaCertPath)) {
-        db.prepare(`
-          INSERT OR IGNORE INTO templates (id, model, type, filename, filepath, file_hash, version, field_mappings, published_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `).run('tmpl_poa200_cert', 'POA200', 'cert', path.basename(poaCertPath), poaCertPath, getFileSha256(poaCertPath) || 'hash_poa_cert', 'v1.0', JSON.stringify({
-          singleFields: { deviceSn: 'Inst. SN.', ambientTemp: 'Ambient Temperature:', relativeHumidity: 'Relative Humidity' },
-          tableFields: { testPoints: 'Analyzer pv ppm' }
-        }), new Date().toISOString());
-      }
-
-      if (fs.existsSync(poaPackPath)) {
-        db.prepare(`
-          INSERT OR IGNORE INTO templates (id, model, type, filename, filepath, file_hash, version, field_mappings, published_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `).run('tmpl_poa200_pack', 'POA200', 'packing', path.basename(poaPackPath), poaPackPath, getFileSha256(poaPackPath) || 'hash_poa_pack', 'v1.0', JSON.stringify({
-          protectedRows: [1, 2] // row 1: main device, row 2: sensor
-        }), new Date().toISOString());
-      }
-
-      if (fs.existsSync(dptCertPath)) {
-        db.prepare(`
-          INSERT OR IGNORE INTO templates (id, model, type, filename, filepath, file_hash, version, field_mappings, published_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `).run('tmpl_dpt810_cert', 'DPT810', 'cert', path.basename(dptCertPath), dptCertPath, getFileSha256(dptCertPath) || 'hash_dpt_cert', 'v1.0', JSON.stringify({
-          singleFields: { deviceSn: 'Inst. SN.', ambientTemp: 'Ambient Temperature:', relativeHumidity: 'Relative Humidity' },
-          tableFields: { testPoints: 'Analyzer Under Test mA' }
-        }), new Date().toISOString());
-      }
-
-      if (fs.existsSync(cert990Path)) {
-        db.prepare(`
-          INSERT OR IGNORE INTO templates (id, model, type, filename, filepath, file_hash, version, field_mappings, published_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `).run('tmpl_990_cert', '990', 'cert', path.basename(cert990Path), cert990Path, getFileSha256(cert990Path) || 'hash_990_cert', 'v1.0', JSON.stringify({
-          singleFields: { deviceSn: 'Inst. SN.', ambientTemp: 'Ambient Temperature:', relativeHumidity: 'Relative Humidity' },
-          tableFields: { testPoints: 'Analyzer ℃ dp' }
-        }), new Date().toISOString());
-      }
+  // Search in database models table first
+  const dbModels = db.prepare('SELECT * FROM models').all();
+  for (const m of dbModels) {
+    const aliases = JSON.parse(m.aliases || '[]');
+    if (m.display_name.toUpperCase() === str.toUpperCase() || aliases.some(a => a.toUpperCase() === str.toUpperCase())) {
+      return { modelId: m.id, displayName: m.display_name };
     }
+  }
+
+  // Default hardcoded alias resolution fallback
+  const upper = str.toUpperCase();
+  if (upper === 'POA200' || upper.includes('POA')) {
+    return { modelId: 'model_poa200', displayName: 'POA200' };
+  }
+  if (upper === 'DPT810' || upper.includes('810')) {
+    return { modelId: 'model_dpt810', displayName: 'DPT810' };
+  }
+  if (upper === '990' || upper === '990-EX' || upper === 'DPT-990-EX' || upper.includes('990')) {
+    return { modelId: 'model_990', displayName: '990' };
+  }
+
+  return { modelId: `model_${upper.toLowerCase()}`, displayName: upper };
+}
+
+// Seed Default Models, Templates and Published Bundles
+function seedDefaultTemplates() {
+  const now = new Date().toISOString();
+
+  // 1. Seed Models
+  db.prepare(`
+    INSERT OR IGNORE INTO models (id, display_name, aliases, created_at)
+    VALUES (?, ?, ?, ?)
+  `).run('model_poa200', 'POA200', JSON.stringify(['POA200', 'POA-200']), now);
+
+  db.prepare(`
+    INSERT OR IGNORE INTO models (id, display_name, aliases, created_at)
+    VALUES (?, ?, ?, ?)
+  `).run('model_dpt810', 'DPT810', JSON.stringify(['DPT810', 'DPT-810']), now);
+
+  db.prepare(`
+    INSERT OR IGNORE INTO models (id, display_name, aliases, created_at)
+    VALUES (?, ?, ?, ?)
+  `).run('model_990', '990', JSON.stringify(['990', '990-Ex', 'DPT-990-EX']), now);
+
+  // 2. Seed Templates & Published Bundles
+  const samplesDir = path.join(__dirname, '../../samples');
+  if (fs.existsSync(samplesDir)) {
+    const poaCertPath = path.join(samplesDir, 'POA200证书AP10007513-20260403发南京订单-PSR-12-223(封装）带泵.doc');
+    const poaPackPath = path.join(samplesDir, 'POA200(140)AP10007513发货清单20260403带泵.doc');
+    const dptCertPath = path.join(samplesDir, 'DPT810证书(变送器-A010007031)-JM-26.8.28.doc');
+    const cert990Path = path.join(samplesDir, '990-Ex-EX10260902发货证书.doc');
+    const pack990Path = path.join(samplesDir, '990-Ex-EX10260902装箱清单.doc');
+
+    if (fs.existsSync(poaCertPath)) {
+      db.prepare(`
+        INSERT OR IGNORE INTO templates (id, model, type, filename, filepath, file_hash, version, field_mappings, published_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run('tmpl_poa200_cert', 'POA200', 'cert', path.basename(poaCertPath), poaCertPath, getFileSha256(poaCertPath) || 'hash_poa_cert', 'v1.0', JSON.stringify({
+        singleFields: [
+          { label: 'Inst. SN.', status: 'bound' },
+          { label: 'Ambient Temperature:', status: 'bound' },
+          { label: 'Relative Humidity', status: 'bound' }
+        ],
+        sensorModelConfig: { options: ['PSR-12-223(封装）', 'PMT210SEN'], defaultValue: 'PSR-12-223(封装）' }
+      }), now);
+    }
+
+    if (fs.existsSync(poaPackPath)) {
+      db.prepare(`
+        INSERT OR IGNORE INTO templates (id, model, type, filename, filepath, file_hash, version, field_mappings, published_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run('tmpl_poa200_pack', 'POA200', 'packing', path.basename(poaPackPath), poaPackPath, getFileSha256(poaPackPath) || 'hash_poa_pack', 'v1.0', JSON.stringify({
+        protectedRows: [1, 2] // row 1: main device, row 2: sensor
+      }), now);
+    }
+
+    if (fs.existsSync(dptCertPath)) {
+      db.prepare(`
+        INSERT OR IGNORE INTO templates (id, model, type, filename, filepath, file_hash, version, field_mappings, published_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run('tmpl_dpt810_cert', 'DPT810', 'cert', path.basename(dptCertPath), dptCertPath, getFileSha256(dptCertPath) || 'hash_dpt_cert', 'v1.0', JSON.stringify({
+        singleFields: [
+          { label: 'Inst. SN.', status: 'bound' },
+          { label: 'Ambient Temperature:', status: 'bound' },
+          { label: 'Relative Humidity', status: 'bound' }
+        ]
+      }), now);
+    }
+
+    if (fs.existsSync(cert990Path)) {
+      db.prepare(`
+        INSERT OR IGNORE INTO templates (id, model, type, filename, filepath, file_hash, version, field_mappings, published_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run('tmpl_990_cert', '990', 'cert', path.basename(cert990Path), cert990Path, getFileSha256(cert990Path) || 'hash_990_cert', 'v1.0', JSON.stringify({
+        singleFields: [
+          { label: 'Inst. SN.', status: 'bound' },
+          { label: 'Date:', status: 'bound' },
+          { label: 'Instrument', status: 'bound' },
+          { label: 'Ambient Temperature:', status: 'bound' },
+          { label: 'Relative Humidity', status: 'bound' }
+        ]
+      }), now);
+    }
+
+    if (fs.existsSync(pack990Path)) {
+      db.prepare(`
+        INSERT OR IGNORE INTO templates (id, model, type, filename, filepath, file_hash, version, field_mappings, published_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run('tmpl_990_pack', '990', 'packing', path.basename(pack990Path), pack990Path, getFileSha256(pack990Path) || 'hash_990_pack', 'v1.0', JSON.stringify({
+        protectedRows: [1] // row 1: main device (DPT-990-Ex)
+      }), now);
+    }
+
+    // Seed Published Bundles
+    // 1. POA200 Cert + Packing
+    db.prepare(`
+      INSERT OR IGNORE INTO published_bundles (id, bundle_id, version, model_id, model_display, option_name, doc_combo, cert_template_id, packing_template_id, status, published_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run('bundle_poa200_full', 'bundle_poa200', 'v1.0', 'model_poa200', 'POA200', '带泵', 'cert_and_packing', 'tmpl_poa200_cert', 'tmpl_poa200_pack', 'PUBLISHED', now);
+
+    // 2. DPT810 Cert Only
+    db.prepare(`
+      INSERT OR IGNORE INTO published_bundles (id, bundle_id, version, model_id, model_display, option_name, doc_combo, cert_template_id, packing_template_id, status, published_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run('bundle_dpt810_cert', 'bundle_dpt810', 'v1.0', 'model_dpt810', 'DPT810', '通用', 'cert_only', 'tmpl_dpt810_cert', null, 'PUBLISHED', now);
+
+    // 3. 990 Cert + Packing (Full Combo)
+    db.prepare(`
+      INSERT OR IGNORE INTO published_bundles (id, bundle_id, version, model_id, model_display, option_name, doc_combo, cert_template_id, packing_template_id, status, published_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run('bundle_990_full', 'bundle_990', 'v1.0', 'model_990', '990', '带清单', 'cert_and_packing', 'tmpl_990_cert', 'tmpl_990_pack', 'PUBLISHED', now);
+
+    // 4. 990 Cert Only
+    db.prepare(`
+      INSERT OR IGNORE INTO published_bundles (id, bundle_id, version, model_id, model_display, option_name, doc_combo, cert_template_id, packing_template_id, status, published_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run('bundle_990_cert_only', 'bundle_990_cert', 'v1.0', 'model_990', '990', '仅证书', 'cert_only', 'tmpl_990_cert', null, 'PUBLISHED', now);
+
+    // 5. 990 Packing Only
+    db.prepare(`
+      INSERT OR IGNORE INTO published_bundles (id, bundle_id, version, model_id, model_display, option_name, doc_combo, cert_template_id, packing_template_id, status, published_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run('bundle_990_pack_only', 'bundle_990_pack', 'v1.0', 'model_990', '990', '仅清单', 'packing_only', null, 'tmpl_990_pack', 'PUBLISHED', now);
   }
 }
 seedDefaultTemplates();
 
-// ==================== C01: CLIENT MANAGEMENT (APP端名字管理) ====================
+// ==================== CLIENT MANAGEMENT ====================
 app.post('/api/clients/register', (req, res) => {
   let { clientId, name } = req.body;
   if (!name) return res.status(400).json({ error: 'Name is required' });
@@ -175,7 +273,7 @@ app.put('/api/clients/:id', requireAdminAccess, (req, res) => {
   res.json({ success: true, id, name });
 });
 
-// ==================== C02, E03: WORKER & PRINTER MONITORING ====================
+// ==================== WORKER & PRINTER MONITORING ====================
 app.post('/api/workers/heartbeat', (req, res) => {
   const { workerId, name, ip, workingDir, printers, status = 'ONLINE' } = req.body;
   if (!workerId) return res.status(400).json({ error: 'workerId required' });
@@ -204,7 +302,6 @@ app.get('/api/workers', (req, res) => {
   const showAll = req.query.all === 'true';
   const rawWorkers = db.prepare('SELECT * FROM workers').all();
 
-  // Analyze printer sharing across all workers
   const printerUsage = {};
   rawWorkers.forEach(w => {
     let pList = [];
@@ -217,7 +314,6 @@ app.get('/api/workers', (req, res) => {
 
   const workers = rawWorkers.map(w => {
     const lastTime = w.last_heartbeat ? new Date(w.last_heartbeat).getTime() : 0;
-    // Considered ONLINE if heartbeat in last 15 seconds
     const isOnline = (now - lastTime) < 15000;
     let printersList = [];
     try { printersList = JSON.parse(w.printers || '[]'); } catch (e) {}
@@ -226,11 +322,7 @@ app.get('/api/workers', (req, res) => {
       const pName = typeof p === 'string' ? p : p.name;
       const isShared = (printerUsage[pName] || 0) > 1;
       const pLower = pName.toLowerCase();
-      const isVirtual = pLower.includes('pdf') || 
-                        pLower.includes('onenote') || 
-                        pLower.includes('fax') || 
-                        pLower.includes('xps') || 
-                        pName.includes('导出');
+      const isVirtual = pLower.includes('pdf') || pLower.includes('onenote') || pLower.includes('fax') || pLower.includes('xps') || pName.includes('导出');
       return {
         name: pName,
         isShared,
@@ -254,16 +346,31 @@ app.get('/api/workers', (req, res) => {
   res.json(workers);
 });
 
-app.get('/api/workers/:id', (req, res) => {
-  const worker = db.prepare('SELECT * FROM workers WHERE id = ?').get(req.params.id);
-  if (!worker) return res.status(404).json({ error: 'Worker not found' });
-  res.json({
-    ...worker,
-    printers: JSON.parse(worker.printers || '[]')
+// ==================== PUBLISHED BUNDLES & MODELS ====================
+app.get('/api/published-bundles', (req, res) => {
+  const bundles = db.prepare("SELECT * FROM published_bundles WHERE status = 'PUBLISHED' ORDER BY id ASC").all().map(b => {
+    const certTmpl = b.cert_template_id ? db.prepare('SELECT * FROM templates WHERE id = ?').get(b.cert_template_id) : null;
+    const packTmpl = b.packing_template_id ? db.prepare('SELECT * FROM templates WHERE id = ?').get(b.packing_template_id) : null;
+
+    return {
+      ...b,
+      certTemplate: certTmpl ? { ...certTmpl, field_mappings: JSON.parse(certTmpl.field_mappings || '{}') } : null,
+      packingTemplate: packTmpl ? { ...packTmpl, field_mappings: JSON.parse(packTmpl.field_mappings || '{}') } : null
+    };
   });
+
+  res.json(bundles);
 });
 
-// ==================== C03, C04, C08: TEMPLATE & FIELD POSITION ASSISTANCE ====================
+app.get('/api/models', (req, res) => {
+  const models = db.prepare('SELECT * FROM models ORDER BY id ASC').all().map(m => ({
+    ...m,
+    aliases: JSON.parse(m.aliases || '[]')
+  }));
+  res.json(models);
+});
+
+// ==================== TEMPLATES & ASSISTANCE ====================
 app.get('/api/templates', (req, res) => {
   const tmpls = db.prepare('SELECT * FROM templates ORDER BY published_at DESC').all().map(t => ({
     ...t,
@@ -272,15 +379,15 @@ app.get('/api/templates', (req, res) => {
   res.json(tmpls);
 });
 
-// Template upload (C03, J10)
 app.post('/api/templates/upload', requireAdminAccess, upload.single('templateFile'), (req, res) => {
   const { model, type, version = 'v1.0' } = req.body;
   if (!req.file || !model || !type) {
     return res.status(400).json({ error: 'templateFile, model, and type are required' });
   }
 
+  const resolved = resolveModelAlias(model);
   const originalName = fixMulterFilename(req.file.originalname);
-  const tmplId = `tmpl_${model.toLowerCase()}_${type}_${Date.now()}`;
+  const tmplId = `tmpl_${resolved.displayName.toLowerCase()}_${type}_${Date.now()}`;
   const destPath = path.join(uploadDir, `${tmplId}_${originalName}`);
 
   try {
@@ -291,16 +398,15 @@ app.post('/api/templates/upload', requireAdminAccess, upload.single('templateFil
     db.prepare(`
       INSERT OR IGNORE INTO templates (id, model, type, filename, filepath, file_hash, version, field_mappings, published_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, '{}', ?)
-    `).run(tmplId, model.toUpperCase(), type, originalName, destPath, sha256, version, now);
+    `).run(tmplId, resolved.displayName, type, originalName, destPath, sha256, version, now);
 
-    logAudit(null, 'ADMIN', 'Admin', 'UPLOAD_TEMPLATE', { tmplId, model, type, originalName, sha256 });
-    res.json({ success: true, tmplId, model, type, filename: originalName, sha256, version });
+    logAudit(null, 'ADMIN', 'Admin', 'UPLOAD_TEMPLATE', { tmplId, model: resolved.displayName, type, originalName, sha256 });
+    res.json({ success: true, tmplId, model: resolved.displayName, type, filename: originalName, sha256, version });
   } catch (err) {
     res.status(500).json({ error: 'Failed to save template file: ' + err.message });
   }
 });
 
-// Template download
 app.get('/api/templates/:id/download', (req, res) => {
   const tmpl = db.prepare('SELECT * FROM templates WHERE id = ?').get(req.params.id);
   if (!tmpl || !fs.existsSync(tmpl.filepath)) {
@@ -309,7 +415,6 @@ app.get('/api/templates/:id/download', (req, res) => {
   res.download(tmpl.filepath, tmpl.filename);
 });
 
-// Template delete
 app.delete('/api/templates/:id', requireAdminAccess, (req, res) => {
   const tmpl = db.prepare('SELECT * FROM templates WHERE id = ?').get(req.params.id);
   if (!tmpl) return res.status(404).json({ error: 'Template not found' });
@@ -322,12 +427,10 @@ app.delete('/api/templates/:id', requireAdminAccess, (req, res) => {
   res.json({ success: true, id: req.params.id });
 });
 
-// Auto-analyze template field positions & candidate matching (C04, C05, T03)
 app.get('/api/templates/:id/analyze', (req, res) => {
   const tmpl = db.prepare('SELECT * FROM templates WHERE id = ?').get(req.params.id);
   if (!tmpl) return res.status(404).json({ error: 'Template not found' });
 
-  // Extract real structural items from template file
   let docItems = [];
   if (fs.existsSync(tmpl.filepath)) {
     try {
@@ -337,11 +440,10 @@ app.get('/api/templates/:id/analyze', (req, res) => {
     }
   }
 
-  // Define target labels based on template type and model
   let targetLabels = [];
   if (tmpl.type === 'cert') {
     if (tmpl.model === '990') {
-      targetLabels = ['Inst. SN.', 'Instrument', 'Date:', 'Ambient Temperature:', 'Relative Humidity', 'Analyzer ℃ dp'];
+      targetLabels = ['Inst. SN.', 'Instrument', 'Date:', 'Ambient Temperature:', 'Relative Humidity', 'Test point Number', 'NIST Traceable Standard ℃ dp', 'Analyzer ℃ dp'];
     } else if (tmpl.model === 'DPT810') {
       targetLabels = ['Inst. SN.', 'Instrument', 'Date:', 'Ambient Temperature:', 'Relative Humidity', 'Analyzer Under Test mA'];
     } else {
@@ -380,7 +482,6 @@ app.post('/api/templates/publish', requireAdminAccess, (req, res) => {
   const { id, model, type, filename, fieldMappings, version = 'v1.0', isDraft = false } = req.body;
   if (!model || !type || !filename) return res.status(400).json({ error: 'Missing required parameters' });
 
-  // If formal publication (not draft), validate all configured fields are bound (J11, Q32)
   if (!isDraft) {
     const mappings = fieldMappings || {};
     const singleFields = Array.isArray(mappings.singleFields) ? mappings.singleFields : [];
@@ -410,7 +511,7 @@ app.post('/api/templates/publish', requireAdminAccess, (req, res) => {
   res.json({ success: true, tmplId, version });
 });
 
-// ==================== C09, C10: TASK SUBMISSION & DEDUPLICATION ====================
+// ==================== TASK SUBMISSION & DEDUPLICATION ====================
 app.post('/api/tasks/submit', (req, res) => {
   const {
     reqId,
@@ -418,10 +519,12 @@ app.post('/api/tasks/submit', (req, res) => {
     clientName,
     workerId,
     model,
+    bundleId,
+    docCombo,
     deviceSn,
     shippingLocation = '南京',
-    sensorModel = 'PSR-12-223(封装）',
-    sensorSn = '201N200258',
+    sensorModel,
+    sensorSn,
     hasPump = true,
     certDate,
     testPoints = [],
@@ -433,7 +536,7 @@ app.post('/api/tasks/submit', (req, res) => {
     return res.status(400).json({ error: 'Missing required task submission fields' });
   }
 
-  // R09: Check if request ID already exists for deduplication
+  // Check deduplication
   const existingTask = db.prepare('SELECT * FROM tasks WHERE req_id = ?').get(reqId);
   if (existingTask) {
     const files = db.prepare('SELECT * FROM task_files WHERE task_id = ?').all(existingTask.id).map(f => ({
@@ -450,7 +553,10 @@ app.post('/api/tasks/submit', (req, res) => {
     });
   }
 
-  // J01: Verify assigned worker is currently active (heartbeat within 15 seconds)
+  // Resolve Model Alias
+  const resolvedModel = resolveModelAlias(model);
+
+  // Validate Worker is ONLINE
   if (!workerId) {
     return res.status(400).json({ error: '请指定调度的执行终端 (workerId)' });
   }
@@ -460,36 +566,29 @@ app.post('/api/tasks/submit', (req, res) => {
   const lastTimeMs = targetWorker && targetWorker.last_heartbeat ? new Date(targetWorker.last_heartbeat).getTime() : 0;
   const isWorkerOnline = targetWorker && (nowMs - lastTimeMs) < 15000;
 
-    if (!isWorkerOnline) {
+  if (!isWorkerOnline) {
     return res.status(400).json({
       error: `执行终端 [${workerId}] 当前不在线或心跳超时，拒绝受理任务！(J01, Q03)`
     });
   }
 
-  if (targetWorker.status === 'ERROR' || targetWorker.status === 'FAULT') {
-    return res.status(400).json({
-      error: `执行终端 [${workerId}] 处于故障状态 (${targetWorker.status})，无法接收任务！(J01, Q05)`
-    });
-  }
-
-  // F10: Sensor model isolation and validation
-  if (model !== 'POA200') {
-    if (req.body.sensorModel && String(req.body.sensorModel).trim() !== '') {
+  // F10: Sensor Model validation for non-POA200 models
+  if (resolvedModel.displayName !== 'POA200') {
+    if (sensorModel && String(sensorModel).trim() !== '') {
       return res.status(400).json({
-        error: `非 POA200 型号 (${model}) 严禁提交 sensorModel 传感器参数！(F10)`
+        error: `非 POA200 型号 (${resolvedModel.displayName}) 严禁提交 sensorModel 传感器参数！(F10)`
       });
     }
   } else {
-    // POA200 sensor model options validation against published template configuration
     try {
       const tmpl = db.prepare("SELECT * FROM templates WHERE model = 'POA200' AND type = 'cert'").get();
       if (tmpl && tmpl.field_mappings) {
         const mappings = JSON.parse(tmpl.field_mappings);
         const options = mappings.sensorModelConfig?.options || [];
-        if (options.length > 0 && req.body.sensorModel) {
-          if (!options.includes(req.body.sensorModel)) {
+        if (options.length > 0 && sensorModel) {
+          if (!options.includes(sensorModel)) {
             return res.status(400).json({
-              error: `传感器型号 [${req.body.sensorModel}] 不属于已发布的有效选项列表 (${options.join(', ')})！(F10)`
+              error: `传感器型号 [${sensorModel}] 不属于已发布的有效选项列表 (${options.join(', ')})！(F10)`
             });
           }
         }
@@ -497,7 +596,7 @@ app.post('/api/tasks/submit', (req, res) => {
     } catch (e) {}
   }
 
-  // J05: Validate Device SN consistency across fields (no conflicting SNs permitted, supporting half/full-width colon)
+  // J05: Validate Device Serial Number consistency across packing list if present
   if (Array.isArray(packingItems) && packingItems.length > 0) {
     const mainRemark = packingItems[0].remark || '';
     const match = mainRemark.match(/SN[:：]\s*([A-Za-z0-9_-]+)/i);
@@ -508,66 +607,67 @@ app.post('/api/tasks/submit', (req, res) => {
     }
   }
 
-  const hasPacking = model === 'POA200';
-  const ambientTemp = (req.body.ambientTemp !== undefined && req.body.ambientTemp !== null && req.body.ambientTemp !== '') ? String(req.body.ambientTemp) : '28.7';
-  const relativeHumidity = (req.body.relativeHumidity !== undefined && req.body.relativeHumidity !== null && req.body.relativeHumidity !== '') ? String(req.body.relativeHumidity) : '63.2';
-
-  // J03: Extract single source of truth for sensor SN from packing list sensor row if packing exists
-  let resolvedSensorSn = sensorSn;
-  if (hasPacking && Array.isArray(packingItems) && packingItems.length >= 2) {
-    const sensorRow = packingItems[1];
-    if (sensorRow && sensorRow.remark) {
-      const match = sensorRow.remark.match(/SN:\s*([A-Za-z0-9_-]+)/i);
-      resolvedSensorSn = match && match[1] ? match[1] : sensorRow.remark.replace(/^SN:\s*/i, '').trim();
-    }
+  // Find Published Bundle Configuration
+  let bundle = null;
+  if (bundleId) {
+    bundle = db.prepare('SELECT * FROM published_bundles WHERE bundle_id = ? AND status = \'PUBLISHED\'').get(bundleId);
   }
+  if (!bundle) {
+    bundle = db.prepare('SELECT * FROM published_bundles WHERE model_id = ? AND status = \'PUBLISHED\'').get(resolvedModel.modelId);
+  }
+
+  // Determine doc combo (cert_and_packing, cert_only, packing_only)
+  const effectiveCombo = docCombo || (bundle ? bundle.doc_combo : (resolvedModel.displayName === 'POA200' ? 'cert_and_packing' : 'cert_only'));
+  const createCert = effectiveCombo === 'cert_and_packing' || effectiveCombo === 'cert_only';
+  const createPacking = effectiveCombo === 'cert_and_packing' || effectiveCombo === 'packing_only';
+
+  const ambientTemp = (req.body.ambientTemp !== undefined && req.body.ambientTemp !== null && req.body.ambientTemp !== '') ? String(req.body.ambientTemp) : '22.1';
+  const relativeHumidity = (req.body.relativeHumidity !== undefined && req.body.relativeHumidity !== null && req.body.relativeHumidity !== '') ? String(req.body.relativeHumidity) : '50%RH';
 
   const acceptedAt = new Date().toISOString();
   const formData = JSON.stringify({
     shippingLocation,
-    sensorModel,
-    sensorSn: resolvedSensorSn,
+    sensorModel: resolvedModel.displayName === 'POA200' ? sensorModel : undefined,
+    sensorSn: resolvedModel.displayName === 'POA200' ? sensorSn : undefined,
     ambientTemp,
     relativeHumidity,
-    hasPump: hasPacking ? hasPump : false,
+    hasPump: resolvedModel.displayName === 'POA200' ? hasPump : false,
     certDate,
     testPoints,
-    packingItems: hasPacking ? packingItems : [],
+    packingItems: createPacking ? packingItems : [],
     overwriteConfirmed
   });
 
-  // Insert task record
   const result = db.prepare(`
-    INSERT INTO tasks (req_id, client_id, client_name, worker_id, model, device_sn, status, accepted_at, form_data)
-    VALUES (?, ?, ?, ?, ?, ?, 'QUEUED', ?, ?)
-  `).run(reqId, clientId, clientName, workerId, model, String(deviceSn), acceptedAt, formData);
+    INSERT INTO tasks (req_id, client_id, client_name, worker_id, model, model_id, bundle_id, device_sn, status, accepted_at, form_data)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'QUEUED', ?, ?)
+  `).run(reqId, clientId, clientName, workerId, resolvedModel.displayName, resolvedModel.modelId, bundleId || (bundle ? bundle.bundle_id : null), String(deviceSn), acceptedAt, formData);
 
   const taskId = result.lastInsertRowid;
 
-  // Generate official filenames using Naming Engine (C07, T07-T11)
-  const certOfficialName = generateCertFilename({
-    model,
-    deviceSn: String(deviceSn),
-    acceptedDate: acceptedAt,
-    shippingLocation,
-    sensorModel,
-    hasPump: hasPacking ? hasPump : false
-  });
-
-  // Insert initial task file record for Certificate
-  db.prepare(`
-    INSERT INTO task_files (task_id, file_type, official_filename, status)
-    VALUES (?, 'cert', ?, 'GENERATING')
-  `).run(taskId, certOfficialName);
-
-  let packingOfficialName = null;
-  // Create packing list file ONLY if template/model has packing list (J09)
-  if (hasPacking) {
-    packingOfficialName = generatePackingListFilename({
-      model,
+  // Create Task Files
+  if (createCert) {
+    const certOfficialName = generateCertFilename({
+      model: resolvedModel.displayName,
       deviceSn: String(deviceSn),
       acceptedDate: acceptedAt,
-      hasPump
+      shippingLocation,
+      sensorModel: resolvedModel.displayName === 'POA200' ? sensorModel : undefined,
+      hasPump: resolvedModel.displayName === 'POA200' ? hasPump : false
+    });
+
+    db.prepare(`
+      INSERT INTO task_files (task_id, file_type, official_filename, status)
+      VALUES (?, 'cert', ?, 'GENERATING')
+    `).run(taskId, certOfficialName);
+  }
+
+  if (createPacking) {
+    const packingOfficialName = generatePackingListFilename({
+      model: resolvedModel.displayName,
+      deviceSn: String(deviceSn),
+      acceptedDate: acceptedAt,
+      hasPump: resolvedModel.displayName === 'POA200' ? hasPump : false
     });
 
     db.prepare(`
@@ -576,7 +676,7 @@ app.post('/api/tasks/submit', (req, res) => {
     `).run(taskId, packingOfficialName);
   }
 
-  logAudit(reqId, clientId, clientName, 'SUBMIT_TASK', { taskId, model, deviceSn, workerId, certOfficialName, packingOfficialName });
+  logAudit(reqId, clientId, clientName, 'SUBMIT_TASK', { taskId, model: resolvedModel.displayName, deviceSn, workerId });
 
   const files = db.prepare('SELECT * FROM task_files WHERE task_id = ?').all(taskId).map(f => ({
     ...f,
@@ -642,7 +742,6 @@ app.get('/api/tasks/:id', (req, res) => {
   });
 });
 
-// Task official Word document download (C11, R21)
 app.get('/api/tasks/:id/files/:fileType/download', (req, res) => {
   const { id, fileType } = req.params;
   const taskFile = db.prepare('SELECT * FROM task_files WHERE task_id = ? AND file_type = ?').get(id, fileType);
@@ -653,7 +752,6 @@ app.get('/api/tasks/:id/files/:fileType/download', (req, res) => {
   res.download(taskFile.server_filepath, taskFile.official_filename);
 });
 
-// ==================== M12, C12: CANCEL & RETRY ====================
 app.post('/api/tasks/:id/cancel', (req, res) => {
   const { id } = req.params;
   const { cancelledBy = 'User' } = req.body;
@@ -686,8 +784,7 @@ app.post('/api/tasks/:id/retry', (req, res) => {
   res.json({ success: true, taskId: id, status: 'QUEUED' });
 });
 
-// ==================== C10, C11, E08: WORKER TASK DISTRIBUTION & RETURN ====================
-// Atomic task claiming to prevent race conditions across multiple workers (J14, Q37)
+// ==================== WORKER TASK DISTRIBUTION & RETURN ====================
 app.get('/api/worker/tasks/pending', (req, res) => {
   const { workerId = 'worker-local' } = req.query;
 
@@ -741,7 +838,6 @@ app.post('/api/worker/tasks/:id/file-returned', upload.single('wordFile'), (req,
   const destPath = path.join(returnedDir, `${taskId}_${fileType}_${req.file.originalname}`);
   fs.renameSync(req.file.path, destPath);
 
-  // Load Task Details for Preview Generation (C11, R21, R22)
   const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId);
   let previews = [];
   try {
@@ -754,14 +850,12 @@ app.post('/api/worker/tasks/:id/file-returned', upload.single('wordFile'), (req,
     console.error('Preview error:', err);
   }
 
-  // Update task file record
   db.prepare(`
     UPDATE task_files
     SET server_filepath = ?, sha256 = ?, preview_images = ?, status = 'PREVIEW_READY'
     WHERE task_id = ? AND file_type = ?
   `).run(destPath, sha256 || getFileSha256(destPath), JSON.stringify(previews), taskId, fileType);
 
-  // Check if all sub-files for task are ready
   const files = db.prepare('SELECT * FROM task_files WHERE task_id = ?').all(taskId);
   const allReady = files.every(f => f.status === 'PREVIEW_READY' || f.status === 'PRINTED');
 
@@ -775,7 +869,7 @@ app.post('/api/worker/tasks/:id/file-returned', upload.single('wordFile'), (req,
   res.json({ success: true, taskId, fileType, previews });
 });
 
-// ==================== C10, M11, E09: PRINT JOBS ====================
+// ==================== PRINT JOBS ====================
 app.post('/api/print/submit', (req, res) => {
   const { clientId, workerId = 'worker-local', printerName = '', batchItems = [] } = req.body;
   if (!clientId || !batchItems.length) {
@@ -812,14 +906,14 @@ app.get('/api/print/pending', (req, res) => {
 
 app.post('/api/print/:id/status', (req, res) => {
   const { id } = req.params;
-  const { status, errorMsg } = req.body; // status: 'SUBMITTED_TO_QUEUE' or 'PRINTED' or 'FAILED'
+  const { status, errorMsg } = req.body;
 
   db.prepare('UPDATE print_jobs SET status = ? WHERE id = ?').run(status, id);
   logAudit(null, 'WORKER', 'PrintWorker', 'UPDATE_PRINT_STATUS', { printJobId: id, status, errorMsg });
   res.json({ success: true, printJobId: id, status });
 });
 
-// ==================== C13, R33: AUDIT LOGS ====================
+// ==================== AUDIT LOGS ====================
 app.get('/api/audit-logs', (req, res) => {
   const logs = db.prepare('SELECT * FROM audit_logs ORDER BY id DESC LIMIT 100').all().map(l => ({
     ...l,
@@ -828,7 +922,6 @@ app.get('/api/audit-logs', (req, res) => {
   res.json(logs);
 });
 
-// Start Server if run directly
 if (require.main === module) {
   app.listen(PORT, () => {
     console.log('====================================================');
@@ -845,3 +938,4 @@ if (require.main === module) {
 
 module.exports = app;
 module.exports.isLocalhostRequest = isLocalhostRequest;
+module.exports.resolveModelAlias = resolveModelAlias;

@@ -1,6 +1,6 @@
 /**
  * Field Position Candidate Finder and Matcher Engine
- * Rules: T03, C04, F01-F05, G01-G04
+ * Rules: T03, C04, F01-F05, G01-G04, D01-D03, D15, D16
  */
 
 const ALIAS_MAP = {
@@ -8,7 +8,8 @@ const ALIAS_MAP = {
   '设备sn': ['inst. sn.', 'inst sn', 'serial no', 'sn'],
   '环境温度': ['ambient temperature:', 'ambient temp', 'ambient temperature'],
   '相对湿度': ['relative humidity', 'humidity'],
-  '日期': ['date:'],
+  '日期': ['date:', 'certificate date', 'date'],
+  '证书日期': ['date:', 'certificate date', 'date'],
   '仪器': ['instrument'],
   '主设备': ['主设备'],
   '传感器': ['传感器']
@@ -16,9 +17,21 @@ const ALIAS_MAP = {
 
 const KNOWN_UNITS = ['ppm', '℃ dp', '℃', '°c', 'ma', '%rh', 'rh'];
 
+/**
+ * Check if label has explicit date meaning
+ * English date match strictly uses word boundary to avoid false positives on "Update" or "Candidate"
+ */
+function isDateFieldLabel(label) {
+  if (!label) return false;
+  const str = String(label).trim();
+  if (/证书日期|日期|出厂日期/i.test(str)) return true;
+  if (/\bdate\b/i.test(str)) return true;
+  return false;
+}
+
 function normalizeText(text) {
   if (!text) return '';
-  return text
+  return String(text)
     .replace(/[\r\n\t]/g, ' ')
     .replace(/[:：]/g, '')
     .replace(/\s+/g, ' ')
@@ -38,17 +51,34 @@ function extractUnits(text) {
 }
 
 /**
+ * Infer recommended input field type according to Spec Section 4.1
+ */
+function inferFieldType(targetLabel, category = 'single') {
+  if (category === 'table') {
+    return 'table';
+  }
+  if (isDateFieldLabel(targetLabel)) {
+    return 'date';
+  }
+  if (targetLabel === 'sensorModel' || targetLabel === '传感器型号') {
+    return 'enum';
+  }
+  return 'text';
+}
+
+/**
  * Match a target label against document structural items (paragraphs & table cells)
- * @param {string} targetLabel - e.g. "Inst. SN." or "Customer" or "Analyzer pv ppm"
+ * @param {string} targetLabel - e.g. "Inst. SN." or "Customer" or "Analyzer ℃ dp" or "Date:"
  * @param {Array} docItems - list of items extracted from doc
  */
 function findFieldCandidates(targetLabel, docItems) {
   const normTarget = normalizeText(targetLabel);
-  const candidates = [];
+  const inferredType = inferFieldType(targetLabel);
 
   if (!normTarget || !docItems || !Array.isArray(docItems)) {
     return {
       label: targetLabel || '',
+      inferredType,
       matchCount: 0,
       matchStatus: 'NO_MATCH',
       candidates: []
@@ -57,29 +87,36 @@ function findFieldCandidates(targetLabel, docItems) {
 
   const targetUnits = extractUnits(normTarget);
   const aliases = ALIAS_MAP[targetLabel] || ALIAS_MAP[normTarget] || [];
+  const candidates = [];
+
+  // Handle multi-line "Test point Number" recognition (D01)
+  const isTestPointFeature = normTarget.includes('test point number') || 
+                             normTarget.includes('testpointnumber') ||
+                             (normTarget.includes('test') && normTarget.includes('point') && normTarget.includes('number'));
 
   for (let i = 0; i < docItems.length; i++) {
     const item = docItems[i];
     const normText = normalizeText(item?.text);
 
-    if (!normText) continue; // Empty cells/text do NOT match anything (Q30)
+    if (!normText) continue; // Empty cells do NOT match anything (Q30)
 
     const textUnits = extractUnits(normText);
 
-    // Check unit conflicts (e.g. target requested ppm, but cell contains ℃ dp or mA)
+    // Prevent cross-unit conflicts (F05, D15: e.g. ppm vs ℃ dp vs mA)
     if (targetUnits.length > 0 && textUnits.length > 0) {
       const hasOverlap = targetUnits.some(u => textUnits.includes(u));
       if (!hasOverlap) {
-        // Unit conflict -> Skip! (F05)
-        continue;
+        continue; // Skip conflicting unit candidate
       }
     }
 
     let isFull = normText === normTarget;
     let isAlias = !isFull && aliases.some(a => normText === a || normText.includes(a));
-    let isSub = !isFull && !isAlias && (normText.includes(normTarget) || normTarget.includes(normText));
+    let isTestPointMatch = !isFull && isTestPointFeature && 
+                           (normText.includes('test') && normText.includes('point') && normText.includes('number'));
+    let isSub = !isFull && !isAlias && !isTestPointMatch && 
+                (normText.includes(normTarget) || normTarget.includes(normText));
 
-    // Avoid matching common word "Analyzer" alone across different measurement columns
     if (isSub && (normTarget === 'analyzer' || normText === 'analyzer')) {
       if (targetUnits.length > 0 && textUnits.length === 0) {
         // Needs unit confirmation
@@ -88,15 +125,15 @@ function findFieldCandidates(targetLabel, docItems) {
       }
     }
 
-    if (isFull || isAlias || isSub) {
+    if (isFull || isAlias || isTestPointMatch || isSub) {
       let score = 0.8;
       let status = 'NO_MATCH';
       let reason = '部分匹配';
 
-      if (isFull) {
+      if (isFull || isTestPointMatch) {
         score = 1.0;
         status = 'FULL_MATCH';
-        reason = '完整匹配';
+        reason = isTestPointMatch ? '表头特征匹配' : '完整匹配';
       } else if (isAlias) {
         score = 0.95;
         status = 'ALIAS_MATCH';
@@ -111,22 +148,36 @@ function findFieldCandidates(targetLabel, docItems) {
         reason = '需确认单位';
       }
 
-      // Find candidate value position (e.g., adjacent cell to the right or next paragraph)
+      // Find candidate value location & sample values
       let candidateValue = '';
       let valueLocation = null;
+      let sampleValues = [];
 
       if (item.type === 'cell') {
+        // 1. Right cell in same row for single value fields
         const rightCell = docItems.find(
           x => x.type === 'cell' && x.tableIdx === item.tableIdx && x.rowIdx === item.rowIdx && x.colIdx === item.colIdx + 1
         );
         if (rightCell) {
-          candidateValue = rightCell.text.trim();
-          valueLocation = { tableIdx: rightCell.tableIdx, rowIdx: rightCell.rowIdx, colIdx: rightCell.colIdx };
+          candidateValue = rightCell.text ? rightCell.text.trim() : '空';
+          valueLocation = { type: 'cell', tableIdx: rightCell.tableIdx, rowIdx: rightCell.rowIdx, colIdx: rightCell.colIdx };
+        } else {
+          candidateValue = '未绑定';
+        }
+
+        // 2. Below cells in same column for table data areas (e.g. test points or packing list columns)
+        const columnCellsBelow = docItems.filter(
+          x => x.type === 'cell' && x.tableIdx === item.tableIdx && x.colIdx === item.colIdx && x.rowIdx > item.rowIdx
+        );
+        if (columnCellsBelow.length > 0) {
+          sampleValues = columnCellsBelow.map(c => c.text ? c.text.trim() : '空').slice(0, 5);
         }
       } else if (item.type === 'paragraph') {
         if (i + 1 < docItems.length) {
-          candidateValue = docItems[i + 1].text.trim();
-          valueLocation = { paragraphIdx: i + 1 };
+          candidateValue = docItems[i + 1].text ? docItems[i + 1].text.trim() : '空';
+          valueLocation = { type: 'paragraph', paragraphIdx: i + 1 };
+        } else {
+          candidateValue = '未绑定';
         }
       }
 
@@ -140,12 +191,12 @@ function findFieldCandidates(targetLabel, docItems) {
           : { type: 'paragraph', paragraphIdx: i },
         context: item.text.trim(),
         suggestedValueLocation: valueLocation,
-        candidateValue
+        candidateValue,
+        sampleValues
       });
     }
   }
 
-  // Sort candidates by score descending
   candidates.sort((a, b) => b.score - a.score);
 
   let matchStatus = 'NO_MATCH';
@@ -157,6 +208,7 @@ function findFieldCandidates(targetLabel, docItems) {
 
   return {
     label: targetLabel,
+    inferredType,
     matchCount: candidates.length,
     matchStatus,
     candidates
@@ -166,5 +218,7 @@ function findFieldCandidates(targetLabel, docItems) {
 module.exports = {
   normalizeText,
   findFieldCandidates,
+  inferFieldType,
+  isDateFieldLabel,
   ALIAS_MAP
 };

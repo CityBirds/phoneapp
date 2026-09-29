@@ -1,6 +1,6 @@
 /**
  * phoneApp Mobile & Workstation Client Logic (手机/车间作业端)
- * Rules: M01 - M15, F01-F16, G01-G12
+ * Rules: M01 - M15, F01-F16, G01-G12, 03-Spec Section 6-7
  */
 
 const API_BASE = window.location.origin;
@@ -10,33 +10,47 @@ const state = {
   clientName: localStorage.getItem('phoneapp_user_name') || '',
   selectedWorker: null,
   workers: [],
-  templates: [],
+  bundles: [],
+  activeBundle: null,
   currentModel: 'POA200',
   hasPump: true,
   currentTask: null,
   activePreviewType: 'cert',
   historyRange: 'today',
-  packingItems: [
-    { index: 1, name: '主设备', spec: 'POA200', count: 1, unit: '台', standard: '是', remark: 'SN: AP10007513带泵', isProtectedMain: true },
-    { index: 2, name: '传感器', spec: 'PMT210SEN', count: 1, unit: '支', standard: '是', remark: 'SN: 201N200258', isProtectedSensor: true },
-    { index: 3, name: '仪器包装箱', spec: 'ABS', count: 1, unit: '个', standard: '是', remark: '' },
-    { index: 4, name: '用户手册', spec: '中英文', count: 1, unit: '份', standard: '是', remark: '' },
-    { index: 5, name: '出厂合格证', spec: '中英文', count: 1, unit: '份', standard: '是', remark: '' },
-    { index: 6, name: '电源适配器', spec: '902B', count: 1, unit: '个', standard: '是', remark: '' },
-    { index: 7, name: 'USB通讯线', spec: '标准', count: 1, unit: '根', standard: '是', remark: '' },
-    { index: 8, name: '标定指示卡', spec: '标准', count: 1, unit: '张', standard: '是', remark: '' },
-    { index: 9, name: 'F46测试管', spec: '外径1/8英寸', count: 1, unit: '根', standard: '是', remark: '' }
-  ]
+  packingItems: []
 };
+
+const DEFAULT_990_PACKING_ITEMS = [
+  { index: 1, name: '主设备', spec: 'DPT-990-Ex', count: 1, unit: '台', standard: '是', remark: 'SN: EX10260902', isProtectedMain: true },
+  { index: 2, name: '计量证书', spec: '英文', count: 1, unit: '份', standard: '是', remark: '' },
+  { index: 3, name: '用户手册', spec: '中英文', count: 1, unit: '本', standard: '是', remark: '' },
+  { index: 4, name: '操作说明', spec: '中英文', count: 1, unit: '份', standard: '是', remark: '' },
+  { index: 5, name: '防爆证书', spec: '英文', count: 1, unit: '份', standard: '是', remark: '' },
+  { index: 6, name: '安装螺钉', spec: 'M3*8', count: 4, unit: '个', standard: '是', remark: '' },
+  { index: 7, name: '干燥装置', spec: 'DPT-990-Ex', count: 1, unit: '套', standard: '是', remark: '' },
+  { index: 8, name: '堵头', spec: '1/8NPT', count: 1, unit: '个', standard: '是', remark: '' },
+  { index: 9, name: '卡套螺母组', spec: '1/8”', count: 2, unit: '组', standard: '是', remark: '' },
+  { index: 10, name: '防爆电缆接头', spec: 'M12*1.5', count: 1, unit: '个', standard: '是', remark: '' },
+  { index: 11, name: '电源/信号线', spec: '2米', count: 1, unit: '根', standard: '是', remark: '' }
+];
+
+const DEFAULT_POA200_PACKING_ITEMS = [
+  { index: 1, name: '主设备', spec: 'POA200', count: 1, unit: '台', standard: '是', remark: 'SN: AP10007513带泵', isProtectedMain: true },
+  { index: 2, name: '传感器', spec: 'PMT210SEN', count: 1, unit: '支', standard: '是', remark: 'SN: 201N200258', isProtectedSensor: true },
+  { index: 3, name: '仪器包装箱', spec: 'ABS', count: 1, unit: '个', standard: '是', remark: '' },
+  { index: 4, name: '用户手册', spec: '中英文', count: 1, unit: '份', standard: '是', remark: '' },
+  { index: 5, name: '出厂合格证', spec: '中英文', count: 1, unit: '份', standard: '是', remark: '' },
+  { index: 6, name: '电源适配器', spec: '902B', count: 1, unit: '个', standard: '是', remark: '' },
+  { index: 7, name: 'USB通讯线', spec: '标准', count: 1, unit: '根', standard: '是', remark: '' },
+  { index: 8, name: '标定指示卡', spec: '标准', count: 1, unit: '张', standard: '是', remark: '' },
+  { index: 9, name: 'F46测试管', spec: '外径1/8英寸', count: 1, unit: '根', standard: '是', remark: '' }
+];
 
 // ==================== INITIALIZATION ====================
 window.addEventListener('DOMContentLoaded', async () => {
   initClientIdentity();
   initFormDefaults();
-  await loadPublishedTemplates();
-  renderTestPoints();
-  renderPackingTable();
-  
+  await loadPublishedBundles();
   await loadWorkers();
   await syncClientNameFromServer();
 
@@ -56,7 +70,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   setInterval(syncClientNameFromServer, 5000);
 });
 
-// ==================== C01, M01: CLIENT IDENTITY ====================
+// ==================== CLIENT IDENTITY ====================
 function initClientIdentity() {
   if (!state.clientId) {
     state.clientId = 'client_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7);
@@ -183,7 +197,7 @@ function renderWorkerCards(workers) {
         <div class="worker-meta">
           <div><b>终端标识:</b> ${w.id} | <b>IP地址:</b> ${w.ip || '127.0.0.1'}</div>
           <div><b>工作目录:</b> ${w.working_dir || '默认目录'}</div>
-          <div style="margin-top: 4px;"><b>检测到打印机 (支持局域网多终端共享):</b></div>
+          <div style="margin-top: 4px;"><b>检测到打印机:</b></div>
         </div>
         <div class="printer-tags">
           ${printerTagsHtml}
@@ -237,25 +251,99 @@ function updateWorkerUI(worker) {
   }
 }
 
-// ==================== TEMPLATES & DYNAMIC FORM SETUP ====================
-async function loadPublishedTemplates() {
+// ==================== DYNAMIC FORM RENDERER (03 SPEC SECTION 6 & 7) ====================
+async function loadPublishedBundles() {
   try {
-    const res = await fetch(`${API_BASE}/api/templates`);
-    state.templates = await res.json();
-    populateSensorModelOptions();
-  } catch (e) {}
+    const res = await fetch(`${API_BASE}/api/published-bundles`);
+    state.bundles = await res.json();
+    renderModelSelectOptions();
+  } catch (e) {
+    console.warn('Load published bundles error:', e);
+  }
 }
 
-function populateSensorModelOptions() {
+function renderModelSelectOptions() {
+  const select = document.getElementById('model-select');
+  if (!select) return;
+
+  if (!state.bundles || state.bundles.length === 0) {
+    select.innerHTML = '<option value="">(暂无已发布模板配置)</option>';
+    return;
+  }
+
+  select.innerHTML = state.bundles.map(b => {
+    let comboText = ' (带清单)';
+    if (b.doc_combo === 'cert_only') comboText = ' (仅证书)';
+    if (b.doc_combo === 'packing_only') comboText = ' (仅清单)';
+
+    const optName = b.option_name && b.option_name !== '通用' ? ` - ${b.option_name}` : '';
+    return `<option value="${b.id}">${b.model_display}${optName}${comboText}</option>`;
+  }).join('');
+
+  onModelChange();
+}
+
+function initFormDefaults() {
+  const today = new Date().toISOString().slice(0, 10);
+  const dateInput = document.getElementById('cert-date');
+  if (dateInput) dateInput.value = today;
+
+  if (document.getElementById('ambient-temp')) document.getElementById('ambient-temp').value = '22.1';
+  if (document.getElementById('relative-humidity')) document.getElementById('relative-humidity').value = '50%RH';
+}
+
+function onModelChange() {
+  const select = document.getElementById('model-select');
+  if (!select) return;
+
+  const bundleId = select.value;
+  const bundle = state.bundles.find(b => b.id === bundleId) || state.bundles[0];
+  state.activeBundle = bundle;
+
+  if (!bundle) return;
+
+  state.currentModel = bundle.model_display;
+
+  const docCombo = bundle.doc_combo;
+  const showCert = docCombo === 'cert_and_packing' || docCombo === 'cert_only';
+  const showPacking = docCombo === 'cert_and_packing' || docCombo === 'packing_only';
+  const isPOA200 = bundle.model_display === 'POA200';
+
+  // Toggle UI sections dynamically based on Published Bundle
+  const pumpGroup = document.getElementById('pump-group');
+  const sensorModelGroup = document.getElementById('sensor-model-group');
+  const certFieldsGroup = document.getElementById('cert-fields-card');
+  const testPointsCard = document.getElementById('test-points-card');
+  const packingSection = document.getElementById('packing-section');
+
+  if (pumpGroup) pumpGroup.style.display = isPOA200 ? 'block' : 'none';
+  if (sensorModelGroup) sensorModelGroup.style.display = isPOA200 ? 'block' : 'none';
+  if (certFieldsGroup) certFieldsGroup.style.display = showCert ? 'block' : 'none';
+  if (testPointsCard) testPointsCard.style.display = showCert ? 'block' : 'none';
+  if (packingSection) packingSection.style.display = showPacking ? 'block' : 'none';
+
+  if (isPOA200) {
+    populateSensorModelOptions(bundle);
+  }
+
+  if (showCert) {
+    renderTestPoints(bundle.model_display);
+  }
+
+  if (showPacking) {
+    initPackingItemsForModel(bundle.model_display);
+  }
+}
+
+function populateSensorModelOptions(bundle) {
   const select = document.getElementById('sensor-model');
   if (!select) return;
 
-  const poaTmpl = state.templates.find(t => t.model === 'POA200' && t.type === 'cert');
   let options = ['PSR-12-223(封装）', 'PMT210SEN'];
   let defaultVal = 'PSR-12-223(封装）';
 
-  if (poaTmpl && poaTmpl.field_mappings) {
-    const config = poaTmpl.field_mappings.sensorModelConfig;
+  if (bundle && bundle.certTemplate && bundle.certTemplate.field_mappings) {
+    const config = bundle.certTemplate.field_mappings.sensorModelConfig;
     if (config && Array.isArray(config.options) && config.options.length > 0) {
       options = config.options;
       if (config.defaultValue) defaultVal = config.defaultValue;
@@ -265,47 +353,17 @@ function populateSensorModelOptions() {
   select.innerHTML = options.map(opt => `<option value="${opt}" ${opt === defaultVal ? 'selected' : ''}>${opt}</option>`).join('');
 }
 
-function initFormDefaults() {
-  const today = new Date().toISOString().slice(0, 10);
-  document.getElementById('cert-date').value = today;
-  if (document.getElementById('ambient-temp')) document.getElementById('ambient-temp').value = '';
-  if (document.getElementById('relative-humidity')) document.getElementById('relative-humidity').value = '';
-}
-
-function onModelChange() {
-  const model = document.getElementById('model-select').value;
-  state.currentModel = model;
-
-  const pumpGroup = document.getElementById('pump-group');
-  const packingSection = document.getElementById('packing-section');
-  const sensorModelGroup = document.getElementById('sensor-model-group');
-
-  if (model === 'POA200') {
-    if (pumpGroup) pumpGroup.style.display = 'block';
-    if (packingSection) packingSection.style.display = 'block';
-    if (sensorModelGroup) sensorModelGroup.style.display = 'block';
-    populateSensorModelOptions();
-  } else {
-    if (pumpGroup) pumpGroup.style.display = 'none';
-    if (packingSection) packingSection.style.display = 'none';
-    if (sensorModelGroup) sensorModelGroup.style.display = 'none';
-    state.hasPump = false;
-  }
-
-  renderTestPoints();
-}
-
 function setPumpOption(hasPump) {
   state.hasPump = hasPump;
   document.getElementById('pump-yes').className = hasPump ? 'toggle-btn active' : 'toggle-btn';
   document.getElementById('pump-no').className = !hasPump ? 'toggle-btn active' : 'toggle-btn';
 }
 
-function renderTestPoints() {
+function renderTestPoints(modelName) {
   const tbody = document.getElementById('test-points-body');
   if (!tbody) return;
 
-  if (state.currentModel === 'POA200') {
+  if (modelName === 'POA200') {
     tbody.innerHTML = `
       <tr>
         <td>测试点 1</td>
@@ -313,10 +371,8 @@ function renderTestPoints() {
         <td><input type="text" id="tp-act-1" class="form-control" value="" placeholder="实测值 (待填)"></td>
       </tr>
     `;
-  } else if (state.currentModel === 'DPT810') {
-    // 10 test points from DPT810 sample: [-89.00,-80.12,-70.81,-60.23,-50.82,-40.91,-30.45,-21.90,-12.26,10.25] (F13, G05)
+  } else if (modelName === 'DPT810') {
     const stds = [-89.00, -80.12, -70.81, -60.23, -50.82, -40.91, -30.45, -21.90, -12.26, 10.25];
-
     tbody.innerHTML = stds.map((s, i) => `
       <tr>
         <td>测试点 ${i + 1}</td>
@@ -324,10 +380,9 @@ function renderTestPoints() {
         <td><input type="text" id="tp-act-${i + 1}" class="form-control" value="" placeholder="实测值 mA (待填)"></td>
       </tr>
     `).join('');
-  } else if (state.currentModel === '990') {
-    // 9 test points for 990-Ex: [-80.75, -70.95, -60.42, -52.43, -42.15, -31.76, -21.24, -12.56, 12.19]
+  } else {
+    // 990: 9 test points from sample [-80.75, -70.95, -60.42, -52.43, -42.15, -31.76, -21.24, -12.56, 12.19]
     const stds = [-80.75, -70.95, -60.42, -52.43, -42.15, -31.76, -21.24, -12.56, 12.19];
-
     tbody.innerHTML = stds.map((s, i) => `
       <tr>
         <td>测试点 ${i + 1}</td>
@@ -338,24 +393,48 @@ function renderTestPoints() {
   }
 }
 
+function initPackingItemsForModel(modelName) {
+  const deviceSn = document.getElementById('device-sn') ? document.getElementById('device-sn').value.trim() : 'EX10260902';
+
+  if (modelName === 'POA200') {
+    state.packingItems = JSON.parse(JSON.stringify(DEFAULT_POA200_PACKING_ITEMS));
+    if (state.packingItems[0]) state.packingItems[0].remark = `SN: ${deviceSn}${state.hasPump ? '带泵' : ''}`;
+  } else {
+    // 990 7-column 11-item packing list
+    state.packingItems = JSON.parse(JSON.stringify(DEFAULT_990_PACKING_ITEMS));
+    if (state.packingItems[0]) state.packingItems[0].remark = `SN: ${deviceSn}`;
+  }
+
+  renderPackingTable();
+}
+
+function syncDeviceSnToPackingList() {
+  const deviceSn = document.getElementById('device-sn').value.trim();
+  if (state.packingItems && state.packingItems.length > 0) {
+    const isPOA200 = state.currentModel === 'POA200';
+    state.packingItems[0].remark = `SN: ${deviceSn}${isPOA200 && state.hasPump ? '带泵' : ''}`;
+    renderPackingTable();
+  }
+}
+
 function renderPackingTable() {
   const tbody = document.getElementById('packing-items-body');
   if (!tbody) return;
 
   tbody.innerHTML = state.packingItems.map((item, idx) => {
-    const isProtected = idx < 2;
+    const isProtected = idx === 0 || (state.currentModel === 'POA200' && idx === 1);
     const nameInput = isProtected
       ? `${item.name} <span class="badge badge-warning">保护行</span>`
-      : `<input type="text" class="form-control" value="${item.name}" placeholder="物料名称" onchange="updatePackingItem(${idx}, 'name', this.value)">`;
+      : `<input type="text" class="form-control" value="${item.name}" placeholder="自定义物料名称" onchange="updatePackingItem(${idx}, 'name', this.value)">`;
 
     return `
       <tr>
-        <td>${item.index}</td>
+        <td><b>${item.index}</b></td>
         <td>${nameInput}</td>
         <td><input type="text" class="form-control" value="${item.spec}" onchange="updatePackingItem(${idx}, 'spec', this.value)"></td>
         <td><input type="number" class="form-control" style="width: 60px;" value="${item.count}" onchange="updatePackingItem(${idx}, 'count', this.value)"></td>
         <td><input type="text" class="form-control" style="width: 60px;" value="${item.unit}" onchange="updatePackingItem(${idx}, 'unit', this.value)"></td>
-        <td>${item.standard}</td>
+        <td>${item.standard || '是'}</td>
         <td><input type="text" class="form-control" value="${item.remark}" onchange="updatePackingItem(${idx}, 'remark', this.value)"></td>
         <td>
           ${isProtected 
@@ -368,31 +447,35 @@ function renderPackingTable() {
 }
 
 function updatePackingItem(idx, key, val) {
-  state.packingItems[idx][key] = val;
+  if (state.packingItems[idx]) {
+    state.packingItems[idx][key] = val;
+  }
 }
 
 function addPackingRow() {
   const newIdx = state.packingItems.length + 1;
   state.packingItems.push({
     index: newIdx,
-    name: '', // Empty custom name by default (J04)
+    name: '', // Empty custom name by default
     spec: '标准配件',
     count: 1,
     unit: '件',
-    standard: '否',
+    standard: '是',
     remark: ''
   });
   renderPackingTable();
 }
 
 function deletePackingRow(idx) {
-  if (idx < 2) return alert('保护行（主设备与传感器）严禁删除 (E06, T06)');
+  if (idx === 0 || (state.currentModel === 'POA200' && idx === 1)) {
+    return alert('保护行（主设备/传感器）严禁删除 (E06, T06, R07)');
+  }
   state.packingItems.splice(idx, 1);
   state.packingItems.forEach((item, i) => item.index = i + 1);
   renderPackingTable();
 }
 
-// ==================== TASK SUBMISSION & FAST PREVIEW POLLING ====================
+// ==================== TASK SUBMISSION ====================
 async function submitTaskForm() {
   if (!state.selectedWorker) {
     alert('请先选择一个在线执行终端电脑！');
@@ -400,29 +483,34 @@ async function submitTaskForm() {
     return;
   }
 
-  const model = document.getElementById('model-select').value;
+  const bundle = state.activeBundle;
+  if (!bundle) return alert('当前未选择有效的已发布配置组合');
+
   const deviceSn = document.getElementById('device-sn').value.trim();
   const shippingLocation = document.getElementById('shipping-location') ? document.getElementById('shipping-location').value.trim() : '苏州';
 
   const ambientTempEl = document.getElementById('ambient-temp');
   const relativeHumidityEl = document.getElementById('relative-humidity');
-  const ambientTemp = ambientTempEl ? ambientTempEl.value.trim() : '';
-  const relativeHumidity = relativeHumidityEl ? relativeHumidityEl.value.trim() : '';
-  const certDate = document.getElementById('cert-date').value;
+  const certDateEl = document.getElementById('cert-date');
+
+  const ambientTemp = ambientTempEl ? ambientTempEl.value.trim() : '22.1';
+  const relativeHumidity = relativeHumidityEl ? relativeHumidityEl.value.trim() : '50%RH';
+  const certDate = certDateEl ? certDateEl.value : new Date().toISOString().slice(0, 10);
 
   if (!deviceSn) return alert('请填写设备序列号 (Inst. SN.)');
 
-  const hasPacking = model === 'POA200';
+  const docCombo = bundle.doc_combo;
+  const isPackingNeeded = docCombo === 'cert_and_packing' || docCombo === 'packing_only';
+  const isPOA200 = bundle.model_display === 'POA200';
 
-  // Sensor Model handling: ONLY for POA200 (F09, F10)
   let sensorModel = undefined;
-  if (hasPacking) {
+  if (isPOA200) {
     const sensorModelEl = document.getElementById('sensor-model');
-    sensorModel = sensorModelEl ? sensorModelEl.value : 'PMT210SEN';
+    sensorModel = sensorModelEl ? sensorModelEl.value : 'PSR-12-223(封装）';
   }
 
   let sensorSn = '';
-  if (hasPacking && state.packingItems.length >= 2) {
+  if (isPOA200 && state.packingItems.length >= 2) {
     const sensorRow = state.packingItems[1];
     if (sensorRow.remark) {
       const match = sensorRow.remark.match(/SN[:：]\s*([A-Za-z0-9_-]+)/i) || [null, sensorRow.remark];
@@ -430,20 +518,20 @@ async function submitTaskForm() {
     }
   }
 
-  // Validate custom material names in packing list (J04)
-  if (hasPacking) {
+  // Validate custom material names in packing list
+  if (isPackingNeeded) {
     for (let i = 0; i < state.packingItems.length; i++) {
       const item = state.packingItems[i];
       if (!item.name || !item.name.trim()) {
         return alert(`第 ${i + 1} 行物料名称不能为空，请输入有效的自定义物料名称！`);
       }
     }
-    state.packingItems[0].remark = `SN: ${deviceSn}${state.hasPump ? '带泵' : ''}`;
+    state.packingItems[0].remark = `SN: ${deviceSn}${isPOA200 && state.hasPump ? '带泵' : ''}`;
   }
 
-  // Gather dynamic test points (J08)
+  // Dynamic test points gathering
   const testPoints = [];
-  const totalPts = model === 'POA200' ? 1 : (model === 'DPT810' ? 10 : 9);
+  const totalPts = bundle.model_display === 'POA200' ? 1 : (bundle.model_display === 'DPT810' ? 10 : 9);
   for (let i = 1; i <= totalPts; i++) {
     const stdEl = document.getElementById(`tp-std-${i}`);
     const actEl = document.getElementById(`tp-act-${i}`);
@@ -463,18 +551,20 @@ async function submitTaskForm() {
     clientId: state.clientId,
     clientName: state.clientName,
     workerId: state.selectedWorker.id,
-    model,
+    model: bundle.model_display,
+    bundleId: bundle.bundle_id,
+    docCombo: bundle.doc_combo,
     deviceSn,
     shippingLocation,
     ambientTemp,
     relativeHumidity,
-    hasPump: hasPacking ? state.hasPump : false,
+    hasPump: isPOA200 ? state.hasPump : false,
     certDate,
     testPoints,
-    packingItems: hasPacking ? state.packingItems : []
+    packingItems: isPackingNeeded ? state.packingItems : []
   };
 
-  if (hasPacking && sensorModel) {
+  if (isPOA200 && sensorModel) {
     payload.sensorModel = sensorModel;
     payload.sensorSn = sensorSn;
   }
@@ -536,18 +626,7 @@ async function pollTaskPreview(taskId) {
   }, 700);
 }
 
-// ==================== M10, R17, R21, R22: PREVIEW & PRINT ====================
-async function loadTaskPreview(taskId) {
-  try {
-    const res = await fetch(`${API_BASE}/api/tasks/${taskId}`);
-    const task = await res.json();
-    state.currentTask = task;
-    renderPreviewBox();
-  } catch (err) {
-    console.warn('Load preview error:', err);
-  }
-}
-
+// ==================== PREVIEW & PRINT ====================
 function switchPreviewDoc(type) {
   state.activePreviewType = type;
   document.getElementById('preview-tab-cert').className = type === 'cert' ? 'toggle-btn active' : 'toggle-btn';
@@ -657,7 +736,7 @@ async function submitPrintJob() {
   }
 }
 
-// ==================== M13, R30: HISTORY & INSTANT PREVIEW VIEW ====================
+// ==================== HISTORY ====================
 function setHistoryRange(range) {
   state.historyRange = range;
   ['today', 'week', 'month'].forEach(r => {
@@ -699,7 +778,6 @@ async function loadHistoryList() {
             ${t.files.map(f => `<div>📄 ${f.official_filename}</div>`).join('')}
           </div>
 
-          <!-- History Action Buttons for Previews and Downloads -->
           <div class="history-actions">
             ${certPreviewUrl ? `
               <button type="button" class="btn btn-sm btn-outline" 
@@ -768,7 +846,6 @@ function switchNavTab(tabName) {
   }
 }
 
-// Printer Helper
 function updatePrinterDropdown(printers) {
   const select = document.getElementById('printer-select');
   const tip = document.getElementById('printer-status-tip');

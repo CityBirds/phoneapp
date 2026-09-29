@@ -16,18 +16,16 @@ def process_word_document(template_path, output_path, data):
     if output_dir and not os.path.exists(output_dir):
         os.makedirs(output_dir, exist_ok=True)
 
-    # Ensure output file is not read-only if it already exists
+    # Ensure output file is not read-only
     if os.path.exists(output_path):
         try:
             os.chmod(output_path, stat.S_IWRITE | stat.S_IREAD)
         except Exception:
             pass
 
-    # Copy template to output path if not already copied
     if not os.path.exists(output_path) or os.path.abspath(template_path) != os.path.abspath(output_path):
         shutil.copy2(template_path, output_path)
 
-    # Remove read-only attribute on output file
     try:
         os.chmod(output_path, stat.S_IWRITE | stat.S_IREAD)
     except Exception:
@@ -61,13 +59,14 @@ def process_word_document(template_path, output_path, data):
 
                 model = str(form_data.get('model', ''))
                 device_sn = str(form_data.get('deviceSn', ''))
-                shipping_location = str(form_data.get('shippingLocation') or form_data.get('customer') or '')
+                shipping_location = str(form_data.get('shippingLocation') or '')
                 sensor_model = str(form_data.get('sensorModel', ''))
                 sensor_sn = str(form_data.get('sensorSn', ''))
                 cert_date = str(form_data.get('certDate') or form_data.get('date') or '')
                 has_pump = bool(form_data.get('hasPump', True))
+                is_poa = 'POA' in model.upper()
 
-                # Single value story replacements for default SN AP10007513
+                # Replace default SN AP10007513 in StoryRanges
                 if device_sn and device_sn != "AP10007513":
                     for story in doc.StoryRanges:
                         try:
@@ -78,25 +77,19 @@ def process_word_document(template_path, output_path, data):
                         except Exception:
                             pass
 
-                # Table cell replacements
                 if doc.Tables.Count >= 1:
                     table = doc.Tables.Item(1)
 
                     if doc_type == 'cert':
-                        # Customer is strictly PRESERVED as static template original (J02, J07)
-                        # Write Ambient Temperature & Relative Humidity (J06)
                         ambient_temp = str(form_data.get('ambientTemp', '')) if form_data.get('ambientTemp') is not None else ''
                         relative_humidity = str(form_data.get('relativeHumidity', '')) if form_data.get('relativeHumidity') is not None else ''
 
-                        # Row 4 Col 6: Date / certDate
                         if cert_date and table.Rows.Count >= 4 and table.Columns.Count >= 6:
                             table.Cell(4, 6).Range.Text = cert_date
 
-                        # Row 7 Col 2: Inst. SN. / deviceSn
                         if device_sn and table.Rows.Count >= 7 and table.Columns.Count >= 2:
                             table.Cell(7, 2).Range.Text = device_sn
 
-                        # Row 13+: Test points table rows
                         test_points = form_data.get('testPoints', [])
                         for idx, tp in enumerate(test_points):
                             r_idx = 13 + idx
@@ -109,31 +102,28 @@ def process_word_document(template_path, output_path, data):
                                     table.Cell(r_idx, 3).Range.Text = str(act_val)
 
                     elif doc_type == 'packing':
-                        pump_str = "带泵" if has_pump else ""
+                        pump_str = "带泵" if (is_poa and has_pump) else ""
                         main_remark = f"SN: {device_sn} {pump_str}".strip() if pump_str else f"SN: {device_sn}"
                         sensor_remark_str = f"SN: {sensor_sn}" if sensor_sn else ""
 
-                        # Row 2 (Main device, Protected row)
                         if table.Rows.Count >= 2:
                             if model and table.Columns.Count >= 3:
                                 table.Cell(2, 3).Range.Text = model
                             if table.Columns.Count >= 7:
                                 table.Cell(2, 7).Range.Text = main_remark
 
-                        # Row 3 (Sensor, Protected row)
-                        if table.Rows.Count >= 3:
+                        if is_poa and table.Rows.Count >= 3:
                             if sensor_model and table.Columns.Count >= 3:
                                 table.Cell(3, 3).Range.Text = sensor_model
                             if table.Columns.Count >= 7:
                                 table.Cell(3, 7).Range.Text = sensor_remark_str
 
-                        # Row 4+: packingItems
                         packing_items = form_data.get('packingItems', [])
                         if packing_items:
                             needed_rows = 1 + len(packing_items)
                             while table.Rows.Count < needed_rows:
                                 table.Rows.Add()
-                            while table.Rows.Count > needed_rows and table.Rows.Count > 3:
+                            while table.Rows.Count > needed_rows and table.Rows.Count > 2:
                                 table.Rows.Item(table.Rows.Count).Delete()
 
                             for idx, item in enumerate(packing_items):
@@ -144,7 +134,7 @@ def process_word_document(template_path, output_path, data):
 
                                     if idx == 0 and model:
                                         table.Cell(r, 3).Range.Text = model
-                                    elif idx == 1 and sensor_model:
+                                    elif is_poa and idx == 1 and sensor_model:
                                         table.Cell(r, 3).Range.Text = sensor_model
                                     elif item.get('spec') is not None:
                                         table.Cell(r, 3).Range.Text = str(item.get('spec'))
@@ -155,7 +145,7 @@ def process_word_document(template_path, output_path, data):
 
                                     if idx == 0:
                                         table.Cell(r, 7).Range.Text = main_remark
-                                    elif idx == 1:
+                                    elif is_poa and idx == 1:
                                         table.Cell(r, 7).Range.Text = sensor_remark_str
                                     elif item.get('remark') is not None:
                                         table.Cell(r, 7).Range.Text = str(item.get('remark'))

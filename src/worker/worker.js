@@ -86,7 +86,6 @@ class ExecutionWorker {
     } else if (fileConfig.allowedPrinters && fileConfig.allowedPrinters.length > 0) {
       this.allowedPrinters = fileConfig.allowedPrinters;
     } else {
-      // Dynamic detection of real printers installed on system
       this.allowedPrinters = getInstalledSystemPrinters();
     }
 
@@ -118,7 +117,6 @@ class ExecutionWorker {
       if (this._connected !== false) {
         this._connected = false;
         console.log(`[提示] 正在等待协调服务启动 (${this.serverUrl})...`);
-        console.log(`       请确保在另一窗口运行: node src/backend/server.js`);
       }
       return null;
     }
@@ -140,10 +138,11 @@ class ExecutionWorker {
 
   async fetchTemplateForTask(model, fileType) {
     try {
-      const res = await fetch(`${this.serverUrl}/api/templates`);
+      const res = await fetch(`${API_BASE || this.serverUrl}/api/templates`);
       if (res.ok) {
         const tmpls = await res.json();
-        const found = tmpls.find(t => t.model === model && t.type === fileType);
+        // Match model by exact name or modelId resolution
+        const found = tmpls.find(t => (t.model === model || t.model.toUpperCase() === model.toUpperCase()) && t.type === fileType);
         if (found && found.filepath && fs.existsSync(found.filepath)) {
           return found;
         }
@@ -153,7 +152,7 @@ class ExecutionWorker {
     const samplesDir = path.resolve(__dirname, '../../samples');
     let fallbackPath = '';
     if (fileType === 'cert') {
-      if (model === '990' || model === 'DPT-990-Ex') {
+      if (model === '990' || model === 'DPT-990-Ex' || model === '990-Ex') {
         fallbackPath = path.join(samplesDir, '990-Ex-EX10260902发货证书.doc');
       } else if (model === 'DPT810') {
         fallbackPath = path.join(samplesDir, 'DPT810证书(变送器-A010007031)-JM-26.8.28.doc');
@@ -163,6 +162,8 @@ class ExecutionWorker {
     } else if (fileType === 'packing') {
       if (model === 'POA200') {
         fallbackPath = path.join(samplesDir, 'POA200(140)AP10007513发货清单20260403带泵.doc');
+      } else if (model === '990' || model === 'DPT-990-Ex' || model === '990-Ex') {
+        fallbackPath = path.join(samplesDir, '990-Ex-EX10260902装箱清单.doc');
       } else {
         throw new Error(`Model ${model} does not support packing list! (J09)`);
       }
@@ -199,9 +200,11 @@ class ExecutionWorker {
           throw new Error(`Security Violation: Target path outside working directory boundary! (E02)`);
         }
 
+        // Pass fieldMappings to generateWordDocument so doc_processor uses confirmed mappings (Spec Sec 8)
         const genResult = generateWordDocument(templatePath, officialFilePath, {
           type: fileRec.file_type,
-          formData
+          formData,
+          fieldMappings
         });
 
         await this.uploadReturnedFile(task.id, fileRec.file_type, officialFilename, officialFilePath, genResult.sha256);

@@ -1,6 +1,6 @@
 /**
  * phoneApp Coordinator Server Admin Console Logic (协调服务主机专用控制台)
- * Rules: C01, C02, C03, C04, C05, C13, F01-F16, G01-G12
+ * Rules: C01, C02, C03, C04, C05, C13, F01-F16, G01-G12, Spec Sec 5
  */
 
 const API_BASE = window.location.origin;
@@ -33,7 +33,7 @@ function switchTab(tabId) {
   if (tabId === 'audit') loadAuditLogs();
 }
 
-// ==================== C01: CLIENT MANAGEMENT (集中修改手机端名字) ====================
+// ==================== C01: CLIENT MANAGEMENT ====================
 async function loadClients() {
   const tbody = document.getElementById('clients-tbody');
   tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; padding: 20px;">加载客户端列表中...</td></tr>';
@@ -95,13 +95,13 @@ async function submitRenameClient() {
 
     closeRenameModal();
     loadClients();
-    alert(`APP 手机端姓名已成功修改为: ${newName} (手机端将在 5 秒内自动同步生效)`);
+    alert(`APP 手机端姓名已成功修改为: ${newName}`);
   } catch (err) {
     alert('修改失败: ' + err.message);
   }
 }
 
-// ==================== C02, R03, R04: WORKER & PRINTER MONITORING ====================
+// ==================== WORKER & PRINTER MONITORING ====================
 async function loadWorkers() {
   const container = document.getElementById('workers-grid-container');
   container.innerHTML = '<div style="padding: 20px;">正在检测执行终端...</div>';
@@ -155,7 +155,7 @@ async function loadWorkers() {
   }
 }
 
-// ==================== C03: TEMPLATES MANAGEMENT ====================
+// ==================== TEMPLATES MANAGEMENT ====================
 async function loadTemplates() {
   const tbody = document.getElementById('templates-tbody');
   tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; padding: 20px;">加载模板库中...</td></tr>';
@@ -179,7 +179,7 @@ async function loadTemplates() {
         <td style="font-size: 12px; color: #64748b;">${new Date(t.published_at).toLocaleString('zh-CN')}</td>
         <td style="text-align: right;">
           <button type="button" class="btn btn-sm btn-outline" onclick="goToMatcher('${t.id}')">
-            🤖 字段匹配
+            🤖 字段匹配与绑定
           </button>
           <a href="${API_BASE}/api/templates/${t.id}/download" class="btn btn-sm btn-secondary" download>
             ⬇️ 下载
@@ -247,7 +247,7 @@ async function deleteTemplate(tmplId) {
   }
 }
 
-// ==================== C04, C05: FIELD MATCHER WORKBENCH ====================
+// ==================== FIELD MATCHER WORKBENCH ====================
 async function populateMatcherSelect(tmpls) {
   const select = document.getElementById('matcher-select-template');
   if (!select) return;
@@ -342,7 +342,7 @@ function renderMatcherTable() {
   const targetLabels = currentMatcherData.targetLabels || Object.keys(matchResults);
   const choices = currentMatcherData.selectedChoices || {};
 
-  tbody.innerHTML = targetLabels.map((key, idx) => {
+  tbody.innerHTML = targetLabels.map((key) => {
     const match = matchResults[key];
     const candidates = match && match.candidates ? match.candidates : [];
 
@@ -361,7 +361,7 @@ function renderMatcherTable() {
     const isNamingOnly = key === 'sensorModel' || key === '传感器型号';
 
     let fieldCategory = '单值字段';
-    if (key.includes('Analyzer') || key.includes('Test')) {
+    if (key.includes('Analyzer') || key.includes('Test') || key.includes('Standard')) {
       fieldCategory = '表格列数据区';
     } else if (isNamingOnly) {
       fieldCategory = '命名业务参数 (无Word坐标)';
@@ -375,9 +375,17 @@ function renderMatcherTable() {
       statusBadge = `<span class="badge ${chosenCandidate.score >= 0.9 ? 'badge-success' : 'badge-warning'}">${scorePct}% ${chosenCandidate.reason || '已绑定'}</span>`;
     }
 
-    const valueDisp = isBound 
-      ? (chosenCandidate.candidateValue || '已指定位置') 
-      : (isNamingOnly ? '用作发货证书文件名' : '<span style="color: #ef4444;">未绑定</span>');
+    // Display original template value or sample column values
+    let valueDisp = '<span style="color: #ef4444;">未绑定</span>';
+    if (isNamingOnly) {
+      valueDisp = '用作发货证书文件名';
+    } else if (isBound) {
+      if (chosenCandidate.sampleValues && chosenCandidate.sampleValues.length > 0) {
+        valueDisp = `样例: [${chosenCandidate.sampleValues.join(' / ')}]`;
+      } else {
+        valueDisp = chosenCandidate.candidateValue || '空';
+      }
+    }
 
     return `
       <tr>
@@ -392,7 +400,7 @@ function renderMatcherTable() {
           `}
         </td>
         <td><code>${valueDisp}</code></td>
-        <td><b style="color: ${isBound ? '#0284c7' : '#94a3b8'};">${isBound ? '已绑定' : (isNamingOnly ? '已配置' : '未绑定')}</b></td>
+        <td><b style="color: ${isBound ? '#0284c7' : '#94a3b8'};">${isBound ? '已确认绑定' : (isNamingOnly ? '已配置' : '未绑定')}</b></td>
         <td style="text-align: right;">
           <button type="button" class="btn btn-sm btn-danger" onclick="deleteMatcherField('${key}')">🗑️ 删除</button>
         </td>
@@ -497,7 +505,6 @@ async function saveMatchedRules(isDraft = false) {
     });
   });
 
-  // Validate formal publish requirement (F04, J11, Q32)
   if (!isDraft && unboundFields.length > 0) {
     return alert(`存在未绑定且需写回 Word 的字段 (${unboundFields.join(', ')})！\n严禁正式发布未绑定的模板逻辑。请先完成字段绑定或保存为草稿。`);
   }
@@ -538,7 +545,7 @@ async function saveMatchedRules(isDraft = false) {
   }
 }
 
-// ==================== C13: AUDIT LOGS ====================
+// ==================== AUDIT LOGS ====================
 async function loadAuditLogs() {
   const tbody = document.getElementById('audit-tbody');
   tbody.innerHTML = '<tr><td colspan="4" style="text-align: center; padding: 20px;">加载审计日志中...</td></tr>';
