@@ -16,7 +16,7 @@ const ALIAS_MAP = {
 };
 
 const KNOWN_UNITS = ['ppm', '℃ dp', '℃', '°c', 'ma', '%rh', 'rh'];
-const FOOTER_TEXT_REGEX = /(we hereby certify|comments\s*&\s*observations|for and on behalf of|phymetrix|manager|authorized signature|印章|签名)/i;
+const FOOTER_TEXT_REGEX = /(we here?by certify|comments\s*&\s*observations|for and on behalf of|phymetrix|manager|authorized signature|印章|签名)/i;
 
 /**
  * Check if label has explicit date meaning

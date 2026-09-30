@@ -296,8 +296,67 @@ function syncPublishedBundlesAll() {
   models.forEach(m => syncPublishedBundlesForModel(m));
 }
 
+function cleanupAndDeduplicateTemplates() {
+  try {
+    // 1. Delete orphan test residue records without business tasks
+    const testResidues = db.prepare(`
+      SELECT id FROM templates 
+      WHERE id LIKE 'tmpl_dummy_%' OR id LIKE 'tmpl_test_%' OR id LIKE 'dummy_%'
+    `).all();
+
+    for (const row of testResidues) {
+      const inTask = db.prepare("SELECT id FROM tasks WHERE form_data LIKE ?").get(`%${row.id}%`);
+      if (!inTask) {
+        db.prepare("DELETE FROM worker_save_configs WHERE template_id = ?").run(row.id);
+        db.prepare("DELETE FROM published_bundles WHERE cert_template_id = ? OR packing_template_id = ?").run(row.id, row.id);
+        db.prepare("DELETE FROM templates WHERE id = ?").run(row.id);
+      }
+    }
+
+    // 2. Deduplicate template records sharing same model, type, and file_hash
+    const duplicates = db.prepare(`
+      SELECT model, type, file_hash, COUNT(*) as cnt 
+      FROM templates 
+      GROUP BY model, type, file_hash 
+      HAVING cnt > 1
+    `).all();
+
+    for (const dup of duplicates) {
+      const records = db.prepare(`
+        SELECT * FROM templates 
+        WHERE model = ? AND type = ? AND file_hash = ?
+        ORDER BY published_at DESC, id ASC
+      `).all(dup.model, dup.type, dup.file_hash);
+
+      if (records.length <= 1) continue;
+
+      let canonical = records.find(r => r.id === `tmpl_${r.model.toLowerCase()}_${r.type}`) || records[0];
+      const dupIds = records.filter(r => r.id !== canonical.id).map(r => r.id);
+
+      for (const dupId of dupIds) {
+        const cfgs = db.prepare("SELECT * FROM worker_save_configs WHERE template_id = ?").all(dupId);
+        for (const cfg of cfgs) {
+          const existing = db.prepare("SELECT id FROM worker_save_configs WHERE worker_id = ? AND template_id = ? AND doc_type = ?").get(cfg.worker_id, canonical.id, cfg.doc_type);
+          if (existing) {
+            db.prepare("DELETE FROM worker_save_configs WHERE id = ?").run(cfg.id);
+          } else {
+            db.prepare("UPDATE worker_save_configs SET template_id = ? WHERE id = ?").run(canonical.id, cfg.id);
+          }
+        }
+
+        db.prepare("UPDATE published_bundles SET cert_template_id = ? WHERE cert_template_id = ?").run(canonical.id, dupId);
+        db.prepare("UPDATE published_bundles SET packing_template_id = ? WHERE packing_template_id = ?").run(canonical.id, dupId);
+        db.prepare("DELETE FROM templates WHERE id = ?").run(dupId);
+      }
+    }
+  } catch (err) {
+    console.warn('[Cleanup Error]', err.message);
+  }
+}
+
 // Seed Default Models and Templates dynamically
 function seedDefaultTemplates() {
+  cleanupAndDeduplicateTemplates();
   const now = new Date().toISOString();
 
   // 1. Seed Models
@@ -693,8 +752,18 @@ app.get('/api/published-bundles', (req, res) => {
         }
       }
 
+      let optionName = b.option_name;
+      if (effectiveCombo === 'cert_and_packing') {
+        optionName = b.model_display === 'POA200' ? '带泵' : '带清单';
+      } else if (effectiveCombo === 'cert_only') {
+        optionName = '仅证书';
+      } else if (effectiveCombo === 'packing_only') {
+        optionName = '仅清单';
+      }
+
       validBundles.push({
         ...b,
+        option_name: optionName,
         doc_combo: effectiveCombo,
         is_ready: isReady,
         unready_reason: unreadyReasons.join('; '),
@@ -729,7 +798,8 @@ app.get('/api/templates', (req, res) => {
   const tmpls = db.prepare('SELECT * FROM templates ORDER BY published_at DESC').all().map(t => ({
     ...t,
     field_mappings: JSON.parse(t.draft_mappings || t.field_mappings || '{}'),
-    is_draft: !!t.draft_mappings
+    is_draft: !!t.draft_mappings,
+    file_exists: !!(t.filepath && fs.existsSync(t.filepath))
   }));
   res.json(tmpls);
 });
@@ -1075,20 +1145,57 @@ app.post('/api/admin/workers/:workerId/allowed-paths/:id/check', requireAdminAcc
 // --- 2. Template Configs & Enablement per Worker (E03, 4.3) ---
 app.get('/api/admin/workers/:workerId/template-configs', (req, res) => {
   const { workerId } = req.params;
-  const tmpls = db.prepare("SELECT * FROM templates ORDER BY model ASC, type ASC").all();
+
+  // FIX-02: Filter out orphaned test templates/residue and pick latest published templates per model & doc_type
+  const allTmpls = db.prepare(`
+    SELECT * FROM templates 
+    WHERE id NOT LIKE 'tmpl_dummy_%' AND id NOT LIKE 'tmpl_test_%'
+    ORDER BY published_at DESC, created_at DESC
+  `).all();
+
+  const grouped = new Map();
+  allTmpls.forEach(t => {
+    const key = `${t.model}_${t.type}`;
+    if (!grouped.has(key)) {
+      grouped.set(key, t);
+    } else {
+      const existing = grouped.get(key);
+      if (!existing.published_at && t.published_at) {
+        grouped.set(key, t);
+      }
+    }
+  });
+
+  const selectedTmpls = Array.from(grouped.values()).sort((a, b) => a.model.localeCompare(b.model) || a.type.localeCompare(b.type));
+
   const configs = db.prepare("SELECT * FROM worker_save_configs WHERE worker_id = ?").all(workerId);
   const map = new Map();
   configs.forEach(c => map.set(`${c.template_id}_${c.doc_type}`, c));
 
-  const result = tmpls.map(t => {
+  const result = selectedTmpls.map(t => {
     const cfg = map.get(`${t.id}_${t.type}`);
+    const fileExists = !!(t.filepath && fs.existsSync(t.filepath));
+    const isDraft = !!t.draft_mappings || !t.published_at;
+    const isValid = fileExists && !isDraft;
+
+    let statusNote = 'OK';
+    if (!fileExists) {
+      statusNote = '文件缺失';
+    } else if (isDraft) {
+      statusNote = '草稿';
+    }
+
     return {
       template_id: t.id,
       model: t.model,
       doc_type: t.type,
       filename: t.filename,
+      file_exists: fileExists,
+      is_draft: isDraft,
+      is_valid: isValid,
+      status_note: statusNote,
       config_id: cfg ? cfg.id : null,
-      is_enabled: cfg ? (cfg.is_enabled || 0) : 0,
+      is_enabled: isValid ? (cfg ? (cfg.is_enabled || 0) : 0) : 0,
       root_dir: cfg ? (cfg.root_dir || '') : '',
       save_mode: cfg ? (cfg.save_mode || 'direct') : 'direct',
       subfolder_rule: cfg ? (cfg.subfolder_rule || 'deviceSn') : 'deviceSn',
@@ -1117,6 +1224,19 @@ app.post('/api/admin/workers/:workerId/template-configs', requireAdminAccess, (r
 
   if (!templateId || !docType) {
     return res.status(400).json({ error: 'templateId 与 docType 为必填项' });
+  }
+
+  const targetTmpl = db.prepare('SELECT * FROM templates WHERE id = ?').get(templateId);
+  if (!targetTmpl) {
+    return res.status(404).json({ error: '对应的模板记录不存在' });
+  }
+  const fileExists = !!(targetTmpl.filepath && fs.existsSync(targetTmpl.filepath));
+  const isDraft = !!targetTmpl.draft_mappings || !targetTmpl.published_at;
+
+  if (isEnabled && (!fileExists || isDraft)) {
+    return res.status(400).json({
+      error: `无法启用此模板：该模板当前状态为 [${!fileExists ? '文件缺失' : '草稿未发布'}]，禁止作为终端配置启用 (FIX-02, TL-10)`
+    });
   }
 
   const cleanRootDir = (rootDir || '').trim();

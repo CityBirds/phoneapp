@@ -3,6 +3,9 @@ const assert = require('node:assert/strict');
 const path = require('path');
 const fs = require('fs');
 
+const testDbPath = path.resolve(__dirname, '../data/phoneapp_test_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7) + '.db');
+process.env.DB_PATH = testDbPath;
+
 const app = require('../src/backend/server');
 const db = require('../src/backend/db');
 const { getFileSha256 } = require('../src/common/utils');

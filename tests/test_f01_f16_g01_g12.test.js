@@ -3,6 +3,9 @@ const assert = require('node:assert/strict');
 const path = require('path');
 const fs = require('fs');
 
+const testDbPath = path.resolve(__dirname, '../data/phoneapp_test_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7) + '.db');
+process.env.DB_PATH = testDbPath;
+
 const { findFieldCandidates, normalizeText } = require('../src/common/matcher');
 const { extractDocumentStructure } = require('../src/common/doc_structure');
 const { generateCertFilename, generatePackingListFilename } = require('../src/common/naming');

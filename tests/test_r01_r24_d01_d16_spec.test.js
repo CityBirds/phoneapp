@@ -4,6 +4,9 @@ const path = require('path');
 const fs = require('fs');
 const http = require('http');
 
+const testDbPath = path.resolve(__dirname, '../data/phoneapp_test_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7) + '.db');
+process.env.DB_PATH = testDbPath;
+
 const { extractDocumentStructure } = require('../src/common/doc_structure');
 const { findFieldCandidates, isDateFieldLabel, inferFieldType } = require('../src/common/matcher');
 const { resolveModelAlias } = require('../src/backend/server');

@@ -579,6 +579,72 @@ async function checkWorkerTemplate(configId) {
 }
 
 
+// ==================== TEMPLATE LIBRARY MANAGEMENT (FIX-01) ====================
+async function loadTemplates() {
+  const tbody = document.getElementById('templates-tbody');
+  if (!tbody) return;
+
+  tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; padding: 20px; color: #64748b;">正在加载模板库列表...</td></tr>';
+
+  try {
+    const tmpls = await safeFetchJson(`${API_BASE}/api/templates`);
+    if (!Array.isArray(tmpls) || tmpls.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; padding: 24px; color: #94a3b8;">尚未上传模板</td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = tmpls.map(t => {
+      const docLabel = t.type === 'cert' ? '📜 发货证书' : (t.type === 'packing' ? '📦 装箱清单' : escapeHtml(t.type));
+      
+      let statusBadge = '<span class="badge badge-success">已发布</span>';
+      if (t.is_draft) {
+        statusBadge = '<span class="badge badge-warning">草稿</span>';
+      } else if (!t.published_at) {
+        statusBadge = '<span class="badge badge-secondary">未发布</span>';
+      }
+
+      let fileExistsBadge = '';
+      if (t.file_exists === false) {
+        fileExistsBadge = ' <span class="badge badge-danger" title="物理文件在磁盘缺失">⚠️ 文件缺失</span>';
+      } else if (t.file_exists === true) {
+        fileExistsBadge = ' <span class="badge badge-success" title="文件物理存在">✅ 存在</span>';
+      }
+
+      const publishedTime = t.published_at ? new Date(t.published_at).toLocaleString('zh-CN') : '未发布';
+      const hashStr = t.file_hash ? t.file_hash.substring(0, 16) + '...' : '-';
+
+      return `
+        <tr>
+          <td>
+            <b style="color: #0f172a; font-size: 14px;">${escapeHtml(t.filename)}</b>
+            <div style="font-size: 11px; color: #64748b; font-family: monospace;">ID: ${escapeHtml(t.id)}</div>
+          </td>
+          <td><b>${escapeHtml(t.model)}</b></td>
+          <td>${docLabel}</td>
+          <td><span class="badge badge-secondary">${escapeHtml(t.version || 'v1.0')}</span></td>
+          <td style="font-size: 12px;">
+            <code style="font-size: 11px; color: #475569;" title="${escapeHtml(t.file_hash || '')}">${escapeHtml(hashStr)}</code>
+            <div style="margin-top: 4px;">${statusBadge}${fileExistsBadge}</div>
+          </td>
+          <td style="font-size: 12px; color: #64748b;">${publishedTime}</td>
+          <td style="text-align: right;">
+            <div style="display: flex; gap: 4px; justify-content: flex-end; flex-wrap: wrap;">
+              <button type="button" class="btn btn-sm btn-primary" onclick="goToMatcher('${escapeHtml(t.id)}')">🤖 字段匹配</button>
+              <a href="${API_BASE}/api/templates/${encodeURIComponent(t.id)}/download" class="btn btn-sm btn-secondary" target="_blank">⬇️ 下载</a>
+              <button type="button" class="btn btn-sm btn-danger" onclick="deleteTemplate('${escapeHtml(t.id)}')">🗑️ 删除</button>
+            </div>
+          </td>
+        </tr>
+      `;
+    }).join('');
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="7" style="text-align: center; padding: 24px; color: #ef4444;">
+      加载模板列表失败: ${escapeHtml(err.message)}
+      <button type="button" class="btn btn-secondary btn-sm" onclick="loadTemplates()" style="margin-left: 10px;">🔄 重试</button>
+    </td></tr>`;
+  }
+}
+
 async function handleUploadTemplate(e) {
   e.preventDefault();
   const fileInput = document.getElementById('tmpl-file');
@@ -594,6 +660,7 @@ async function handleUploadTemplate(e) {
   formData.append('type', typeSelect.value);
   formData.append('version', versionInput.value.trim() || 'v1.0');
 
+  let uploadSuccessData = null;
   try {
     const res = await fetch(`${API_BASE}/api/templates/upload`, {
       method: 'POST',
@@ -602,28 +669,42 @@ async function handleUploadTemplate(e) {
       },
       body: formData
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || '上传失败');
+    
+    const contentType = res.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+      uploadSuccessData = await res.json();
+    } else {
+      const text = await res.text();
+      throw new Error(`服务响应非 JSON (HTTP ${res.status}): ${text.substring(0, 100)}`);
+    }
 
-    alert(`模板文件 [${data.filename}] 成功上传入库！`);
-    fileInput.value = '';
-    loadTemplates();
+    if (!res.ok) {
+      throw new Error(uploadSuccessData.error || `上传失败 (HTTP ${res.status})`);
+    }
   } catch (err) {
-    alert('上传失败: ' + err.message);
+    return alert('上传失败: ' + err.message);
+  }
+
+  fileInput.value = '';
+  alert(`模板文件 [${uploadSuccessData.filename}] 成功上传入库！`);
+
+  try {
+    await loadTemplates();
+  } catch (refreshErr) {
+    alert(`上传成功，列表刷新失败: ${refreshErr.message}`);
   }
 }
 
 async function deleteTemplate(tmplId) {
   if (!confirm('确定要删除该模板文件吗？')) return;
   try {
-    const res = await fetch(`${API_BASE}/api/templates/${tmplId}`, {
+    await safeFetchJson(`${API_BASE}/api/templates/${encodeURIComponent(tmplId)}`, {
       method: 'DELETE',
       headers: {
         'x-admin-token': 'phoneapp-admin-secret'
       }
     });
-    if (!res.ok) throw new Error('删除失败');
-    loadTemplates();
+    await loadTemplates();
   } catch (err) {
     alert('删除失败: ' + err.message);
   }

@@ -20,13 +20,25 @@ if (!Database) {
   }
 }
 
-const dbPath = process.env.DB_PATH || path.join(__dirname, '../../data/phoneapp.db');
-const targetDir = path.dirname(dbPath);
+const defaultProdPath = path.resolve(__dirname, '../../data/phoneapp.db');
+const dbPath = process.env.DB_PATH || defaultProdPath;
+const resolvedDbPath = path.resolve(dbPath);
+
+const isTestRun = process.env.NODE_ENV === 'test' || 
+                  process.argv.some(arg => arg.includes('test')) || 
+                  process.execArgv.some(arg => arg.includes('test')) ||
+                  !!process.env.NODE_TEST_CONTEXT;
+
+if (isTestRun && (resolvedDbPath === defaultProdPath || resolvedDbPath.endsWith('/data/phoneapp.db') || resolvedDbPath.endsWith('\\data\\phoneapp.db'))) {
+  throw new Error(`[CRITICAL SECURITY GUARD] 测试运行必须强制隔离数据库！当前 DB_PATH 指向生产库 [${defaultProdPath}]，测试已被拦截终止 (FIX-05, TL-17)`);
+}
+
+const targetDir = path.dirname(resolvedDbPath);
 if (!fs.existsSync(targetDir)) {
   fs.mkdirSync(targetDir, { recursive: true });
 }
 
-const db = new Database(dbPath);
+const db = new Database(resolvedDbPath);
 
 if (!db.pragma) {
   db.pragma = (str) => db.exec('PRAGMA ' + str);

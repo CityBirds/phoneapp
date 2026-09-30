@@ -61,31 +61,9 @@ function extractDocumentStructure(filepath) {
  */
 function extractDocBinaryStructure(buffer) {
   const items = [];
-  const str16 = buffer.toString('utf16le');
-
-  // Split by cell delimiter \x07 (Word cell end mark)
-  const rawTokens = str16.split(/\x07+/);
-
-  let currentTableIdx = 0;
-  let currentRowIdx = 0;
-  let currentColIdx = 0;
-
   const binaryGarbageRegex = /(Root Entry|SummaryInformation|DocumentSummaryInformation|WordDocument|KSOProduct|WpsCustomData|Microsoft Office|Normal|Table|Data|CompObj|ObjectPool)/i;
 
-  for (let i = 0; i < rawTokens.length; i++) {
-    let token = rawTokens[i];
-    const hasRowEnd = token.includes('\r');
-
-    // Clean control chars except \r \n
-    let cleanToken = token.replace(/[\x00-\x06\x08-\x09\x0b-\x1f\x7f]/g, '');
-
-    const cleanedText = cleanToken
-      .replace(/[\uFEFF\uFFFE\uE000-\uF8FF\uD800-\uDFFF]/g, '')
-      .replace(/^\r+|\r+$/g, '')
-      .replace(/[\r\n]+/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
-
+  const processToken = (cleanedText, token, currentTableIdx, currentRowIdx, currentColIdx) => {
     if (cleanedText && !binaryGarbageRegex.test(cleanedText) && cleanedText.length <= 300) {
       if (isValidDocumentText(cleanedText)) {
         items.push({
@@ -98,11 +76,59 @@ function extractDocBinaryStructure(buffer) {
         });
       }
     }
+  };
+
+  const str16 = buffer.toString('utf16le');
+  const rawTokens = str16.split('\x07');
+
+  let currentTableIdx = 0;
+  let currentRowIdx = 0;
+  let currentColIdx = 0;
+
+  for (let i = 0; i < rawTokens.length; i++) {
+    let token = rawTokens[i];
+    const hasRowEnd = token.includes('\r');
+
+    let cleanToken = token.replace(/[\x00-\x06\x08-\x09\x0b-\x1f\x7f]/g, '');
+
+    const cleanedText = cleanToken
+      .replace(/[\uFEFF\uFFFE\uE000-\uF8FF\uD800-\uDFFF]/g, '')
+      .replace(/^\r+|\r+$/g, '')
+      .replace(/[\r\n]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    processToken(cleanedText, token, currentTableIdx, currentRowIdx, currentColIdx);
 
     currentColIdx++;
     if (hasRowEnd) {
       currentColIdx = 0;
       currentRowIdx++;
+    }
+  }
+
+  // Also parse 8-bit ASCII cell tokens (for Word 8-bit text pieces)
+  let asciiCurrent = '';
+  let aTableIdx = 0, aRowIdx = 0, aColIdx = 0;
+  for (let i = 0; i < buffer.length; i++) {
+    const b = buffer[i];
+    if (b === 0x07) {
+      const cleanedText = asciiCurrent
+        .replace(/[\r\n]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+      if (cleanedText && !items.some(it => it.text === cleanedText || it.text.includes(cleanedText))) {
+        processToken(cleanedText, asciiCurrent, aTableIdx, aRowIdx, aColIdx);
+      }
+      asciiCurrent = '';
+      aColIdx++;
+    } else if (b === 0x0d) {
+      asciiCurrent += ' ';
+      aRowIdx++;
+      aColIdx = 0;
+    } else if (b >= 0x20 && b <= 0x7e) {
+      asciiCurrent += String.fromCharCode(b);
     }
   }
 
