@@ -156,9 +156,19 @@ function validateTemplateThreeInOne(tmpl) {
 // Dynamic Document Combo Builder for Model
 function syncPublishedBundlesForModel(modelName) {
   const resolved = resolveModelAlias(modelName);
-  const mName = resolved.displayName;
+  const mName = modelName;
 
-  const allTemplates = db.prepare("SELECT * FROM templates WHERE model = ? AND published_at IS NOT NULL").all(mName);
+  const dbModels = db.prepare('SELECT * FROM models WHERE id = ?').all(resolved.modelId);
+  const validModelNames = new Set([modelName, resolved.displayName]);
+  if (dbModels[0]) {
+    validModelNames.add(dbModels[0].display_name);
+    try {
+      JSON.parse(dbModels[0].aliases || '[]').forEach(a => validModelNames.add(a));
+    } catch (e) {}
+  }
+
+  const allTemplates = db.prepare("SELECT * FROM templates WHERE published_at IS NOT NULL").all()
+    .filter(t => validModelNames.has(t.model) || resolveModelAlias(t.model).modelId === resolved.modelId);
   
   const validCertTmpls = [];
   const validPackTmpls = [];
@@ -298,6 +308,9 @@ function syncPublishedBundlesAll() {
 
 function cleanupAndDeduplicateTemplates() {
   try {
+    db.prepare("DELETE FROM published_bundles WHERE bundle_id LIKE 'bundle_990_%' AND NOT EXISTS (SELECT 1 FROM templates WHERE id = cert_template_id OR id = packing_template_id)").run();
+  } catch(e) {}
+  try {
     // 1. Delete orphan test residue records without business tasks
     const testResidues = db.prepare(`
       SELECT id FROM templates 
@@ -373,7 +386,7 @@ function seedDefaultTemplates() {
   db.prepare(`
     INSERT OR IGNORE INTO models (id, display_name, aliases, created_at)
     VALUES (?, ?, ?, ?)
-  `).run('model_990', '990', JSON.stringify(['990', '990-Ex', 'DPT-990-EX']), now);
+  `).run('model_990', '990', JSON.stringify(['990', '990-Ex', 'DPT-990-EX', 'DPT-990-Ex']), now);
 
   // 2. Seed Templates
   const samplesDir = path.join(__dirname, '../../samples');
@@ -501,12 +514,12 @@ function seedDefaultTemplates() {
           { index: 3, name: '用户手册', spec: '中英文', count: 1, unit: '本', standard: '是', remark: '' },
           { index: 4, name: '操作说明', spec: '中英文', count: 1, unit: '份', standard: '是', remark: '' },
           { index: 5, name: '防爆证书', spec: '英文', count: 1, unit: '份', standard: '是', remark: '' },
-          { index: 6, name: '安装螺钉', spec: 'M3*8', count: 4, unit: '个', standard: '是', remark: '' },
-          { index: 7, name: '干燥装置', spec: 'DPT-990-Ex', count: 1, unit: '套', standard: '是', remark: '' },
-          { index: 8, name: '堵头', spec: '1/8NPT', count: 1, unit: '个', standard: '是', remark: '' },
-          { index: 9, name: '卡套螺母组', spec: '1/8”', count: 2, unit: '组', standard: '是', remark: '' },
-          { index: 10, name: '防爆电缆接头', spec: 'M12*1.5', count: 1, unit: '个', standard: '是', remark: '' },
-          { index: 11, name: '电源/信号线', spec: '2米', count: 1, unit: '根', standard: '是', remark: '' }
+          { index: 6, name: '安装螺钉', spec: '', count: 1, unit: '包', standard: '是', remark: '' },
+          { index: 7, name: '干燥装置', spec: '', count: 1, unit: '个', standard: '否', remark: '' },
+          { index: 8, name: '堵头', spec: '', count: 1, unit: '个', standard: '否', remark: '' },
+          { index: 9, name: '卡套螺母组', spec: '1/4', count: 2, unit: '套', standard: '否', remark: '' },
+          { index: 10, name: '防爆电缆接头', spec: '', count: 2, unit: '个', standard: '否', remark: '' },
+          { index: 11, name: '电源/信号线', spec: '', count: 2, unit: '根', standard: '否', remark: '' }
         ]
       }), now);
     }
@@ -810,9 +823,11 @@ app.post('/api/templates/upload', requireAdminAccess, upload.single('templateFil
     return res.status(400).json({ error: 'templateFile, model, and type are required' });
   }
 
-  const resolved = resolveModelAlias(model);
+  const userModel = String(model).trim();
+  const resolved = resolveModelAlias(userModel);
   const originalName = fixMulterFilename(req.file.originalname);
-  const tmplId = `tmpl_${resolved.displayName.toLowerCase()}_${type}_${Date.now()}`;
+  const cleanKey = userModel.toLowerCase().replace(/[^a-zA-Z0-9_-]/g, '');
+  const tmplId = `tmpl_${cleanKey || resolved.displayName.toLowerCase()}_${type}_${Date.now()}`;
   const destPath = path.join(uploadDir, `${tmplId}_${originalName}`);
 
   try {
@@ -823,10 +838,10 @@ app.post('/api/templates/upload', requireAdminAccess, upload.single('templateFil
     db.prepare(`
       INSERT OR IGNORE INTO templates (id, model, type, filename, filepath, file_hash, version, field_mappings, published_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, '{}', ?)
-    `).run(tmplId, resolved.displayName, type, originalName, destPath, sha256, version, now);
+    `).run(tmplId, userModel, type, originalName, destPath, sha256, version, now);
 
-    logAudit(null, 'ADMIN', 'Admin', 'UPLOAD_TEMPLATE', { tmplId, model: resolved.displayName, type, originalName, sha256 });
-    res.json({ success: true, tmplId, model: resolved.displayName, type, filename: originalName, sha256, version });
+    logAudit(null, 'ADMIN', 'Admin', 'UPLOAD_TEMPLATE', { tmplId, model: userModel, type, originalName, sha256 });
+    res.json({ success: true, tmplId, model: userModel, type, filename: originalName, sha256, version });
   } catch (err) {
     res.status(500).json({ error: 'Failed to save template file: ' + err.message });
   }

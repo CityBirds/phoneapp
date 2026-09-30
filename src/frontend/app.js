@@ -540,7 +540,7 @@ function addPackingRow() {
   state.packingItems.push({
     index: newIdx,
     name: '', // Empty custom name by default
-    spec: '标准配件',
+    spec: '',
     count: 1,
     unit: '件',
     standard: '否',
