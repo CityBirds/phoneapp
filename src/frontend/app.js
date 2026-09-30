@@ -5,6 +5,35 @@
 
 const API_BASE = window.location.origin;
 
+// Safe JSON Fetch helper (Handles HTML and non-JSON responses cleanly)
+async function safeFetchJson(url, options = {}) {
+  let res;
+  try {
+    res = await fetch(url, options);
+  } catch (netErr) {
+    throw new Error('网络请求异常: ' + netErr.message);
+  }
+
+  const contentType = res.headers.get('content-type') || '';
+  let data;
+  if (contentType.includes('application/json')) {
+    try {
+      data = await res.json();
+    } catch (parseErr) {
+      throw new Error('解析服务响应失败: ' + parseErr.message);
+    }
+  } else {
+    const text = await res.text();
+    const shortText = text.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().substring(0, 150);
+    throw new Error(`服务响应非 JSON 格式 (HTTP ${res.status}): ${shortText || '空内容'}`);
+  }
+
+  if (!res.ok) {
+    throw new Error(data.error || `请求失败 (HTTP ${res.status})`);
+  }
+  return data;
+}
+
 const state = {
   clientId: localStorage.getItem('phoneapp_client_id') || '',
   clientName: localStorage.getItem('phoneapp_user_name') || '',
@@ -482,7 +511,13 @@ function renderPackingTable() {
         <td><input type="text" class="form-control" value="${item.spec || ''}" onchange="updatePackingItem(${idx}, 'spec', this.value)"></td>
         <td><input type="number" class="form-control" style="width: 60px;" value="${item.count || 1}" onchange="updatePackingItem(${idx}, 'count', this.value)"></td>
         <td><input type="text" class="form-control" style="width: 60px;" value="${item.unit || '件'}" onchange="updatePackingItem(${idx}, 'unit', this.value)"></td>
-        <td>${item.standard || '是'}</td>
+        <td>${isProtected 
+            ? (item.standard || '是') 
+            : `<select class="form-control" style="width: 65px; padding: 2px 4px; font-size: 13px;" onchange="updatePackingItem(${idx}, 'standard', this.value)">
+                <option value="否" ${item.standard === '否' ? 'selected' : ''}>否</option>
+                <option value="是" ${item.standard !== '否' ? 'selected' : ''}>是</option>
+              </select>`
+          }</td>
         <td><input type="text" class="form-control" value="${item.remark || ''}" onchange="updatePackingItem(${idx}, 'remark', this.value)"></td>
         <td>
           ${isProtected 
@@ -508,7 +543,7 @@ function addPackingRow() {
     spec: '标准配件',
     count: 1,
     unit: '件',
-    standard: '是',
+    standard: '否',
     remark: ''
   });
   renderPackingTable();
@@ -650,16 +685,11 @@ async function submitTaskForm() {
   }
 
   try {
-    const res = await fetch(`${API_BASE}/api/tasks/submit`, {
+    const data = await safeFetchJson(`${API_BASE}/api/tasks/submit`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
     });
-
-    const data = await res.json();
-    if (!res.ok) {
-      throw new Error(data.error || '提交任务失败');
-    }
     state.currentTask = data.task;
 
     switchNavTab('preview');

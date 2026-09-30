@@ -1858,12 +1858,17 @@ app.post('/api/tasks/submit', (req, res) => {
     overwriteConfirmed
   });
 
-  const result = db.prepare(`
-    INSERT INTO tasks (req_id, client_id, client_name, worker_id, model, model_id, bundle_id, device_sn, status, accepted_at, form_data)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'QUEUED', ?, ?)
-  `).run(reqId, clientId, clientName, workerId, resolvedModel.displayName, resolvedModel.modelId, bundleId || (bundle ? bundle.bundle_id : null), String(deviceSn), acceptedAt, formData);
-
-  const taskId = result.lastInsertRowid;
+  let taskId;
+  try {
+    const result = db.prepare(`
+      INSERT INTO tasks (req_id, client_id, client_name, worker_id, model, model_id, bundle_id, device_sn, status, accepted_at, form_data)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'QUEUED', ?, ?)
+    `).run(reqId, clientId, clientName, workerId, resolvedModel.displayName, resolvedModel.modelId, bundleId || (bundle ? bundle.bundle_id : null), String(deviceSn), acceptedAt, formData);
+    taskId = result.lastInsertRowid;
+  } catch (dbErr) {
+    console.error('[Task Submit DB Error]', dbErr);
+    return res.status(500).json({ error: '数据库保存任务失败: ' + dbErr.message });
+  }
 
   // Create Task Files with Target Directory Snapshot (DIR-15)
   if (createCert) {

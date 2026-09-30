@@ -64,6 +64,8 @@ const schema = [
 ].join('\n');
 
 db.exec(schema);
+try { db.exec('ALTER TABLE tasks ADD COLUMN model_id TEXT;'); } catch (e) {}
+try { db.exec('ALTER TABLE tasks ADD COLUMN bundle_id TEXT;'); } catch (e) {}
 try { db.exec('ALTER TABLE templates ADD COLUMN draft_mappings TEXT;'); } catch (e) {}
 try { db.exec('ALTER TABLE task_files ADD COLUMN target_dir TEXT;'); } catch (e) {}
 try { db.exec('ALTER TABLE task_files ADD COLUMN root_dir TEXT;'); } catch (e) {}
