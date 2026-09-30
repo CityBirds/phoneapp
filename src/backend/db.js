@@ -25,8 +25,8 @@ const dbPath = process.env.DB_PATH || defaultProdPath;
 const resolvedDbPath = path.resolve(dbPath);
 
 const isTestRun = process.env.NODE_ENV === 'test' || 
-                  process.argv.some(arg => arg.includes('test')) || 
-                  process.execArgv.some(arg => arg.includes('test')) ||
+                  process.argv.some(arg => /(^|[\\/])tests?[\\/]|(\.|\b)test\.(js|cjs|mjs)$|--test\b/.test(arg)) || 
+                  process.execArgv.some(arg => arg.includes('--test')) ||
                   !!process.env.NODE_TEST_CONTEXT;
 
 if (isTestRun && (resolvedDbPath === defaultProdPath || resolvedDbPath.endsWith('/data/phoneapp.db') || resolvedDbPath.endsWith('\\data\\phoneapp.db'))) {

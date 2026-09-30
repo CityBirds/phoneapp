@@ -1150,7 +1150,7 @@ app.get('/api/admin/workers/:workerId/template-configs', (req, res) => {
   const allTmpls = db.prepare(`
     SELECT * FROM templates 
     WHERE id NOT LIKE 'tmpl_dummy_%' AND id NOT LIKE 'tmpl_test_%'
-    ORDER BY published_at DESC, created_at DESC
+    ORDER BY published_at DESC, rowid DESC
   `).all();
 
   const grouped = new Map();

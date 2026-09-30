@@ -283,8 +283,7 @@ async function loadWorkerAllowedPaths(workerId) {
   tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; padding: 14px; color: #64748b;">正在加载允许访问的业务路径...</td></tr>';
 
   try {
-    const res = await fetch(`${API_BASE}/api/admin/workers/${encodeURIComponent(workerId)}/allowed-paths`);
-    const paths = await res.json();
+    const paths = await safeFetchJson(`${API_BASE}/api/admin/workers/${encodeURIComponent(workerId)}/allowed-paths`);
     currentWorkerAllowedPaths = Array.isArray(paths) ? paths : [];
 
     if (currentWorkerAllowedPaths.length === 0) {
@@ -322,7 +321,10 @@ async function loadWorkerAllowedPaths(workerId) {
       `;
     }).join('');
   } catch (err) {
-    tbody.innerHTML = `<tr><td colspan="8" style="color: red; text-align: center; padding: 14px;">加载失败: ${err.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="8" style="color: #ef4444; text-align: center; padding: 16px;">
+      加载授权业务路径失败: ${escapeHtml(err.message)}
+      <button type="button" class="btn btn-secondary btn-sm" onclick="loadWorkerAllowedPaths('${escapeHtml(workerId)}')" style="margin-left: 10px;">🔄 重试</button>
+    </td></tr>`;
   }
 }
 
@@ -416,8 +418,7 @@ async function loadWorkerTemplateConfigs(workerId) {
   tbody.innerHTML = '<tr><td colspan="9" style="text-align: center; padding: 14px; color: #64748b;">正在加载本终端模板配置...</td></tr>';
 
   try {
-    const res = await fetch(`${API_BASE}/api/admin/workers/${encodeURIComponent(workerId)}/template-configs`);
-    const tmpls = await res.json();
+    const tmpls = await safeFetchJson(`${API_BASE}/api/admin/workers/${encodeURIComponent(workerId)}/template-configs`);
     currentWorkerTemplateConfigs = Array.isArray(tmpls) ? tmpls : [];
 
     if (currentWorkerTemplateConfigs.length === 0) {
@@ -469,7 +470,10 @@ async function loadWorkerTemplateConfigs(workerId) {
       `;
     }).join('');
   } catch (err) {
-    tbody.innerHTML = `<tr><td colspan="9" style="color: red; text-align: center; padding: 14px;">加载失败: ${err.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="9" style="color: #ef4444; text-align: center; padding: 16px;">
+      加载本终端模板配置失败: ${escapeHtml(err.message)}
+      <button type="button" class="btn btn-secondary btn-sm" onclick="loadWorkerTemplateConfigs('${escapeHtml(workerId)}')" style="margin-left: 10px;">🔄 重试</button>
+    </td></tr>`;
   }
 }
 
