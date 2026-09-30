@@ -64,6 +64,18 @@ function parseCliArgs() {
   return options;
 }
 
+// Helper: Check path containment strictly without prefix bug (DIR-13, WC-08)
+function isSubpath(parent, child) {
+  if (!parent || !child) return false;
+  const normParent = path.resolve(parent);
+  const normChild = path.resolve(child);
+  const pLower = process.platform === 'win32' ? normParent.toLowerCase() : normParent;
+  const cLower = process.platform === 'win32' ? normChild.toLowerCase() : normChild;
+  if (pLower === cLower) return true;
+  const rel = path.relative(normParent, normChild);
+  return !rel.startsWith('..') && !path.isAbsolute(rel);
+}
+
 class ExecutionWorker {
   constructor(config = {}) {
     const cliOptions = parseCliArgs();
@@ -112,6 +124,7 @@ class ExecutionWorker {
         this._connected = true;
         console.log(`[成功] 已连接协调服务 (${this.serverUrl})！状态: ONLINE，终端ID: ${this.workerId}，监听任务与打印调度...`);
       }
+      await this.pollAndExecuteDirectoryChecks();
       return data;
     } catch (err) {
       if (this._connected !== false) {
@@ -122,8 +135,111 @@ class ExecutionWorker {
     }
   }
 
+  async fetchActiveAuthorizations() {
+    try {
+      const res = await fetch(`${this.serverUrl}/api/worker/authorizations?workerId=${this.workerId}`);
+      if (res.ok) {
+        const data = await res.json();
+        return data.allowedPaths || [];
+      }
+    } catch (e) {}
+    return [];
+  }
+
+  async pollAndExecuteDirectoryChecks() {
+    try {
+      const res = await fetch(`${this.serverUrl}/api/worker/directory-checks/pending?workerId=${this.workerId}`);
+      if (!res.ok) return;
+      const checks = await res.json();
+      for (const check of checks) {
+        await this.executeDirectoryCheck(check);
+      }
+    } catch (err) {}
+  }
+
+  async executeDirectoryCheck(check) {
+    const rootDir = check.root_dir;
+    const allowCreate = Boolean(check.allow_create);
+    const checkType = check.check_type || 'save_config';
+
+    let status = 'PASSED';
+    let message = '检查通过，目录可写';
+
+    if (!rootDir || typeof rootDir !== 'string') {
+      status = 'FAILED';
+      message = '保存路径不能为空';
+    } else {
+      const isAbs = path.isAbsolute(rootDir) || /^[a-zA-Z]:[\\/]/.test(rootDir);
+      const driveMatch = rootDir.match(/^([a-zA-Z]:)(.*)$/);
+      const pathBody = driveMatch ? driveMatch[2] : rootDir;
+
+      if (!isAbs) {
+        status = 'FAILED';
+        message = `路径不是合法的绝对路径: ${rootDir}`;
+      } else if (/[<>"|?*]/.test(pathBody)) {
+        status = 'FAILED';
+        message = `路径包含系统非法字符: ${rootDir}`;
+      } else if (checkType === 'save_config') {
+        // WC-08, E04: Verify rootDir is within active authorized write paths
+        const activeAuths = await this.fetchActiveAuthorizations();
+        if (activeAuths.length > 0) {
+          const isAllowed = activeAuths.some(ap => ap.allow_write && isSubpath(ap.root_path, rootDir));
+          if (!isAllowed) {
+            status = 'FAILED';
+            message = `保存目录未在允许访问的业务路径范围内 (E04, WC-08)`;
+          }
+        }
+      }
+
+      if (status === 'PASSED' && !fs.existsSync(rootDir)) {
+        if (!allowCreate) {
+          status = 'FAILED';
+          message = `根目录不存在，且未勾选允许创建: ${rootDir} (DIR-09, WC-10)`;
+        } else {
+          try {
+            fs.mkdirSync(rootDir, { recursive: true });
+          } catch (mErr) {
+            status = 'FAILED';
+            message = `创建根目录失败: ${mErr.message} (DIR-10)`;
+          }
+        }
+      }
+    }
+
+    if (status === 'PASSED') {
+      const probeFile = path.join(rootDir, `.write_probe_${Date.now()}_${Math.random().toString(36).slice(2)}.tmp`);
+      try {
+        fs.writeFileSync(probeFile, 'probe');
+        const readBack = fs.readFileSync(probeFile, 'utf-8');
+        if (readBack !== 'probe') throw new Error('探测文件校验失败');
+        fs.unlinkSync(probeFile);
+      } catch (err) {
+        try { if (fs.existsSync(probeFile)) fs.unlinkSync(probeFile); } catch (e) {}
+        status = 'FAILED';
+        message = `目录不可写或权限不足: ${err.message} (DIR-11)`;
+      }
+    }
+
+    try {
+      await fetch(`${this.serverUrl}/api/worker/directory-checks/result`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          checkId: check.id,
+          checkType,
+          targetId: check.target_id || check.config_id,
+          configId: check.config_id || check.target_id,
+          version: check.version,
+          status,
+          message
+        })
+      });
+    } catch (e) {}
+  }
+
   async pollAndExecuteTasks() {
     try {
+      await this.pollAndExecuteDirectoryChecks();
       const res = await fetch(`${this.serverUrl}/api/worker/tasks/pending?workerId=${this.workerId}`);
       if (!res.ok) return;
 
@@ -190,15 +306,51 @@ class ExecutionWorker {
 
         const officialFilename = fileRec.official_filename;
 
+        // WC-21: 目标目录缺失时明确拒绝，严禁回退 workingDir！
+        if (!fileRec.target_dir || !fileRec.target_dir.trim()) {
+          throw new Error('任务未指定有效保存目标目录，拒绝执行 (WC-21)');
+        }
+
+        const targetDir = fileRec.target_dir;
+        const rootDir = fileRec.root_dir || fileRec.target_dir;
+
+        // Security boundary check: ensure targetDir does not escape rootDir (DIR-13, WC-08)
+        if (!isSubpath(rootDir, targetDir)) {
+          throw new Error(`安全拦截：目标保存路径 [${targetDir}] 试图跳出指定根目录范围 [${rootDir}]！(DIR-13, WC-08)`);
+        }
+
+        // WC-20: 检查当前有效授权写入范围，若授权已撤销或无效则拒绝执行
+        const activeAuths = await this.fetchActiveAuthorizations();
+        if (activeAuths && activeAuths.length > 0) {
+          const isAuthorized = activeAuths.some(ap => ap.allow_write && isSubpath(ap.root_path, targetDir));
+          if (!isAuthorized) {
+            throw new Error(`任务保存目标目录已不在执行端当前授权范围内（授权已撤销或失效），拒绝执行写入 (WC-20)`);
+          }
+        }
+
+        // Pre-save directory check: ensure target directory exists and is writable (DIR-16)
+        if (!fs.existsSync(targetDir)) {
+          try {
+            fs.mkdirSync(targetDir, { recursive: true });
+          } catch (mErr) {
+            throw new Error(`目标目录创建失败 [${targetDir}]: ${mErr.message} (DIR-16)`);
+          }
+        }
+
+        // Writability check on targetDir
+        const probeFile = path.join(targetDir, `.write_probe_${Date.now()}_${Math.random().toString(36).slice(2)}.tmp`);
+        try {
+          fs.writeFileSync(probeFile, 'probe');
+          fs.unlinkSync(probeFile);
+        } catch (wErr) {
+          throw new Error(`保存失败：目标目录不可写或磁盘已断开 [${targetDir}] (${wErr.message}) (DIR-16)`);
+        }
+
         const { officialFilePath } = handleFileConflictAndOverwrite(
-          this.workingDir,
+          targetDir,
           officialFilename,
           formData.overwriteConfirmed
         );
-
-        if (!isPathInWhitelist(officialFilePath, this.workingDir)) {
-          throw new Error(`Security Violation: Target path outside working directory boundary! (E02)`);
-        }
 
         // Pass fieldMappings to generateWordDocument so doc_processor uses confirmed mappings (Spec Sec 8)
         const genResult = generateWordDocument(templatePath, officialFilePath, {
@@ -234,6 +386,7 @@ class ExecutionWorker {
     formData.append('fileType', fileType);
     formData.append('officialFilename', officialFilename);
     formData.append('sha256', sha256 || getFileSha256(filePath));
+    formData.append('workerFilePath', filePath);
     formData.append('wordFile', blob, officialFilename);
 
     const res = await fetch(`${this.serverUrl}/api/worker/tasks/${taskId}/file-returned`, {

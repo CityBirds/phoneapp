@@ -35,6 +35,7 @@
           <span class="nav-icon">🖥️</span>
           <span>执行终端与打印机</span>
         </a>
+
         <a href="#templates" id="side-templates" class="nav-item" onclick="switchTab('templates')">
           <span class="nav-icon">📑</span>
           <span>模板库集中管理</span>
@@ -92,13 +93,95 @@
         <div class="panel-header">
           <div>
             <h2>🖥️ 执行终端与打印机监控调度 (C02, R03, R04)</h2>
-            <p>监控启用了执行服务的电脑终端，检测关联的打印机（自动识别并标记多台执行端共享同一台打印机的情况）。</p>
+            <p>监控启用了执行服务的电脑终端，集中管理各电脑的业务访问路径、模板启用与保存目录。</p>
           </div>
           <button type="button" class="btn btn-primary" onclick="loadWorkers()">🔄 刷新终端状态</button>
         </div>
 
+        <div id="directories-migration-banner" style="display:none; margin-bottom: 16px; background: #e0f2fe; border: 1px solid #7dd3fc; color: #0369a1; padding: 12px 16px; border-radius: 8px;">
+          📁 <b>提示：</b>执行端保存目录与模板启用现已集中在各终端详情页管理。请点击下方任意电脑卡片或【⚙️ 终端详情与保存配置】按钮进入。
+        </div>
+
         <div id="workers-grid-container" class="workers-grid">
           <!-- Dynamically loaded -->
+        </div>
+      </section>
+
+      <!-- TAB 2.5: WORKER DETAIL & CONFIGURATION (E01, E02, E03, E04) -->
+      <section id="sec-worker-detail" class="admin-panel" style="display: none;">
+        <div class="panel-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+          <div>
+            <button type="button" class="btn btn-secondary btn-sm" onclick="backToWorkersList()">← 返回执行终端列表</button>
+            <h2 id="detail-worker-title" style="margin-top: 10px;">🖥️ 执行终端配置与保存目录</h2>
+            <p style="font-size: 13px; color: #64748b; margin-top: 4px;">集中管理终端允许访问的业务路径、公共模板启用状态与保存归档目录规则</p>
+          </div>
+          <div id="detail-worker-status-badge"></div>
+        </div>
+
+        <!-- Worker Info Summary Card -->
+        <div class="card" style="margin-bottom: 20px;">
+          <div id="detail-worker-info-content" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; font-size: 13px;">
+            <!-- Populated dynamically -->
+          </div>
+        </div>
+
+        <!-- Panel 1: Authorized Business Paths -->
+        <div class="card" style="margin-bottom: 20px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+            <div>
+              <h3 style="margin: 0; font-size: 16px;">📂 允许访问的业务路径 (Authorized Business Paths)</h3>
+              <p style="font-size: 13px; color: #64748b; margin: 4px 0 0 0;">约束执行端可访问与写入的业务根路径范围。模板保存根目录必须属于允许写入的路径之一 (E02, E04)。</p>
+            </div>
+            <button type="button" class="btn btn-primary btn-sm" onclick="openAddAllowedPathModal()">➕ 添加允许访问路径</button>
+          </div>
+          <div class="table-responsive">
+            <table class="table admin-table" style="width: 100%; border-collapse: collapse;">
+              <thead>
+                <tr style="background: #f8fafc; border-bottom: 1px solid #e2e8f0;">
+                  <th style="padding: 10px; text-align: left;">授权根路径</th>
+                  <th style="padding: 10px; text-align: center; width: 90px;">读取权限</th>
+                  <th style="padding: 10px; text-align: center; width: 90px;">写入权限</th>
+                  <th style="padding: 10px; text-align: center; width: 100px;">同步状态</th>
+                  <th style="padding: 10px; text-align: center; width: 100px;">探测状态</th>
+                  <th style="padding: 10px; text-align: left;">探测详情</th>
+                  <th style="padding: 10px; text-align: center; width: 150px;">操作</th>
+                </tr>
+              </thead>
+              <tbody id="allowed-paths-tbody">
+                <tr><td colspan="7" style="text-align: center; padding: 16px; color: #94a3b8;">暂无配置授权业务路径</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Panel 2: Templates & Save Directories -->
+        <div class="card" style="margin-bottom: 20px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+            <div>
+              <h3 style="margin: 0; font-size: 16px;">📑 本终端模板启用与保存目录 (Templates & Save Directories)</h3>
+              <p style="font-size: 13px; color: #64748b; margin: 4px 0 0 0;">管理发货证书与装箱清单在该终端的启用状态、结果保存根目录与归档规则。手机端仅显示当前终端已启用的模板 (E03, 4.3)。</p>
+            </div>
+          </div>
+          <div class="table-responsive">
+            <table class="table admin-table" style="width: 100%; border-collapse: collapse;">
+              <thead>
+                <tr style="background: #f8fafc; border-bottom: 1px solid #e2e8f0;">
+                  <th style="padding: 10px; text-align: left;">型号 / 模板文件名</th>
+                  <th style="padding: 10px; text-align: center; width: 90px;">文档类型</th>
+                  <th style="padding: 10px; text-align: center; width: 100px;">是否启用</th>
+                  <th style="padding: 10px; text-align: left;">保存根目录</th>
+                  <th style="padding: 10px; text-align: center; width: 130px;">保存方式</th>
+                  <th style="padding: 10px; text-align: center; width: 90px;">允许创建</th>
+                  <th style="padding: 10px; text-align: center; width: 100px;">探测状态</th>
+                  <th style="padding: 10px; text-align: left;">探测详情</th>
+                  <th style="padding: 10px; text-align: center; width: 150px;">操作</th>
+                </tr>
+              </thead>
+              <tbody id="worker-templates-tbody">
+                <tr><td colspan="9" style="text-align: center; padding: 16px; color: #94a3b8;">正在加载模板配置...</td></tr>
+              </tbody>
+            </table>
+          </div>
         </div>
       </section>
 
@@ -303,6 +386,158 @@
         <button type="button" class="btn btn-secondary" onclick="closeRenameModal()">取消</button>
         <button type="button" class="btn btn-primary" onclick="submitRenameClient()">保存并推送生效</button>
       </div>
+    </div>
+  </div>
+
+  <!-- Modal: Directory Config -->
+  <div id="directory-modal" class="modal-backdrop" style="display: none;">
+    <div class="modal-card" style="max-width: 600px;">
+      <div class="modal-header">
+        <h3 id="directory-modal-title">新建执行端保存目录配置</h3>
+        <button class="close-btn" onclick="closeDirectoryModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <form id="directory-config-form" onsubmit="saveDirectoryConfig(event)">
+          <input type="hidden" id="dir-config-id" value="">
+          <div class="form-group">
+            <label>目标执行终端 (Worker) *</label>
+            <select id="dir-worker-id" class="form-control" required onchange="onDirWorkerChanged()">
+              <option value="">-- 请选择执行终端 --</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>对应模板 (Template) *</label>
+            <select id="dir-template-id" class="form-control" required onchange="onDirTemplateChanged()">
+              <option value="">-- 请选择模板 --</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>文档类型 (Doc Type) *</label>
+            <select id="dir-doc-type" class="form-control" required>
+              <option value="cert">发货证书 (cert)</option>
+              <option value="packing">装箱清单 (packing)</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>目标保存根目录 (Root Directory on Worker) *</label>
+            <input type="text" id="dir-root-dir" class="form-control" placeholder="如: D:\\docs\\POA200 或 D:\\docs\\990" required>
+            <small class="text-muted">必须是目标执行端电脑上的绝对路径 (Windows 盘符路径如 D:\\docs...)</small>
+          </div>
+          <div class="form-group">
+            <label>保存方式 *</label>
+            <select id="dir-save-mode" class="form-control" onchange="onDirSaveModeChanged()">
+              <option value="direct">直接保存在根目录下</option>
+              <option value="subfolder">按规则建立子文件夹 (如以设备序列号建立文件夹)</option>
+            </select>
+          </div>
+          <div class="form-group" id="dir-subfolder-rule-group" style="display: none;">
+            <label>子文件夹规则字段</label>
+            <input type="text" id="dir-subfolder-rule" class="form-control" value="deviceSn" placeholder="表单字段名，如 deviceSn">
+            <small class="text-muted">将以该表单字段的值建立子文件夹，如: D:\\docs\\POA200\\AP10007513\\...</small>
+          </div>
+          <div class="form-group" style="margin-top: 1rem;">
+            <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
+              <input type="checkbox" id="dir-allow-create" style="width: auto;">
+              <span>根目录不存在时允许执行端自动创建 (Allow Create)</span>
+            </label>
+          </div>
+          <div class="modal-footer" style="padding-top: 1rem; border-top: 1px solid #e5e7eb; display: flex; justify-content: flex-end; gap: 0.5rem;">
+            <button type="button" class="btn btn-secondary" onclick="closeDirectoryModal()">取消</button>
+            <button type="submit" class="btn btn-primary">保存配置</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+    <!-- MODAL: ADD ALLOWED PATH -->
+  <div id="modal-allowed-path" class="modal-overlay" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 1000; align-items: center; justify-content: center;">
+    <div class="modal-content" style="background: #fff; border-radius: 8px; width: 90%; max-width: 550px; padding: 24px; box-shadow: 0 10px 25px rgba(0,0,0,0.2);">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; border-bottom: 1px solid #e2e8f0; padding-bottom: 10px;">
+        <h3 id="modal-allowed-path-title" style="margin: 0; font-size: 18px;">➕ 添加允许访问业务路径</h3>
+        <button type="button" class="btn btn-secondary btn-sm" onclick="closeAllowedPathModal()">✕</button>
+      </div>
+      <form id="allowed-path-form" onsubmit="handleSaveAllowedPath(event)">
+        <input type="hidden" id="auth-path-id">
+        <div class="form-group" style="margin-bottom: 14px;">
+          <label style="display: block; font-weight: 600; margin-bottom: 6px;">授权绝对路径 (Root Path) *</label>
+          <input type="text" id="auth-path-input" class="form-control" placeholder="如: D:\\docs 或 E:\\shipment" required style="width: 100%; padding: 8px; border: 1px solid #cbd5e1; border-radius: 4px;">
+          <small class="text-muted" style="color: #64748b; font-size: 12px;">必须为执行端目标电脑上的绝对路径。结果保存根目录必须在此路径下。</small>
+        </div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px;">
+          <label style="display: flex; align-items: center; gap: 8px; font-size: 14px; cursor: pointer;">
+            <input type="checkbox" id="auth-read-check" checked>
+            <span>允许读取 (Read)</span>
+          </label>
+          <label style="display: flex; align-items: center; gap: 8px; font-size: 14px; cursor: pointer;">
+            <input type="checkbox" id="auth-write-check" checked>
+            <span>允许写入 (Write)</span>
+          </label>
+        </div>
+        <div style="margin-bottom: 18px;">
+          <label style="display: flex; align-items: center; gap: 8px; font-size: 14px; cursor: pointer;">
+            <input type="checkbox" id="auth-create-check" checked>
+            <span>路径不存在时允许执行端自动创建</span>
+          </label>
+        </div>
+        <div style="display: flex; justify-content: flex-end; gap: 10px; border-top: 1px solid #e2e8f0; padding-top: 14px;">
+          <button type="button" class="btn btn-secondary" onclick="closeAllowedPathModal()">取消</button>
+          <button type="submit" class="btn btn-primary">保存授权路径</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- MODAL: CONFIGURE TEMPLATE ON WORKER -->
+  <div id="modal-worker-template" class="modal-overlay" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 1000; align-items: center; justify-content: center;">
+    <div class="modal-content" style="background: #fff; border-radius: 8px; width: 90%; max-width: 580px; padding: 24px; box-shadow: 0 10px 25px rgba(0,0,0,0.2);">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; border-bottom: 1px solid #e2e8f0; padding-bottom: 10px;">
+        <h3 id="modal-worker-tmpl-title" style="margin: 0; font-size: 18px;">⚙️ 配置模板保存目录与启用</h3>
+        <button type="button" class="btn btn-secondary btn-sm" onclick="closeWorkerTemplateModal()">✕</button>
+      </div>
+      <form id="worker-template-form" onsubmit="handleSaveWorkerTemplate(event)">
+        <input type="hidden" id="cfg-tmpl-id">
+        <input type="hidden" id="cfg-doc-type">
+        <div style="background: #f8fafc; padding: 10px 14px; border-radius: 6px; margin-bottom: 14px; font-size: 13px;">
+          <div><b>适用型号:</b> <span id="cfg-tmpl-model"></span></div>
+          <div><b>模板文件:</b> <span id="cfg-tmpl-filename"></span></div>
+          <div><b>文档类型:</b> <span id="cfg-tmpl-type-label"></span></div>
+        </div>
+        <div class="form-group" style="margin-bottom: 14px;">
+          <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 14px; font-weight: 700; color: #0284c7;">
+            <input type="checkbox" id="cfg-is-enabled" style="width: 18px; height: 18px;">
+            <span>在该执行端启用此模板 (Enable for Worker)</span>
+          </label>
+          <small class="text-muted" style="color: #64748b; font-size: 12px; display: block; margin-top: 4px;">开启后手机端连接本执行端时才可选择此模板 (E03, WC-11)。</small>
+        </div>
+        <div class="form-group" style="margin-bottom: 14px;">
+          <label style="display: block; font-weight: 600; margin-bottom: 6px;">保存根目录 (Root Directory on Worker) *</label>
+          <input type="text" id="cfg-root-dir" class="form-control" placeholder="如: D:\\docs\\POA200" oninput="updateWorkerTmplPathPreview()" style="width: 100%; padding: 8px; border: 1px solid #cbd5e1; border-radius: 4px;">
+          <small class="text-muted" style="color: #64748b; font-size: 12px;">必须包含在上方允许访问的业务路径之内 (E04, WC-08)。</small>
+        </div>
+        <div class="form-group" style="margin-bottom: 14px;">
+          <label style="display: block; font-weight: 600; margin-bottom: 6px;">保存方式</label>
+          <select id="cfg-save-mode" class="form-control" onchange="onWorkerTmplSaveModeChanged()" style="width: 100%; padding: 8px; border: 1px solid #cbd5e1; border-radius: 4px;">
+            <option value="direct">直接保存在根目录下</option>
+            <option value="subfolder">按设备序列号建立子文件夹归档 (推荐)</option>
+          </select>
+        </div>
+        <div class="form-group" id="cfg-subfolder-rule-group" style="display: none; margin-bottom: 14px;">
+          <label style="display: block; font-weight: 600; margin-bottom: 6px;">子文件夹规则字段</label>
+          <input type="text" id="cfg-subfolder-rule" class="form-control" value="deviceSn" placeholder="表单字段，如 deviceSn" style="width: 100%; padding: 8px; border: 1px solid #cbd5e1; border-radius: 4px;">
+          <small class="text-muted" style="color: #64748b; font-size: 12px;">以设备序列号建立子文件夹归档 (如: D:\\docs\\POA200\\AP10007513\\...)</small>
+        </div>
+        <div style="margin-bottom: 18px;">
+          <label style="display: flex; align-items: center; gap: 8px; font-size: 14px; cursor: pointer;">
+            <input type="checkbox" id="cfg-allow-create" checked>
+            <span>根目录不存在时允许自动创建</span>
+          </label>
+        </div>
+        <div style="display: flex; justify-content: flex-end; gap: 10px; border-top: 1px solid #e2e8f0; padding-top: 14px;">
+          <button type="button" class="btn btn-secondary" onclick="closeWorkerTemplateModal()">取消</button>
+          <button type="submit" class="btn btn-primary">保存配置</button>
+        </div>
+      </form>
     </div>
   </div>
 

@@ -1,0 +1,51 @@
+[
+  {
+    "name": "990 published point count",
+    "pass": true
+  },
+  {
+    "name": "990 mobile renders all rows with empty actuals",
+    "pass": true
+  },
+  {
+    "name": "POA200 published point count",
+    "pass": true
+  },
+  {
+    "name": "POA200 mobile renders all rows with empty actuals",
+    "pass": true
+  },
+  {
+    "name": "draft save accepted",
+    "pass": true
+  },
+  {
+    "name": "draft does not change published bundles",
+    "pass": true
+  },
+  {
+    "name": "admin reads saved draft",
+    "pass": true
+  },
+  {
+    "name": "formal publish accepted and clears draft",
+    "pass": true
+  },
+  {
+    "name": "reject completely missing table",
+    "pass": true
+  },
+  {
+    "name": "reject points without writeback columns",
+    "pass": false,
+    "error": "Expected values to be strictly equal:\n\n200 !== 400\n"
+  },
+  {
+    "name": "saved field deletions and choices restored",
+    "pass": true
+  },
+  {
+    "name": "admin saves all 9 rows separately from single fields",
+    "pass": true
+  }
+]

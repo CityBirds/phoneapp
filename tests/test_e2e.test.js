@@ -89,6 +89,23 @@ test('End-to-End Task Flow, Worker Execution, Preview & History (C01-C14, M01-M1
   assert.ok(epsonDetail);
   assert.strictEqual(epsonDetail.isShared, true);
 
+  // Configure save directory for worker-pc01 (DIR-01, DIR-02, DIR-04, E03, E04)
+  const db = require('../src/backend/db');
+  db.prepare(`
+    INSERT INTO worker_allowed_paths (worker_id, root_path, allow_read, allow_write, sync_status, check_status, created_at, updated_at)
+    VALUES ('worker-pc01', ?, 1, 1, 'SYNCED', 'PASSED', datetime('now'), datetime('now'))
+    ON CONFLICT(worker_id, root_path) DO UPDATE SET allow_write = 1, check_status = 'PASSED'
+  `).run(worker1Dir);
+
+  const allTmpls = db.prepare('SELECT * FROM templates').all();
+  allTmpls.forEach(t => {
+    db.prepare(`
+      INSERT INTO worker_save_configs (worker_id, template_id, doc_type, root_dir, save_mode, allow_create, is_enabled, check_status, created_at, updated_at)
+      VALUES ('worker-pc01', ?, ?, ?, 'direct', 1, 1, 'PASSED', datetime('now'), datetime('now'))
+      ON CONFLICT(worker_id, template_id, doc_type) DO UPDATE SET is_enabled = 1, check_status = 'PASSED'
+    `).run(t.id, t.type, worker1Dir);
+  });
+
   // 3. User selects worker-pc01 and submits Task (POA200)
   const reqId = 'req_e2e_' + Date.now();
   const taskRes = await fetch(`${serverUrl}/api/tasks/submit`, {

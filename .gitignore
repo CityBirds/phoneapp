@@ -10,11 +10,15 @@ data/test_output/
 data/test_docs/
 data/returned/
 data/previews/
-data/*.db
-data/*.db-wal
-data/*.db-shm
+*.db
+*.db-wal
+*.db-shm
 backups/
 uploads/
 
 data/working_dir*/
 data/e2e_worker_*/
+
+data/test_*
+data/test_*/**
+data/*.txt

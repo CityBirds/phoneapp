@@ -233,6 +233,7 @@ function findFieldCandidates(targetLabel, docItems) {
       let candidateValue = null;
       let valueLocation = null;
       let sampleValues = [];
+      let fullValues = [];
 
       if (item.type === 'cell') {
         const tableIdx = item.tableIdx;
@@ -245,9 +246,11 @@ function findFieldCandidates(targetLabel, docItems) {
 
         if (dataCellsBelow.length > 0) {
           if (isSeqNumCol) {
-            sampleValues = dataCellsBelow.map((c, idx) => String(idx + 1)).slice(0, 5);
+            fullValues = dataCellsBelow.map((c, idx) => String(idx + 1));
+            sampleValues = fullValues.slice(0, 5);
           } else {
-            sampleValues = dataCellsBelow.map(c => (c.text ? c.text.trim() : '空')).filter(Boolean).slice(0, 5);
+            fullValues = dataCellsBelow.map(c => (c.text ? c.text.trim() : '空'));
+            sampleValues = fullValues.slice(0, 5);
           }
           candidateValue = null;
           valueLocation = { type: 'table_column', tableIdx, colIdx, startRow: rowIdx + 1, endRow: rowIdx + dataCellsBelow.length };
@@ -281,7 +284,8 @@ function findFieldCandidates(targetLabel, docItems) {
         context: item.text.trim(),
         suggestedValueLocation: valueLocation,
         candidateValue,
-        sampleValues
+        sampleValues,
+        fullValues: fullValues || []
       });
     }
   }

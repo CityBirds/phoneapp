@@ -135,6 +135,21 @@ function validateTemplateThreeInOne(tmpl) {
     return { valid: false, reason: `存在未绑定写回字段: ${unbound.map(u => u.label).join(', ')}` };
   }
 
+  if (tmpl.type === 'cert') {
+    const tc = mappings.tableConfig;
+    const tps = Array.isArray(mappings.testPoints) ? mappings.testPoints : [];
+    const hasValidTableConfig = tc &&
+      ((typeof tc.standardCol === 'number') || (tc.standardCol && typeof tc.standardCol.colIdx === 'number')) &&
+      ((typeof tc.actualCol === 'number') || (tc.actualCol && typeof tc.actualCol.colIdx === 'number')) &&
+      typeof tc.startRow === 'number' &&
+      typeof tc.endRow === 'number' &&
+      tc.endRow >= tc.startRow;
+    const hasValidTestPoints = tps.length > 0;
+    if (!hasValidTableConfig && !hasValidTestPoints) {
+      return { valid: false, reason: '证书模板缺少有效测量点表格区（标准值列/实测值列/数据范围）' };
+    }
+  }
+
   return { valid: true, mappings };
 }
 
@@ -143,7 +158,7 @@ function syncPublishedBundlesForModel(modelName) {
   const resolved = resolveModelAlias(modelName);
   const mName = resolved.displayName;
 
-  const allTemplates = db.prepare("SELECT * FROM templates WHERE model = ?").all(mName);
+  const allTemplates = db.prepare("SELECT * FROM templates WHERE model = ? AND published_at IS NOT NULL").all(mName);
   
   const validCertTmpls = [];
   const validPackTmpls = [];
@@ -474,13 +489,22 @@ app.get('/api/clients/:id', (req, res) => {
 });
 
 app.put('/api/clients/:id', requireAdminAccess, (req, res) => {
-  const { id } = req.params;
-  const { name } = req.body;
-  if (!name) return res.status(400).json({ error: 'Name is required' });
+  try {
+    const { id } = req.params;
+    const { name } = req.body;
+    if (!name || typeof name !== 'string' || !name.trim()) {
+      return res.status(400).json({ error: '客户端姓名不能为空' });
+    }
+    const cleanName = name.trim();
+    const existing = db.prepare('SELECT * FROM clients WHERE id = ?').get(id);
+    if (!existing) return res.status(404).json({ error: '客户端不存在' });
 
-  db.prepare('UPDATE clients SET name = ? WHERE id = ?').run(name, id);
-  logAudit(null, id, name, 'RENAME_CLIENT', { id, newName: name });
-  res.json({ success: true, id, name });
+    db.prepare('UPDATE clients SET name = ? WHERE id = ?').run(cleanName, id);
+    logAudit(null, id, cleanName, 'RENAME_CLIENT', { id, oldName: existing.name, newName: cleanName });
+    res.json({ success: true, id, name: cleanName });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ==================== WORKER & PRINTER MONITORING ====================
@@ -557,7 +581,38 @@ app.get('/api/workers', (req, res) => {
 });
 
 // ==================== PUBLISHED BUNDLES & MODELS ====================
+// Helper: Check path containment strictly without prefix bug (DIR-13, WC-08)
+function isSubpath(parent, child) {
+  if (!parent || !child) return false;
+  const normParent = path.resolve(parent);
+  const normChild = path.resolve(child);
+  const pLower = process.platform === 'win32' ? normParent.toLowerCase() : normParent;
+  const cLower = process.platform === 'win32' ? normChild.toLowerCase() : normChild;
+  if (pLower === cLower) return true;
+  const rel = path.relative(normParent, normChild);
+  return !rel.startsWith('..') && !path.isAbsolute(rel);
+}
+
+// Helper: Check whether targetPath is within worker's authorized paths (E04, WC-07, WC-08)
+function isPathInWorkerAllowedPaths(workerId, targetPath, requireWrite = true, strict = false) {
+  const allowed = db.prepare('SELECT * FROM worker_allowed_paths WHERE worker_id = ?').all(workerId);
+  if (allowed.length === 0) {
+    if (strict) {
+      return { allowed: false, reason: `执行端尚未配置任何允许访问的业务路径 (E04)` };
+    }
+    return { allowed: true, isLegacy: true };
+  }
+  for (const ap of allowed) {
+    if (requireWrite && !ap.allow_write) continue;
+    if (isSubpath(ap.root_path, targetPath)) {
+      return { allowed: true, allowedPath: ap.root_path };
+    }
+  }
+  return { allowed: false, reason: `保存根目录 [${targetPath}] 未包含在执行端允许${requireWrite ? '写入' : '访问'}的业务路径范围内 (E04, WC-08)` };
+}
+
 app.get('/api/published-bundles', (req, res) => {
+  const { workerId } = req.query;
   const rawBundles = db.prepare("SELECT * FROM published_bundles WHERE status = 'PUBLISHED' ORDER BY id ASC").all();
   const validBundles = [];
 
@@ -585,12 +640,77 @@ app.get('/api/published-bundles', (req, res) => {
     let configSnapshot = {};
     try { configSnapshot = JSON.parse(b.config_snapshot || '{}'); } catch (e) {}
 
-    validBundles.push({
-      ...b,
-      config_snapshot: configSnapshot,
-      certTemplate: certTmpl ? { ...certTmpl, field_mappings: JSON.parse(certTmpl.field_mappings || '{}') } : null,
-      packingTemplate: packTmpl ? { ...packTmpl, field_mappings: JSON.parse(packTmpl.field_mappings || '{}') } : null
-    });
+    // When workerId is specified, filter by worker enablement and determine effective docCombo (Section 5, WC-11, WC-12)
+    if (workerId) {
+      const certCfg = certTmpl ? db.prepare('SELECT * FROM worker_save_configs WHERE worker_id = ? AND template_id = ? AND doc_type = ?').get(workerId, certTmpl.id, 'cert') : null;
+      const packCfg = packTmpl ? db.prepare('SELECT * FROM worker_save_configs WHERE worker_id = ? AND template_id = ? AND doc_type = ?').get(workerId, packTmpl.id, 'packing') : null;
+
+      const certEnabled = certCfg && Boolean(certCfg.is_enabled);
+      const packEnabled = packCfg && Boolean(packCfg.is_enabled);
+
+      let effectiveCombo = null;
+      if (certEnabled && packEnabled) effectiveCombo = 'cert_and_packing';
+      else if (certEnabled) effectiveCombo = 'cert_only';
+      else if (packEnabled) effectiveCombo = 'packing_only';
+      else {
+        // Neither enabled -> Model not visible on this worker (WC-11, Section 5)
+        return;
+      }
+
+      // Check readiness of enabled templates (WC-13, Section 5)
+      let isReady = true;
+      const unreadyReasons = [];
+
+      if (effectiveCombo === 'cert_and_packing' || effectiveCombo === 'cert_only') {
+        if (!certCfg || !certCfg.root_dir) {
+          isReady = false;
+          unreadyReasons.push('缺少证书模板保存目录配置');
+        } else if (certCfg.check_status !== 'PASSED') {
+          isReady = false;
+          unreadyReasons.push(`证书保存目录检查未通过(${certCfg.check_status}: ${certCfg.check_message || '待检查'})`);
+        } else {
+          const authCheck = isPathInWorkerAllowedPaths(workerId, certCfg.root_dir, true);
+          if (!authCheck.allowed) {
+            isReady = false;
+            unreadyReasons.push(authCheck.reason);
+          }
+        }
+      }
+
+      if (effectiveCombo === 'cert_and_packing' || effectiveCombo === 'packing_only') {
+        if (!packCfg || !packCfg.root_dir) {
+          isReady = false;
+          unreadyReasons.push('缺少装箱清单模板保存目录配置');
+        } else if (packCfg.check_status !== 'PASSED') {
+          isReady = false;
+          unreadyReasons.push(`清单保存目录检查未通过(${packCfg.check_status}: ${packCfg.check_message || '待检查'})`);
+        } else {
+          const authCheck = isPathInWorkerAllowedPaths(workerId, packCfg.root_dir, true);
+          if (!authCheck.allowed) {
+            isReady = false;
+            unreadyReasons.push(authCheck.reason);
+          }
+        }
+      }
+
+      validBundles.push({
+        ...b,
+        doc_combo: effectiveCombo,
+        is_ready: isReady,
+        unready_reason: unreadyReasons.join('; '),
+        config_snapshot: configSnapshot,
+        certTemplate: configSnapshot.certTemplate || (certTmpl ? { ...certTmpl, field_mappings: JSON.parse(certTmpl.field_mappings || '{}') } : null),
+        packingTemplate: configSnapshot.packingTemplate || (packTmpl ? { ...packTmpl, field_mappings: JSON.parse(packTmpl.field_mappings || '{}') } : null)
+      });
+    } else {
+      validBundles.push({
+        ...b,
+        is_ready: true,
+        config_snapshot: configSnapshot,
+        certTemplate: configSnapshot.certTemplate || (certTmpl ? { ...certTmpl, field_mappings: JSON.parse(certTmpl.field_mappings || '{}') } : null),
+        packingTemplate: configSnapshot.packingTemplate || (packTmpl ? { ...packTmpl, field_mappings: JSON.parse(packTmpl.field_mappings || '{}') } : null)
+      });
+    }
   });
 
   res.json(validBundles);
@@ -608,7 +728,8 @@ app.get('/api/models', (req, res) => {
 app.get('/api/templates', (req, res) => {
   const tmpls = db.prepare('SELECT * FROM templates ORDER BY published_at DESC').all().map(t => ({
     ...t,
-    field_mappings: JSON.parse(t.field_mappings || '{}')
+    field_mappings: JSON.parse(t.draft_mappings || t.field_mappings || '{}'),
+    is_draft: !!t.draft_mappings
   }));
   res.json(tmpls);
 });
@@ -698,7 +819,8 @@ app.get('/api/templates/:id/analyze', (req, res) => {
   res.json({
     template: {
       ...tmpl,
-      field_mappings: JSON.parse(tmpl.field_mappings || '{}')
+      field_mappings: JSON.parse(tmpl.draft_mappings || tmpl.field_mappings || '{}'),
+      is_draft: !!tmpl.draft_mappings
     },
     docItemsCount: docItems.length,
     targetLabels,
@@ -725,51 +847,636 @@ app.post('/api/templates/publish', requireAdminAccess, (req, res) => {
   }
 
   const filePath = existingTmpl ? existingTmpl.filepath : path.join(uploadDir, filename);
-
-  if (!isDraft) {
-    const mappings = fieldMappings || {};
-    const singleFields = Array.isArray(mappings.singleFields) ? mappings.singleFields : [];
-    const unbound = singleFields.filter(f => f.status === 'unbound');
-    if (unbound.length > 0) {
-      return res.status(400).json({
-        error: `存在未绑定字段 (${unbound.map(u => u.label).join(', ')})，不能正式发布！请先完成字段绑定或保存为草稿。`
-      });
-    }
-
-    // Three-in-One Check
-    if (!fs.existsSync(filePath) && !existingTmpl) {
-      return res.status(400).json({ error: `无法发布：物理文件在磁盘上不存在 (${filePath})` });
-    }
-    if (fs.existsSync(filePath) && existingTmpl && existingTmpl.file_hash) {
-      const currentHash = getFileSha256(filePath);
-      if (currentHash !== existingTmpl.file_hash) {
-        return res.status(400).json({ error: `无法发布：模板文件 SHA256 哈希校验失败 (磁盘 ${currentHash} vs 数据库 ${existingTmpl.file_hash})` });
-      }
-    }
-  }
+  const existingMappings = existingTmpl && existingTmpl.field_mappings ? JSON.parse(existingTmpl.field_mappings) : {};
+  const existingDraft = existingTmpl && existingTmpl.draft_mappings ? JSON.parse(existingTmpl.draft_mappings) : {};
+  const baseMappings = isDraft ? { ...existingMappings, ...existingDraft } : existingMappings;
+  const mergedMappings = { ...baseMappings, ...(fieldMappings || {}) };
 
   const tmplId = id || (existingTmpl ? existingTmpl.id : `tmpl_${model.toLowerCase()}_${type}`);
   const now = new Date().toISOString();
   const fileHash = getFileSha256(filePath) || (existingTmpl ? existingTmpl.file_hash : 'hash_' + Date.now());
 
-  const mergedMappings = { ...(existingTmpl && existingTmpl.field_mappings ? JSON.parse(existingTmpl.field_mappings) : {}), ...fieldMappings };
+  if (isDraft) {
+    // Draft save: update draft_mappings only, isolate from field_mappings, published_at, and published_bundles
+    const publishedAt = existingTmpl ? existingTmpl.published_at : null;
+    const fieldMappingsJson = existingTmpl ? existingTmpl.field_mappings : '{}';
 
+    db.prepare(`
+      INSERT INTO templates (id, model, type, filename, filepath, file_hash, version, field_mappings, draft_mappings, published_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        filename = excluded.filename,
+        filepath = excluded.filepath,
+        file_hash = excluded.file_hash,
+        version = excluded.version,
+        draft_mappings = excluded.draft_mappings
+    `).run(tmplId, model, type, filename, filePath, fileHash, version, fieldMappingsJson, JSON.stringify(mergedMappings), publishedAt);
+
+    logAudit(null, 'ADMIN', 'System', 'SAVE_DRAFT_TEMPLATE', { tmplId, model, type, version, isDraft: true });
+    return res.json({ success: true, tmplId, version, isDraft: true });
+  }
+
+  // Formal Publication Validations
+  const singleFields = Array.isArray(mergedMappings.singleFields) ? mergedMappings.singleFields : [];
+  const unbound = singleFields.filter(f => f.status === 'unbound');
+  if (unbound.length > 0) {
+    return res.status(400).json({
+      error: `存在未绑定字段 (${unbound.map(u => u.label).join(', ')})，不能正式发布！请先完成字段绑定或保存为草稿。`
+    });
+  }
+
+  // Three-in-One Check
+  if (!fs.existsSync(filePath) && !existingTmpl) {
+    return res.status(400).json({ error: `无法发布：物理文件在磁盘上不存在 (${filePath})` });
+  }
+  if (fs.existsSync(filePath) && existingTmpl && existingTmpl.file_hash) {
+    const currentHash = getFileSha256(filePath);
+    if (currentHash !== existingTmpl.file_hash) {
+      return res.status(400).json({ error: `无法发布：模板文件 SHA256 哈希校验失败 (磁盘 ${currentHash} vs 数据库 ${existingTmpl.file_hash})` });
+    }
+  }
+
+  // Measurement Table Check for formal publish of certificates
+  if (type === 'cert') {
+    const tc = mergedMappings.tableConfig;
+    const tps = Array.isArray(mergedMappings.testPoints) ? mergedMappings.testPoints : [];
+    const hasValidTableConfig = tc &&
+      ((typeof tc.standardCol === 'number') || (tc.standardCol && typeof tc.standardCol.colIdx === 'number')) &&
+      ((typeof tc.actualCol === 'number') || (tc.actualCol && typeof tc.actualCol.colIdx === 'number')) &&
+      typeof tc.startRow === 'number' &&
+      typeof tc.endRow === 'number' &&
+      tc.endRow >= tc.startRow;
+    const hasValidTestPoints = tps.length > 0;
+    if (!hasValidTableConfig && !hasValidTestPoints) {
+      return res.status(400).json({
+        error: '无法发布：证书模板缺少有效测量点表格区（标准值列、实测值列或数据行范围），请完成表格绑定或保存为草稿。'
+      });
+    }
+  }
+
+  // Formal publish: update field_mappings, clear draft_mappings, set published_at
   db.prepare(`
-    INSERT INTO templates (id, model, type, filename, filepath, file_hash, version, field_mappings, published_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO templates (id, model, type, filename, filepath, file_hash, version, field_mappings, draft_mappings, published_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
     ON CONFLICT(id) DO UPDATE SET
       filename = excluded.filename,
       filepath = excluded.filepath,
       file_hash = excluded.file_hash,
       version = excluded.version,
       field_mappings = excluded.field_mappings,
+      draft_mappings = NULL,
       published_at = excluded.published_at
   `).run(tmplId, model, type, filename, filePath, fileHash, version, JSON.stringify(mergedMappings), now);
 
   syncPublishedBundlesForModel(model);
 
-  logAudit(null, 'ADMIN', 'System', 'PUBLISH_TEMPLATE', { tmplId, model, type, version, isDraft });
-  res.json({ success: true, tmplId, version });
+  logAudit(null, 'ADMIN', 'System', 'PUBLISH_TEMPLATE', { tmplId, model, type, version, isDraft: false });
+  res.json({ success: true, tmplId, version, isDraft: false });
+});
+
+
+// ==================== WORKER SAVE DIRECTORY CENTRALIZED MANAGEMENT ====================
+
+// --- 1. Allowed Business Paths APIs (E02, E04, 4.2) ---
+app.get('/api/admin/workers/:workerId/allowed-paths', (req, res) => {
+  const { workerId } = req.params;
+  const paths = db.prepare('SELECT * FROM worker_allowed_paths WHERE worker_id = ? ORDER BY id ASC').all(workerId);
+  res.json(paths);
+});
+
+app.post('/api/admin/workers/:workerId/allowed-paths', requireAdminAccess, (req, res) => {
+  try {
+    const { workerId } = req.params;
+    const { id, rootPath, allowRead = true, allowWrite = true, allowCreate = false } = req.body;
+    if (!rootPath || typeof rootPath !== 'string' || !rootPath.trim()) {
+      return res.status(400).json({ error: '业务路径不能为空' });
+    }
+    const cleanPath = rootPath.trim();
+    const isAbs = path.isAbsolute(cleanPath) || /^[a-zA-Z]:[\\/]/.test(cleanPath);
+    if (!isAbs) {
+      return res.status(400).json({ error: `必须是合法的绝对路径: ${cleanPath}` });
+    }
+    if (/[<>"|?*]/.test(cleanPath.replace(/^[a-zA-Z]:/, ''))) {
+      return res.status(400).json({ error: `路径包含系统非法字符: ${cleanPath}` });
+    }
+
+    const now = new Date().toISOString();
+    const allowReadInt = allowRead ? 1 : 0;
+    const allowWriteInt = allowWrite ? 1 : 0;
+    const allowCreateInt = allowCreate ? 1 : 0;
+
+    let pathId = id;
+    let version = 1;
+    let existing = id ? db.prepare('SELECT * FROM worker_allowed_paths WHERE id = ?').get(id) :
+                        db.prepare('SELECT * FROM worker_allowed_paths WHERE worker_id = ? AND root_path = ?').get(workerId, cleanPath);
+
+    if (existing) {
+      pathId = existing.id;
+      version = (existing.version || 1) + 1;
+      db.prepare(`
+        UPDATE worker_allowed_paths
+        SET root_path = ?, allow_read = ?, allow_write = ?, allow_create = ?, version = ?,
+            sync_status = 'PENDING', check_status = 'PENDING',
+            check_message = '配置已更新，待同步并检查', checked_at = NULL, updated_at = ?
+        WHERE id = ?
+      `).run(cleanPath, allowReadInt, allowWriteInt, allowCreateInt, version, now, existing.id);
+    } else {
+      const ins = db.prepare(`
+        INSERT INTO worker_allowed_paths (
+          worker_id, root_path, allow_read, allow_write, allow_create, version,
+          sync_status, check_status, check_message, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 1, 'PENDING', 'PENDING', '待检查', ?, ?)
+      `).run(workerId, cleanPath, allowReadInt, allowWriteInt, allowCreateInt, now, now);
+      pathId = ins.lastInsertRowid;
+    }
+
+    // Queue check if worker is online
+    const worker = db.prepare('SELECT * FROM workers WHERE id = ?').get(workerId);
+    const isOnline = worker && worker.last_heartbeat && (Date.now() - new Date(worker.last_heartbeat).getTime() < 15000);
+    if (isOnline) {
+      try {
+        db.prepare(`
+          INSERT INTO worker_directory_checks (check_type, target_id, worker_id, version, root_dir, allow_create, allow_read, allow_write, status, created_at)
+          VALUES ('allowed_path', ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?)
+        `).run(pathId, workerId, version, cleanPath, allowCreateInt, allowReadInt, allowWriteInt, now);
+        db.prepare("UPDATE worker_allowed_paths SET check_status = 'CHECKING', check_message = '正在请求执行端检查...' WHERE id = ?").run(pathId);
+      } catch (chkErr) {
+        console.error('Failed to queue directory check task:', chkErr);
+        db.prepare("UPDATE worker_allowed_paths SET check_status = 'FAILED', check_message = ? WHERE id = ?").run(`检查任务创建失败: ${chkErr.message}`, pathId);
+      }
+    }
+
+    const saved = db.prepare('SELECT * FROM worker_allowed_paths WHERE id = ?').get(pathId);
+    res.json({ success: true, allowedPath: saved });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/admin/workers/:workerId/allowed-paths/:id', requireAdminAccess, (req, res) => {
+  const { workerId, id } = req.params;
+  const ap = db.prepare('SELECT * FROM worker_allowed_paths WHERE id = ? AND worker_id = ?').get(id, workerId);
+  if (!ap) return res.status(404).json({ error: '业务路径不存在' });
+
+  db.prepare('DELETE FROM worker_allowed_paths WHERE id = ?').run(id);
+  db.prepare("DELETE FROM worker_directory_checks WHERE check_type = 'allowed_path' AND target_id = ?").run(id);
+
+  // Invalidate affected save configs (Section 4.2)
+  const configs = db.prepare('SELECT * FROM worker_save_configs WHERE worker_id = ?').all(workerId);
+  for (const c of configs) {
+    if (isSubpath(ap.root_path, c.root_dir)) {
+      db.prepare(`
+        UPDATE worker_save_configs
+        SET check_status = 'PENDING', check_message = '关联的授权业务路径已删除，需重新配置或检查',
+            version = version + 1, updated_at = ?
+        WHERE id = ?
+      `).run(new Date().toISOString(), c.id);
+    }
+  }
+  res.json({ success: true });
+});
+
+app.post('/api/admin/workers/:workerId/allowed-paths/:id/check', requireAdminAccess, (req, res) => {
+  try {
+    const { workerId, id } = req.params;
+    const ap = db.prepare('SELECT * FROM worker_allowed_paths WHERE id = ? AND worker_id = ?').get(id, workerId);
+    if (!ap) return res.status(404).json({ error: '业务路径不存在' });
+
+    const worker = db.prepare('SELECT * FROM workers WHERE id = ?').get(workerId);
+    const isOnline = worker && worker.last_heartbeat && (Date.now() - new Date(worker.last_heartbeat).getTime() < 15000);
+
+    if (!isOnline) {
+      db.prepare(`
+        UPDATE worker_allowed_paths
+        SET check_status = 'PENDING', check_message = '执行端当前离线，待上线后检查 (DIR-08)'
+        WHERE id = ?
+      `).run(id);
+      return res.status(400).json({ success: false, offline: true, error: `执行端 [${worker ? worker.name : workerId}] 当前离线，无法进行探测 (DIR-08)` });
+    }
+
+    try {
+      db.prepare(`
+        INSERT INTO worker_directory_checks (check_type, target_id, worker_id, version, root_dir, allow_create, allow_read, allow_write, status, created_at)
+        VALUES ('allowed_path', ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?)
+      `).run(ap.id, workerId, ap.version, ap.root_path, ap.allow_create || 0, ap.allow_read || 1, ap.allow_write || 1, new Date().toISOString());
+
+      db.prepare("UPDATE worker_allowed_paths SET check_status = 'CHECKING', check_message = '正在请求执行端检查...' WHERE id = ?").run(id);
+      res.json({ success: true, message: '检查请求已下发' });
+    } catch (chkErr) {
+      console.error('Failed to create directory check task:', chkErr);
+      db.prepare("UPDATE worker_allowed_paths SET check_status = 'FAILED', check_message = ? WHERE id = ?").run(`检查任务创建失败: ${chkErr.message}`, id);
+      return res.status(500).json({ success: false, error: `检查任务创建失败: ${chkErr.message}` });
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- 2. Template Configs & Enablement per Worker (E03, 4.3) ---
+app.get('/api/admin/workers/:workerId/template-configs', (req, res) => {
+  const { workerId } = req.params;
+  const tmpls = db.prepare("SELECT * FROM templates ORDER BY model ASC, type ASC").all();
+  const configs = db.prepare("SELECT * FROM worker_save_configs WHERE worker_id = ?").all(workerId);
+  const map = new Map();
+  configs.forEach(c => map.set(`${c.template_id}_${c.doc_type}`, c));
+
+  const result = tmpls.map(t => {
+    const cfg = map.get(`${t.id}_${t.type}`);
+    return {
+      template_id: t.id,
+      model: t.model,
+      doc_type: t.type,
+      filename: t.filename,
+      config_id: cfg ? cfg.id : null,
+      is_enabled: cfg ? (cfg.is_enabled || 0) : 0,
+      root_dir: cfg ? (cfg.root_dir || '') : '',
+      save_mode: cfg ? (cfg.save_mode || 'direct') : 'direct',
+      subfolder_rule: cfg ? (cfg.subfolder_rule || 'deviceSn') : 'deviceSn',
+      allow_create: cfg ? (cfg.allow_create || 0) : 0,
+      version: cfg ? cfg.version : 1,
+      check_status: cfg ? cfg.check_status : 'PENDING',
+      check_message: cfg ? (cfg.check_message || '未配置') : '未配置',
+      checked_at: cfg ? cfg.checked_at : null
+    };
+  });
+  res.json(result);
+});
+
+app.post('/api/admin/workers/:workerId/template-configs', requireAdminAccess, (req, res) => {
+  const { workerId } = req.params;
+  const {
+    id,
+    templateId,
+    docType,
+    isEnabled = 0,
+    rootDir = '',
+    saveMode = 'direct',
+    subfolderRule = 'deviceSn',
+    allowCreate = 0
+  } = req.body;
+
+  if (!templateId || !docType) {
+    return res.status(400).json({ error: 'templateId 与 docType 为必填项' });
+  }
+
+  const cleanRootDir = (rootDir || '').trim();
+  if (cleanRootDir) {
+    const isAbs = path.isAbsolute(cleanRootDir) || /^[a-zA-Z]:[\\/]/.test(cleanRootDir);
+    if (!isAbs) return res.status(400).json({ error: `保存根目录必须是合法的绝对路径: ${cleanRootDir}` });
+
+    // Validate authorized write path boundary (E04, WC-08)
+    const authCheck = isPathInWorkerAllowedPaths(workerId, cleanRootDir, true, true);
+    if (!authCheck.allowed) {
+      return res.status(400).json({ error: authCheck.reason });
+    }
+  }
+
+  const now = new Date().toISOString();
+  const isEnabledInt = isEnabled ? 1 : 0;
+  const allowCreateInt = allowCreate ? 1 : 0;
+
+  let existing = id ? db.prepare('SELECT * FROM worker_save_configs WHERE id = ?').get(id) :
+                      db.prepare('SELECT * FROM worker_save_configs WHERE worker_id = ? AND template_id = ? AND doc_type = ?').get(workerId, templateId, docType);
+  let configId;
+  let version = 1;
+
+  if (existing) {
+    version = (existing.version || 1) + 1;
+    db.prepare(`
+      UPDATE worker_save_configs
+      SET root_dir = ?, save_mode = ?, subfolder_rule = ?, allow_create = ?,
+          is_enabled = ?, version = ?, check_status = 'PENDING',
+          check_message = '配置已更新，待重新检查', checked_at = NULL, updated_at = ?
+      WHERE id = ?
+    `).run(cleanRootDir, saveMode, subfolderRule, allowCreateInt, isEnabledInt, version, now, existing.id);
+    configId = existing.id;
+  } else {
+    const ins = db.prepare(`
+      INSERT INTO worker_save_configs (
+        worker_id, template_id, doc_type, root_dir, save_mode, subfolder_rule,
+        allow_create, is_enabled, version, check_status, check_message, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 'PENDING', '待检查', ?, ?)
+    `).run(workerId, templateId, docType, cleanRootDir, saveMode, subfolderRule, allowCreateInt, isEnabledInt, now, now);
+    configId = ins.lastInsertRowid;
+  }
+
+  const worker = db.prepare('SELECT * FROM workers WHERE id = ?').get(workerId);
+  const isOnline = worker && worker.last_heartbeat && (Date.now() - new Date(worker.last_heartbeat).getTime() < 15000);
+  if (isOnline && cleanRootDir) {
+    db.prepare(`
+      INSERT INTO worker_directory_checks (check_type, target_id, config_id, worker_id, version, root_dir, allow_create, status, created_at)
+      VALUES ('save_config', ?, ?, ?, ?, ?, ?, 'PENDING', ?)
+    `).run(configId, configId, workerId, version, cleanRootDir, allowCreateInt, now);
+  }
+
+  const saved = db.prepare('SELECT * FROM worker_save_configs WHERE id = ?').get(configId);
+  res.json({ success: true, config: saved });
+});
+
+app.post('/api/admin/workers/:workerId/template-configs/:id/check', requireAdminAccess, (req, res) => {
+  const { workerId, id } = req.params;
+  const config = db.prepare('SELECT * FROM worker_save_configs WHERE id = ? AND worker_id = ?').get(id, workerId);
+  if (!config) return res.status(404).json({ error: '目录配置不存在' });
+
+  const targetWorker = db.prepare('SELECT * FROM workers WHERE id = ?').get(workerId);
+  const isOnline = targetWorker && targetWorker.last_heartbeat && (Date.now() - new Date(targetWorker.last_heartbeat).getTime() < 15000);
+
+  if (!isOnline) {
+    db.prepare(`
+      UPDATE worker_save_configs
+      SET check_status = 'PENDING', check_message = '执行端当前离线，待上线后检查 (DIR-08)'
+      WHERE id = ?
+    `).run(id);
+    return res.status(400).json({
+      success: false,
+      offline: true,
+      error: `执行端 [${targetWorker ? targetWorker.name : workerId}] 当前离线，无法进行探测 (DIR-08)`
+    });
+  }
+
+  db.prepare("UPDATE worker_save_configs SET check_status = 'CHECKING', check_message = '正在请求执行端检查...' WHERE id = ?").run(id);
+  db.prepare(`
+    INSERT INTO worker_directory_checks (check_type, target_id, config_id, worker_id, version, root_dir, allow_create, status, created_at)
+    VALUES ('save_config', ?, ?, ?, ?, ?, ?, 'PENDING', ?)
+  `).run(config.id, config.id, workerId, config.version, config.root_dir, config.allow_create, new Date().toISOString());
+
+  res.json({ success: true, message: '检查请求已下发至执行端' });
+});
+
+// --- 3. Backward Compatibility Endpoints for /api/admin/worker-directories ---
+app.get('/api/admin/worker-directories', (req, res) => {
+  const { workerId, templateId } = req.query;
+  let query = `
+    SELECT c.*,
+           w.name as worker_name, w.status as worker_status,
+           t.filename as template_filename, t.model as template_model
+    FROM worker_save_configs c
+    LEFT JOIN workers w ON c.worker_id = w.id
+    LEFT JOIN templates t ON c.template_id = t.id
+    WHERE 1=1
+  `;
+  const params = [];
+  if (workerId) {
+    query += ' AND c.worker_id = ?';
+    params.push(workerId);
+  }
+  if (templateId) {
+    query += ' AND c.template_id = ?';
+    params.push(templateId);
+  }
+  query += ' ORDER BY c.id DESC';
+  const list = db.prepare(query).all(...params);
+  res.json(list);
+});
+
+app.post('/api/admin/worker-directories', requireAdminAccess, (req, res) => {
+  const {
+    id,
+    workerId,
+    templateId,
+    docType,
+    rootDir,
+    saveMode = 'direct',
+    subfolderRule = 'deviceSn',
+    allowCreate = false,
+    isEnabled = 1
+  } = req.body;
+
+  if (!workerId || !templateId || !docType || !rootDir) {
+    return res.status(400).json({ error: '执行端 (workerId)、模板 (templateId)、文档类型 (docType) 和保存根目录 (rootDir) 为必填项！' });
+  }
+
+  const isAbs = path.isAbsolute(rootDir) || /^[a-zA-Z]:[\\/]/.test(rootDir);
+  if (!isAbs) {
+    return res.status(400).json({ error: `保存根目录必须是合法的绝对路径: ${rootDir}` });
+  }
+
+  // Validate allowed paths if configured
+  const authCheck = isPathInWorkerAllowedPaths(workerId, rootDir, true);
+  if (!authCheck.allowed) {
+    return res.status(400).json({ error: authCheck.reason });
+  }
+
+  const now = new Date().toISOString();
+  const allowCreateInt = allowCreate ? 1 : 0;
+  const isEnabledInt = isEnabled ? 1 : 0;
+
+  let existing = id ? db.prepare('SELECT * FROM worker_save_configs WHERE id = ?').get(id) :
+                      db.prepare('SELECT * FROM worker_save_configs WHERE worker_id = ? AND template_id = ? AND doc_type = ?').get(workerId, templateId, docType);
+
+  let configId;
+  if (existing) {
+    const newVersion = (existing.version || 1) + 1;
+    db.prepare(`
+      UPDATE worker_save_configs
+      SET worker_id = ?, template_id = ?, doc_type = ?, root_dir = ?, save_mode = ?,
+          subfolder_rule = ?, allow_create = ?, is_enabled = ?, version = ?, check_status = 'PENDING',
+          check_message = '配置已更新，待重新检查', checked_at = NULL, updated_at = ?
+      WHERE id = ?
+    `).run(workerId, templateId, docType, rootDir, saveMode, subfolderRule, allowCreateInt, isEnabledInt, newVersion, now, existing.id);
+    configId = existing.id;
+  } else {
+    const result = db.prepare(`
+      INSERT INTO worker_save_configs (
+        worker_id, template_id, doc_type, root_dir, save_mode, subfolder_rule,
+        allow_create, is_enabled, version, check_status, check_message, checked_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 'PENDING', '待检查', NULL, ?, ?)
+    `).run(workerId, templateId, docType, rootDir, saveMode, subfolderRule, allowCreateInt, isEnabledInt, now, now);
+    configId = result.lastInsertRowid;
+  }
+
+  const saved = db.prepare('SELECT * FROM worker_save_configs WHERE id = ?').get(configId);
+  logAudit(null, 'ADMIN', 'System', 'SAVE_WORKER_DIRECTORY_CONFIG', { configId, workerId, templateId, docType, rootDir });
+  res.json({ success: true, config: saved });
+});
+
+app.delete('/api/admin/worker-directories/:id', requireAdminAccess, (req, res) => {
+  const { id } = req.params;
+  db.prepare('DELETE FROM worker_save_configs WHERE id = ?').run(id);
+  db.prepare('DELETE FROM worker_directory_checks WHERE config_id = ?').run(id);
+  res.json({ success: true, id });
+});
+
+app.post('/api/admin/worker-directories/:id/check', requireAdminAccess, (req, res) => {
+  const { id } = req.params;
+  const config = db.prepare('SELECT * FROM worker_save_configs WHERE id = ?').get(id);
+  if (!config) return res.status(404).json({ error: '目录配置不存在' });
+
+  const targetWorker = db.prepare('SELECT * FROM workers WHERE id = ?').get(config.worker_id);
+  const nowMs = Date.now();
+  const lastTimeMs = targetWorker && targetWorker.last_heartbeat ? new Date(targetWorker.last_heartbeat).getTime() : 0;
+  const isOnline = targetWorker && (nowMs - lastTimeMs) < 15000;
+
+  if (!isOnline) {
+    db.prepare(`
+      UPDATE worker_save_configs
+      SET check_status = 'PENDING', check_message = '执行端当前离线，待上线后检查 (DIR-08)'
+      WHERE id = ?
+    `).run(id);
+    return res.status(400).json({
+      success: false,
+      offline: true,
+      error: `执行端 [${targetWorker ? targetWorker.name : config.worker_id}] 当前离线，无法进行探测 (DIR-08)`
+    });
+  }
+
+  db.prepare("UPDATE worker_save_configs SET check_status = 'CHECKING', check_message = '正在请求执行端检查...' WHERE id = ?").run(id);
+  db.prepare(`
+    INSERT INTO worker_directory_checks (check_type, target_id, config_id, worker_id, version, root_dir, allow_create, status, created_at)
+    VALUES ('save_config', ?, ?, ?, ?, ?, ?, 'PENDING', ?)
+  `).run(config.id, config.id, config.worker_id, config.version, config.root_dir, config.allow_create, new Date().toISOString());
+
+  res.json({ success: true, message: '目录检查请求已下发至执行端' });
+});
+
+// --- 4. Worker Check Queue & Authorizations Sync ---
+app.get('/api/worker/directory-checks/pending', (req, res) => {
+  const { workerId = 'worker-local' } = req.query;
+  const checks = db.prepare(`
+    SELECT * FROM worker_directory_checks
+    WHERE (worker_id = ? OR worker_id = 'worker-local') AND status = 'PENDING'
+    ORDER BY id ASC
+  `).all(workerId);
+  res.json(checks);
+});
+
+app.post('/api/worker/directory-checks/result', (req, res) => {
+  const { checkId, checkType = 'save_config', targetId, configId, version, status, message } = req.body;
+  const finalId = targetId || configId;
+
+  if (checkType === 'allowed_path') {
+    const ap = db.prepare('SELECT * FROM worker_allowed_paths WHERE id = ?').get(finalId);
+    if (ap && ap.version === version) {
+      db.prepare(`
+        UPDATE worker_allowed_paths
+        SET check_status = ?, check_message = ?, sync_status = 'SYNCED', checked_at = ?
+        WHERE id = ?
+      `).run(status, message || '', new Date().toISOString(), finalId);
+    }
+  } else {
+    const config = db.prepare('SELECT * FROM worker_save_configs WHERE id = ?').get(finalId);
+    if (config && config.version === version) {
+      db.prepare(`
+        UPDATE worker_save_configs
+        SET check_status = ?, check_message = ?, checked_at = ?
+        WHERE id = ?
+      `).run(status, message || '', new Date().toISOString(), finalId);
+    }
+  }
+
+  if (checkId) {
+    db.prepare("UPDATE worker_directory_checks SET status = 'DONE' WHERE id = ?").run(checkId);
+  }
+  res.json({ success: true });
+});
+
+app.get('/api/worker/authorizations', (req, res) => {
+  const { workerId } = req.query;
+  if (!workerId) return res.status(400).json({ error: '缺少 workerId' });
+  const paths = db.prepare('SELECT id, root_path, allow_read, allow_write, version FROM worker_allowed_paths WHERE worker_id = ?').all(workerId);
+  res.json({ workerId, allowedPaths: paths });
+});
+
+app.post('/api/worker/authorizations/sync', (req, res) => {
+  const { workerId, version } = req.body;
+  if (workerId) {
+    db.prepare("UPDATE worker_allowed_paths SET sync_status = 'SYNCED' WHERE worker_id = ?").run(workerId);
+  }
+  res.json({ success: true });
+});
+
+// --- 5. Validate Directories for Tasks (DIR-06, DIR-07, E03, E04) ---
+app.post('/api/tasks/validate-directories', (req, res) => {
+  const { workerId, model, bundleId, docCombo } = req.body;
+  if (!workerId || !model) {
+    return res.status(400).json({ valid: false, errors: ['缺少 workerId 或 model'] });
+  }
+  const resolvedModel = resolveModelAlias(model);
+  let bundle = null;
+  if (bundleId) bundle = db.prepare('SELECT * FROM published_bundles WHERE bundle_id = ?').get(bundleId);
+  if (!bundle) bundle = db.prepare('SELECT * FROM published_bundles WHERE model_id = ?').get(resolvedModel.modelId);
+
+  const effectiveCombo = docCombo || (bundle ? bundle.doc_combo : (resolvedModel.displayName === 'POA200' ? 'cert_and_packing' : 'cert_only'));
+  const needCert = effectiveCombo === 'cert_and_packing' || effectiveCombo === 'cert_only';
+  const needPacking = effectiveCombo === 'cert_and_packing' || effectiveCombo === 'packing_only';
+
+  const errors = [];
+  const details = [];
+
+  const targetWorker = db.prepare('SELECT * FROM workers WHERE id = ?').get(workerId);
+  const workerName = targetWorker ? targetWorker.name : workerId;
+
+  if (needCert) {
+    let certTmpl = null;
+    if (bundle && bundle.cert_template_id) {
+      certTmpl = db.prepare('SELECT * FROM templates WHERE id = ?').get(bundle.cert_template_id);
+    }
+    if (!certTmpl) {
+      certTmpl = db.prepare("SELECT * FROM templates WHERE (model = ? OR model = ?) AND type = 'cert' AND published_at IS NOT NULL").get(model, resolvedModel.displayName);
+    }
+    if (!certTmpl) {
+      certTmpl = db.prepare("SELECT * FROM templates WHERE (model = ? OR model = ?) AND type = 'cert'").get(model, resolvedModel.displayName);
+    }
+
+    if (!certTmpl) {
+      errors.push(`未找到 ${resolvedModel.displayName} 对应的发货证书模板`);
+    } else {
+      const certCfg = db.prepare('SELECT * FROM worker_save_configs WHERE worker_id = ? AND template_id = ? AND doc_type = \'cert\'').get(workerId, certTmpl.id);
+      if (!certCfg) {
+        errors.push(`执行端 [${workerName}] 缺少证书模板 [${certTmpl.filename}] 的保存目录配置！(DIR-06)`);
+      } else if (!certCfg.is_enabled) {
+        errors.push(`执行端 [${workerName}] 未启用发货证书模板 [${certTmpl.filename}] (E03, WC-14)`);
+      } else if (certCfg.check_status !== 'PASSED') {
+        errors.push(`执行端 [${workerName}] 证书模板保存目录尚未检查通过（当前状态: ${certCfg.check_status}，原因: ${certCfg.check_message || '待检查'}）！(DIR-06)`);
+      } else {
+        const authCheck = isPathInWorkerAllowedPaths(workerId, certCfg.root_dir, true);
+        if (!authCheck.allowed) {
+          errors.push(authCheck.reason);
+        } else {
+          details.push({ type: 'cert', rootDir: certCfg.root_dir, saveMode: certCfg.save_mode, status: 'PASSED' });
+        }
+      }
+    }
+  }
+
+  if (needPacking) {
+    let packTmpl = null;
+    if (bundle && bundle.packing_template_id) {
+      packTmpl = db.prepare('SELECT * FROM templates WHERE id = ?').get(bundle.packing_template_id);
+    }
+    if (!packTmpl) {
+      packTmpl = db.prepare("SELECT * FROM templates WHERE (model = ? OR model = ?) AND type = 'packing' AND published_at IS NOT NULL").get(model, resolvedModel.displayName);
+    }
+    if (!packTmpl) {
+      packTmpl = db.prepare("SELECT * FROM templates WHERE (model = ? OR model = ?) AND type = 'packing'").get(model, resolvedModel.displayName);
+    }
+
+    if (!packTmpl) {
+      errors.push(`未找到 ${resolvedModel.displayName} 对应的装箱清单模板`);
+    } else {
+      const packCfg = db.prepare('SELECT * FROM worker_save_configs WHERE worker_id = ? AND template_id = ? AND doc_type = \'packing\'').get(workerId, packTmpl.id);
+      if (!packCfg) {
+        errors.push(`执行端 [${workerName}] 缺少装箱清单模板 [${packTmpl.filename}] 的保存目录配置！(DIR-07)`);
+      } else if (!packCfg.is_enabled) {
+        errors.push(`执行端 [${workerName}] 未启用装箱清单模板 [${packTmpl.filename}] (E03, WC-14)`);
+      } else if (packCfg.check_status !== 'PASSED') {
+        errors.push(`执行端 [${workerName}] 装箱清单保存目录尚未检查通过（当前状态: ${packCfg.check_status}，原因: ${packCfg.check_message || '待检查'}）！(DIR-07)`);
+      } else {
+        const authCheck = isPathInWorkerAllowedPaths(workerId, packCfg.root_dir, true);
+        if (!authCheck.allowed) {
+          errors.push(authCheck.reason);
+        } else {
+          details.push({ type: 'packing', rootDir: packCfg.root_dir, saveMode: packCfg.save_mode, status: 'PASSED' });
+        }
+      }
+    }
+  }
+
+  res.json({
+    valid: errors.length === 0,
+    errors,
+    details
+  });
 });
 
 // ==================== TASK SUBMISSION & DEDUPLICATION ====================
@@ -882,6 +1589,138 @@ app.post('/api/tasks/submit', (req, res) => {
   const createCert = effectiveCombo === 'cert_and_packing' || effectiveCombo === 'cert_only';
   const createPacking = effectiveCombo === 'cert_and_packing' || effectiveCombo === 'packing_only';
 
+  // Directory Configuration & Snapshotting (DIR-06, DIR-07, DIR-13, DIR-15)
+  let certDirSnapshot = null;
+  let packingDirSnapshot = null;
+
+  if (createCert) {
+    let certTmpl = null;
+    if (bundle && bundle.cert_template_id) {
+      certTmpl = db.prepare('SELECT * FROM templates WHERE id = ?').get(bundle.cert_template_id);
+    }
+    if (!certTmpl) {
+      certTmpl = db.prepare("SELECT * FROM templates WHERE (model = ? OR model = ?) AND type = 'cert' AND published_at IS NOT NULL").get(model, resolvedModel.displayName);
+    }
+    if (!certTmpl) {
+      certTmpl = db.prepare("SELECT * FROM templates WHERE (model = ? OR model = ?) AND type = 'cert'").get(model, resolvedModel.displayName);
+    }
+
+    if (!certTmpl) {
+      return res.status(400).json({ error: `未找到 ${resolvedModel.displayName} 对应的发货证书模板` });
+    }
+
+    const certCfg = db.prepare('SELECT * FROM worker_save_configs WHERE worker_id = ? AND template_id = ? AND doc_type = \'cert\'').get(workerId, certTmpl.id);
+    if (!certCfg) {
+      return res.status(400).json({
+        error: `缺少执行端 [${targetWorker.name || workerId}] 的证书模板 [${certTmpl.filename}] 的保存目录配置！(DIR-06)`
+      });
+    }
+    if (!certCfg.is_enabled) {
+      return res.status(400).json({
+        error: `该模板已被管理员在执行端停用，请刷新页面重新获取可用模板 (WC-14)`
+      });
+    }
+    if (certCfg.check_status !== 'PASSED') {
+      return res.status(400).json({
+        error: `执行端 [${targetWorker.name || workerId}] 的证书模板 [${certTmpl.filename}] 的保存目录尚未检查通过（当前状态: ${certCfg.check_status}，原因: ${certCfg.check_message || '待检查'}）！(DIR-06)`
+      });
+    }
+    const certAuth = isPathInWorkerAllowedPaths(workerId, certCfg.root_dir, true);
+    if (!certAuth.allowed) {
+      return res.status(400).json({ error: certAuth.reason });
+    }
+    let targetDir = certCfg.root_dir;
+    let subfolderName = '';
+    if (certCfg.save_mode === 'subfolder') {
+      const ruleKey = certCfg.subfolder_rule || 'deviceSn';
+      const ruleVal = ruleKey === 'deviceSn' ? String(deviceSn).trim() : String(req.body[ruleKey] || '').trim();
+      if (!ruleVal) {
+        return res.status(400).json({ error: `子文件夹规则字段 [${ruleKey}] 缺失或为空，无法建立子文件夹！(DIR-13)` });
+      }
+      if (ruleVal.includes('..') || ruleVal.includes('/') || ruleVal.includes('\\') || /[<>:"|?*]/.test(ruleVal)) {
+        return res.status(400).json({ error: `子文件夹名称包含非法字符或试图跳出根目录 [${ruleVal}]！(DIR-13)` });
+      }
+      subfolderName = ruleVal;
+      targetDir = path.join(certCfg.root_dir, subfolderName);
+      const rel = path.relative(certCfg.root_dir, targetDir);
+      if (rel.startsWith('..') || (path.isAbsolute(rel) && !rel.startsWith(certCfg.root_dir))) {
+        return res.status(400).json({ error: `安全拦截：子文件夹路径试图跳出根目录范围！(DIR-13)` });
+      }
+    }
+
+    certDirSnapshot = {
+      targetDir,
+      rootDir: certCfg.root_dir,
+      subfolderName,
+      configId: certCfg.id,
+      version: certCfg.version
+    };
+  }
+
+  if (createPacking) {
+    let packTmpl = null;
+    if (bundle && bundle.packing_template_id) {
+      packTmpl = db.prepare('SELECT * FROM templates WHERE id = ?').get(bundle.packing_template_id);
+    }
+    if (!packTmpl) {
+      packTmpl = db.prepare("SELECT * FROM templates WHERE (model = ? OR model = ?) AND type = 'packing' AND published_at IS NOT NULL").get(model, resolvedModel.displayName);
+    }
+    if (!packTmpl) {
+      packTmpl = db.prepare("SELECT * FROM templates WHERE (model = ? OR model = ?) AND type = 'packing'").get(model, resolvedModel.displayName);
+    }
+
+    if (!packTmpl) {
+      return res.status(400).json({ error: `未找到 ${resolvedModel.displayName} 对应的装箱清单模板` });
+    }
+
+    const packCfg = db.prepare('SELECT * FROM worker_save_configs WHERE worker_id = ? AND template_id = ? AND doc_type = \'packing\'').get(workerId, packTmpl.id);
+    if (!packCfg) {
+      return res.status(400).json({
+        error: `缺少执行端 [${targetWorker.name || workerId}] 的装箱清单模板 [${packTmpl.filename}] 的保存目录配置！(DIR-07)`
+      });
+    }
+    if (!packCfg.is_enabled) {
+      return res.status(400).json({
+        error: `该模板已被管理员在执行端停用，请刷新页面重新获取可用模板 (WC-14)`
+      });
+    }
+    if (packCfg.check_status !== 'PASSED') {
+      return res.status(400).json({
+        error: `执行端 [${targetWorker.name || workerId}] 的装箱清单模板 [${packTmpl.filename}] 的保存目录尚未检查通过（当前状态: ${packCfg.check_status}，原因: ${packCfg.check_message || '待检查'}）！(DIR-07)`
+      });
+    }
+    const packAuth = isPathInWorkerAllowedPaths(workerId, packCfg.root_dir, true);
+    if (!packAuth.allowed) {
+      return res.status(400).json({ error: packAuth.reason });
+    }
+    let targetDir = packCfg.root_dir;
+    let subfolderName = '';
+    if (packCfg.save_mode === 'subfolder') {
+      const ruleKey = packCfg.subfolder_rule || 'deviceSn';
+      const ruleVal = ruleKey === 'deviceSn' ? String(deviceSn).trim() : String(req.body[ruleKey] || '').trim();
+      if (!ruleVal) {
+        return res.status(400).json({ error: `子文件夹规则字段 [${ruleKey}] 缺失或为空，无法建立子文件夹！(DIR-13)` });
+      }
+      if (ruleVal.includes('..') || ruleVal.includes('/') || ruleVal.includes('\\') || /[<>:"|?*]/.test(ruleVal)) {
+        return res.status(400).json({ error: `子文件夹名称包含非法字符或试图跳出根目录 [${ruleVal}]！(DIR-13)` });
+      }
+      subfolderName = ruleVal;
+      targetDir = path.join(packCfg.root_dir, subfolderName);
+      const rel = path.relative(packCfg.root_dir, targetDir);
+      if (rel.startsWith('..') || (path.isAbsolute(rel) && !rel.startsWith(packCfg.root_dir))) {
+        return res.status(400).json({ error: `安全拦截：子文件夹路径试图跳出根目录范围！(DIR-13)` });
+      }
+    }
+
+    packingDirSnapshot = {
+      targetDir,
+      rootDir: packCfg.root_dir,
+      subfolderName,
+      configId: packCfg.id,
+      version: packCfg.version
+    };
+  }
+
   const ambientTemp = (req.body.ambientTemp !== undefined && req.body.ambientTemp !== null && req.body.ambientTemp !== '') ? String(req.body.ambientTemp) : '22.1';
   const relativeHumidity = (req.body.relativeHumidity !== undefined && req.body.relativeHumidity !== null && req.body.relativeHumidity !== '') ? String(req.body.relativeHumidity) : '50%RH';
 
@@ -906,7 +1745,7 @@ app.post('/api/tasks/submit', (req, res) => {
 
   const taskId = result.lastInsertRowid;
 
-  // Create Task Files
+  // Create Task Files with Target Directory Snapshot (DIR-15)
   if (createCert) {
     const certOfficialName = generateCertFilename({
       model: resolvedModel.displayName,
@@ -918,9 +1757,9 @@ app.post('/api/tasks/submit', (req, res) => {
     });
 
     db.prepare(`
-      INSERT INTO task_files (task_id, file_type, official_filename, status)
-      VALUES (?, 'cert', ?, 'GENERATING')
-    `).run(taskId, certOfficialName);
+      INSERT INTO task_files (task_id, file_type, official_filename, status, target_dir, root_dir, subfolder_name, dir_config_id, dir_config_version)
+      VALUES (?, 'cert', ?, 'GENERATING', ?, ?, ?, ?, ?)
+    `).run(taskId, certOfficialName, certDirSnapshot.targetDir, certDirSnapshot.rootDir, certDirSnapshot.subfolderName, certDirSnapshot.configId, certDirSnapshot.version);
   }
 
   if (createPacking) {
@@ -932,9 +1771,9 @@ app.post('/api/tasks/submit', (req, res) => {
     });
 
     db.prepare(`
-      INSERT INTO task_files (task_id, file_type, official_filename, status)
-      VALUES (?, 'packing', ?, 'GENERATING')
-    `).run(taskId, packingOfficialName);
+      INSERT INTO task_files (task_id, file_type, official_filename, status, target_dir, root_dir, subfolder_name, dir_config_id, dir_config_version)
+      VALUES (?, 'packing', ?, 'GENERATING', ?, ?, ?, ?, ?)
+    `).run(taskId, packingOfficialName, packingDirSnapshot.targetDir, packingDirSnapshot.rootDir, packingDirSnapshot.subfolderName, packingDirSnapshot.configId, packingDirSnapshot.version);
   }
 
   logAudit(reqId, clientId, clientName, 'SUBMIT_TASK', { taskId, model: resolvedModel.displayName, deviceSn, workerId });
@@ -1084,7 +1923,16 @@ app.post('/api/worker/tasks/:id/file-failed', (req, res) => {
     UPDATE task_files SET status = 'FAILED', error_msg = ? WHERE task_id = ? AND file_type = ?
   `).run(errorMsg || 'Generation failed', taskId, fileType);
 
-  db.prepare("UPDATE tasks SET status = 'FAILED', error_msg = ? WHERE id = ?").run(errorMsg || 'Generation failed', taskId);
+  const files = db.prepare('SELECT * FROM task_files WHERE task_id = ?').all(taskId);
+  const anySuccess = files.some(f => f.status === 'PREVIEW_READY' || f.status === 'PRINTED');
+  const allFinished = files.every(f => f.status === 'PREVIEW_READY' || f.status === 'PRINTED' || f.status === 'FAILED');
+
+  if (allFinished && anySuccess) {
+    // DIR-20: 证书与清单分别记录状态；其中一份失败时，不得将整个任务显示为全部成功。
+    db.prepare("UPDATE tasks SET status = 'PARTIAL_SUCCESS', completed_at = ?, error_msg = ? WHERE id = ?").run(new Date().toISOString(), errorMsg || 'Partially failed', taskId);
+  } else {
+    db.prepare("UPDATE tasks SET status = 'FAILED', error_msg = ? WHERE id = ?").run(errorMsg || 'Generation failed', taskId);
+  }
 
   logAudit(null, 'WORKER', 'WorkerService', 'FILE_FAILED', { taskId, fileType, errorMsg });
   res.json({ success: true, taskId, fileType });
@@ -1092,7 +1940,7 @@ app.post('/api/worker/tasks/:id/file-failed', (req, res) => {
 
 app.post('/api/worker/tasks/:id/file-returned', upload.single('wordFile'), (req, res) => {
   const taskId = req.params.id;
-  const { fileType, officialFilename, sha256 } = req.body;
+  const { fileType, officialFilename, sha256, workerFilePath } = req.body;
 
   if (!req.file) return res.status(400).json({ error: 'No wordFile uploaded' });
 
@@ -1113,15 +1961,21 @@ app.post('/api/worker/tasks/:id/file-returned', upload.single('wordFile'), (req,
 
   db.prepare(`
     UPDATE task_files
-    SET server_filepath = ?, sha256 = ?, preview_images = ?, status = 'PREVIEW_READY'
+    SET server_filepath = ?, sha256 = ?, preview_images = ?, status = 'PREVIEW_READY', worker_filepath = ?
     WHERE task_id = ? AND file_type = ?
-  `).run(destPath, sha256 || getFileSha256(destPath), JSON.stringify(previews), taskId, fileType);
+  `).run(destPath, sha256 || getFileSha256(destPath), JSON.stringify(previews), workerFilePath || null, taskId, fileType);
 
   const files = db.prepare('SELECT * FROM task_files WHERE task_id = ?').all(taskId);
-  const allReady = files.every(f => f.status === 'PREVIEW_READY' || f.status === 'PRINTED');
+  const anyFailed = files.some(f => f.status === 'FAILED');
+  const allFinished = files.every(f => f.status === 'PREVIEW_READY' || f.status === 'PRINTED' || f.status === 'FAILED');
 
-  if (allReady) {
-    db.prepare("UPDATE tasks SET status = 'SUCCESS', completed_at = ? WHERE id = ?").run(new Date().toISOString(), taskId);
+  if (allFinished) {
+    if (anyFailed) {
+      // DIR-20: 证书与清单分别记录状态；其中一份失败时，不得将整个任务显示为全部成功。
+      db.prepare("UPDATE tasks SET status = 'PARTIAL_SUCCESS', completed_at = ? WHERE id = ?").run(new Date().toISOString(), taskId);
+    } else {
+      db.prepare("UPDATE tasks SET status = 'SUCCESS', completed_at = ? WHERE id = ?").run(new Date().toISOString(), taskId);
+    }
   } else {
     db.prepare("UPDATE tasks SET status = 'IN_PROGRESS' WHERE id = ?").run(taskId);
   }

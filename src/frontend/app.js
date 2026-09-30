@@ -195,10 +195,20 @@ function selectWorkerById(workerId) {
   }
 }
 
-function selectWorker(worker, shouldSwitchTab = true) {
+async function selectWorker(worker, shouldSwitchTab = true) {
+  const prevWorkerId = state.selectedWorker ? state.selectedWorker.id : null;
   state.selectedWorker = worker;
   localStorage.setItem('phoneapp_selected_worker_id', worker.id);
   updateWorkerUI(worker);
+
+  // Clear previous template selection when switching worker (Section 5, WC-11)
+  if (prevWorkerId !== worker.id) {
+    state.activeBundle = null;
+    state.currentModel = '';
+  }
+
+  // Reload published bundles for this specific worker (Section 5, WC-11, WC-12)
+  await loadPublishedBundles(worker.id);
 
   if (shouldSwitchTab) {
     switchNavTab('create');
@@ -227,7 +237,8 @@ function updateWorkerUI(worker) {
 }
 
 // ==================== DYNAMIC FORM RENDERER (03 SPEC SECTION 6 & 7) ====================
-async function loadPublishedBundles() {
+async function loadPublishedBundles(workerId = null) {
+  const targetWorkerId = workerId || (state.selectedWorker ? state.selectedWorker.id : null);
   const statusEl = document.getElementById('model-load-status');
   const retryBtn = document.getElementById('btn-retry-bundles');
   const select = document.getElementById('model-select');
@@ -240,7 +251,10 @@ async function loadPublishedBundles() {
   if (retryBtn) retryBtn.style.display = 'none';
 
   try {
-    const res = await fetch(`${API_BASE}/api/published-bundles`);
+    const url = targetWorkerId 
+      ? `${API_BASE}/api/published-bundles?workerId=${encodeURIComponent(targetWorkerId)}`
+      : `${API_BASE}/api/published-bundles`;
+    const res = await fetch(url);
     if (!res.ok) {
       throw new Error(`HTTP ${res.status}`);
     }
@@ -248,11 +262,12 @@ async function loadPublishedBundles() {
     state.bundles = Array.isArray(bundles) ? bundles : [];
 
     if (state.bundles.length === 0) {
-      if (select) select.innerHTML = '<option value="">(暂无已发布模板配置)</option>';
+      if (select) select.innerHTML = '<option value="">(暂无可用的已启用模板)</option>';
       if (statusEl) {
         statusEl.style.display = 'block';
         statusEl.className = 'status-tip warning';
-        statusEl.innerHTML = 'ℹ️ 当前暂无已发布的模板配置，请前往协调服务管理后台（<a href="/admin.html" target="_blank" style="color: #0284c7; text-decoration: underline;">/admin.html</a>）上传并发布模板。';
+        const wName = state.selectedWorker ? state.selectedWorker.name : (targetWorkerId || '当前执行端');
+        statusEl.innerHTML = `ℹ️ 执行端 [${wName}] 暂未启用任何模板配置。请前往协调服务管理后台（<a href="/admin" target="_blank" style="color: #0284c7; text-decoration: underline;">/admin</a>）在终端详情页配置并启用模板。`;
       }
       if (retryBtn) retryBtn.style.display = 'none';
       onModelChange();
@@ -381,9 +396,24 @@ function renderTestPoints() {
   const certTmpl = bundle ? bundle.certTemplate : null;
   const snapshot = bundle ? bundle.config_snapshot : {};
 
-  const pts = (certTmpl && certTmpl.field_mappings && certTmpl.field_mappings.testPoints)
-    || (snapshot && snapshot.testPoints)
-    || [];
+  let pts = (certTmpl && certTmpl.field_mappings && certTmpl.field_mappings.testPoints)
+    || (snapshot && snapshot.testPoints);
+
+  if ((!pts || pts.length === 0) && certTmpl && certTmpl.field_mappings && certTmpl.field_mappings.tableConfig) {
+    const tc = certTmpl.field_mappings.tableConfig;
+    if (tc.rowCount > 0) {
+      pts = [];
+      for (let i = 0; i < tc.rowCount; i++) {
+        pts.push({
+          point: i + 1,
+          std: tc.defaultValues && tc.defaultValues[i] ? tc.defaultValues[i] : '',
+          act: ''
+        });
+      }
+    }
+  }
+
+  pts = pts || [];
 
   if (pts.length === 0) {
     tbody.innerHTML = '<tr><td colspan="3" style="text-align: center; color: #94a3b8; padding: 16px;">当前配置未定义测量点表格区</td></tr>';
@@ -522,6 +552,32 @@ async function submitTaskForm() {
   const certDate = certDateEl ? certDateEl.value : new Date().toISOString().slice(0, 10);
 
   if (!deviceSn) return alert('请填写设备序列号 (Inst. SN.)');
+
+  if (bundle && bundle.is_ready === false) {
+    alert(`该模板当前不可用！\n原因: ${bundle.unready_reason || '保存目录未通过检查'}\n请联系管理员在控制台配置保存目录并探测通过后再提交。`);
+    return;
+  }
+
+  // Validate execution worker directory configuration before submitting (DIR-06, DIR-07, Sec 4.1)
+  try {
+    const valRes = await fetch(`${API_BASE}/api/tasks/validate-directories`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        workerId: state.selectedWorker.id,
+        model: bundle.model_display,
+        bundleId: bundle.bundle_id,
+        docCombo: bundle.doc_combo
+      })
+    });
+    const valData = await valRes.json();
+    if (!valData.valid) {
+      alert(`无法提交发货任务！\n\n所选执行终端 [${state.selectedWorker.name || state.selectedWorker.id}] 保存目录未就绪：\n` + valData.errors.join('\n') + '\n\n请联系管理员在协调后台配置并检查通过后再提交。');
+      return;
+    }
+  } catch (err) {
+    // If validation endpoint has network error, proceed and let backend authoritative submit validate
+  }
 
   const docCombo = bundle.doc_combo;
   const isPackingNeeded = docCombo === 'cert_and_packing' || docCombo === 'packing_only';
@@ -799,7 +855,15 @@ async function loadHistoryList() {
             操作人: <b>${t.client_name}</b> | 执行终端: <b>${t.worker_id || 'worker-local'}</b> | 受理时间: ${new Date(t.accepted_at).toLocaleString('zh-CN')}
           </div>
           <div style="font-size: 12px; color: #0284c7; margin-top: 5px;">
-            ${t.files.map(f => `<div>📄 ${f.official_filename}</div>`).join('')}
+            ${t.files.map(f => `
+              <div style="margin-bottom: 4px;">
+                📄 <strong>${f.official_filename}</strong>
+                <span class="badge ${f.status === 'PREVIEW_READY' || f.status === 'PRINTED' ? 'badge-success' : (f.status === 'FAILED' ? 'badge-danger' : 'badge-warning')}" style="margin-left: 6px; font-size: 10px;">
+                  ${f.status === 'PREVIEW_READY' ? '生成成功' : (f.status === 'FAILED' ? '生成失败' : f.status)}
+                </span>
+                ${f.worker_filepath ? `<div style="font-size: 11px; color: #64748b; margin-left: 16px;">💾 执行端位置: ${f.worker_filepath}</div>` : ''}
+              </div>
+            `).join('')}
           </div>
 
           <div class="history-actions">

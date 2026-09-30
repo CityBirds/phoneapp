@@ -75,6 +75,23 @@ test('J05 / Q12-Q13: Conflicting Device SN Rejection & Leading Zeros Preservatio
     })
   });
 
+  // Configure directories for worker-online-01 (DIR-01, DIR-02, DIR-04, E03, E04)
+  const docsDir = path.resolve(__dirname, '../data/test_docs');
+  db.prepare(`
+    INSERT INTO worker_allowed_paths (worker_id, root_path, allow_read, allow_write, sync_status, check_status, created_at, updated_at)
+    VALUES ('worker-online-01', ?, 1, 1, 'SYNCED', 'PASSED', datetime('now'), datetime('now'))
+    ON CONFLICT(worker_id, root_path) DO UPDATE SET allow_write = 1, check_status = 'PASSED'
+  `).run(docsDir);
+
+  const allTmpls = db.prepare('SELECT * FROM templates').all();
+  allTmpls.forEach(t => {
+    db.prepare(`
+      INSERT INTO worker_save_configs (worker_id, template_id, doc_type, root_dir, save_mode, allow_create, is_enabled, check_status, created_at, updated_at)
+      VALUES ('worker-online-01', ?, ?, ?, 'direct', 1, 1, 'PASSED', datetime('now'), datetime('now'))
+      ON CONFLICT(worker_id, template_id, doc_type) DO UPDATE SET is_enabled = 1, check_status = 'PASSED'
+    `).run(t.id, t.type, docsDir);
+  });
+
   // Submit conflicting SN (top-level deviceSn = "00001234" vs main item remark = "SN: 999999")
   const conflictRes = await fetch(`${serverUrl}/api/tasks/submit`, {
     method: 'POST',
