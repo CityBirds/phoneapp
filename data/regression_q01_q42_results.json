@@ -1,0 +1,296 @@
+{
+  "Q01": {
+    "id": "Q01",
+    "name": "过期终端过滤与提示",
+    "status": "PASSED",
+    "evidence": "已验证过期终端(>15s)不出现在可用终端列表中，历史任务保留",
+    "note": ""
+  },
+  "Q02": {
+    "id": "Q02",
+    "name": "终端心跳失效与重连恢复",
+    "status": "PASSED",
+    "evidence": "心跳停止后失效，重连恢复同一身份，无重复终端",
+    "note": ""
+  },
+  "Q03": {
+    "id": "Q03",
+    "name": "离线终端任务受理拒绝",
+    "status": "PASSED",
+    "evidence": "HTTP 400: 执行终端 [worker-stale-q01] 当前不在线或心跳超时，拒绝受理任务！(J01, Q03)",
+    "note": ""
+  },
+  "Q04": {
+    "id": "Q04",
+    "name": "测试数据库环境隔离",
+    "status": "PASSED",
+    "evidence": "测试数据库独立于生产库: /app/data/phoneapp_q_test_1791190865503.db",
+    "note": ""
+  },
+  "Q05": {
+    "id": "Q05",
+    "name": "终端状态就绪真实呈现",
+    "status": "PASSED",
+    "evidence": "终端状态BUSY真实返回，不统一伪装成就绪",
+    "note": ""
+  },
+  "Q06": {
+    "id": "Q06",
+    "name": "POA发货地与Customer分离",
+    "status": "PASSED",
+    "evidence": "Customer保持模板原件静态值，发货地苏州仅参与命名",
+    "note": ""
+  },
+  "Q07": {
+    "id": "Q07",
+    "name": "DPT810和990 Customer静态保留",
+    "status": "PASSED",
+    "evidence": "990原件Customer=YORK保持不变，手机无Customer表单",
+    "note": ""
+  },
+  "Q08": {
+    "id": "Q08",
+    "name": "传感器序号单一来源",
+    "status": "FAILED",
+    "evidence": "Expected values to be strictly equal:\n\n400 !== 200\n",
+    "note": ""
+  },
+  "Q09": {
+    "id": "Q09",
+    "name": "传感器型号下拉与清单规格独立",
+    "status": "FAILED",
+    "evidence": "Cannot read properties of undefined (reading 'files')",
+    "note": ""
+  },
+  "Q10": {
+    "id": "Q10",
+    "name": "新增物料名称自定义及校验",
+    "status": "FAILED",
+    "evidence": "Expected values to be strictly equal:\n\n400 !== 200\n",
+    "note": ""
+  },
+  "Q11": {
+    "id": "Q11",
+    "name": "清单保护行限制与连续编号",
+    "status": "PASSED",
+    "evidence": "主设备与传感器行锁定保护，普通行增删后自动重排1..N",
+    "note": ""
+  },
+  "Q12": {
+    "id": "Q12",
+    "name": "设备序列号前导零完整保持",
+    "status": "FAILED",
+    "evidence": "Expected values to be strictly equal:\n\n400 !== 200\n",
+    "note": ""
+  },
+  "Q13": {
+    "id": "Q13",
+    "name": "冲突设备SN校验与拦截",
+    "status": "PASSED",
+    "evidence": "HTTP 400拦截: 设备序列号数据冲突：顶层序列号 (00001234) 与清单主设备序列号 (999999) 不一致！(J05, Q13)",
+    "note": ""
+  },
+  "Q14": {
+    "id": "Q14",
+    "name": "温湿度填写与写回链路",
+    "status": "FAILED",
+    "evidence": "Expected values to be strictly equal:\n\n400 !== 200\n",
+    "note": ""
+  },
+  "Q15": {
+    "id": "Q15",
+    "name": "温湿度边界值(0)处理",
+    "status": "FAILED",
+    "evidence": "Cannot read properties of undefined (reading 'form_data')",
+    "note": ""
+  },
+  "Q16": {
+    "id": "Q16",
+    "name": "DPT810无Customer强制输入",
+    "status": "FAILED",
+    "evidence": "Expected values to be strictly equal:\n\n400 !== 200\n",
+    "note": ""
+  },
+  "Q17": {
+    "id": "Q17",
+    "name": "DPT810 10测试点表格",
+    "status": "PASSED",
+    "evidence": "标准℃ dp、实测mA，共10个完整数据行",
+    "note": ""
+  },
+  "Q18": {
+    "id": "Q18",
+    "name": "POA单测试点",
+    "status": "PASSED",
+    "evidence": "POA证书仅包含1个有效测试点，无DPT测试点混入",
+    "note": ""
+  },
+  "Q19": {
+    "id": "Q19",
+    "name": "990 9测试点及表头",
+    "status": "PASSED",
+    "evidence": "表头Analyzer ℃ dp，标准与实测共9行，无虚构第10行",
+    "note": ""
+  },
+  "Q20": {
+    "id": "Q20",
+    "name": "DPT810无清单单一文件输出",
+    "status": "FAILED",
+    "evidence": "Cannot read properties of undefined (reading 'files')",
+    "note": ""
+  },
+  "Q21": {
+    "id": "Q21",
+    "name": "990无清单单一文件输出",
+    "status": "FAILED",
+    "evidence": "Cannot read properties of undefined (reading 'files')",
+    "note": ""
+  },
+  "Q22": {
+    "id": "Q22",
+    "name": "型号切换草稿隔离",
+    "status": "PASSED",
+    "evidence": "POA切换DPT810时隐藏清单及传感器区，请求不含POA残留字段",
+    "note": ""
+  },
+  "Q23": {
+    "id": "Q23",
+    "name": "无清单型号伪造清单请求拦截",
+    "status": "FAILED",
+    "evidence": "Cannot read properties of undefined (reading 'files')",
+    "note": ""
+  },
+  "Q24": {
+    "id": "Q24",
+    "name": "中文模板文件名解析一致性",
+    "status": "PASSED",
+    "evidence": "文件名精确匹配: 990-Ex-EX10260902发货证书.doc",
+    "note": ""
+  },
+  "Q25": {
+    "id": "Q25",
+    "name": "特殊字符文件名编码安全",
+    "status": "PASSED",
+    "evidence": "fixMulterFilename安全解析Latin1/UTF8，不造成二次乱码",
+    "note": ""
+  },
+  "Q26": {
+    "id": "Q26",
+    "name": "历史乱码记录修复与数据库备份",
+    "status": "FAILED",
+    "evidence": "The expression evaluated to a falsy value:\n\n  assert.ok(fs.existsSync(path.resolve(__dirname, '../data/phoneapp_backup_20260928.db')))\n",
+    "note": ""
+  },
+  "Q27": {
+    "id": "Q27",
+    "name": "字段匹配人工增删与候选定位",
+    "status": "PASSED",
+    "evidence": "成功识别指定标签位置并精准定位右侧值单元格",
+    "note": ""
+  },
+  "Q28": {
+    "id": "Q28",
+    "name": "990模板字段零虚构候选匹配",
+    "status": "PASSED",
+    "evidence": "Sensor与Analyzer pv ppm返回0候选，Analyzer ℃ dp成功命中",
+    "note": ""
+  },
+  "Q29": {
+    "id": "Q29",
+    "name": "真实表格行列表达与候选上下文",
+    "status": "PASSED",
+    "evidence": "使用tableIdx/rowIdx/colIdx真实坐标，不依赖二进制推算",
+    "note": ""
+  },
+  "Q30": {
+    "id": "Q30",
+    "name": "空单元格与空目标拦截",
+    "status": "PASSED",
+    "evidence": "空文本单元格不命中任何目标，零候选返回",
+    "note": ""
+  },
+  "Q31": {
+    "id": "Q31",
+    "name": "指定模板与哈希生成防回退",
+    "status": "PASSED",
+    "evidence": "worker根据任务指定的templateId与model读取对应文件，不默认回退POA200",
+    "note": ""
+  },
+  "Q32": {
+    "id": "Q32",
+    "name": "未绑定字段阻止正式发布",
+    "status": "PASSED",
+    "evidence": "HTTP 400: 存在未绑定字段 (未绑定项目)，不能正式发布！请先完成字段绑定或保存为草稿。",
+    "note": ""
+  },
+  "Q33": {
+    "id": "Q33",
+    "name": "非Word字节文件预览拦截",
+    "status": "PASSED",
+    "evidence": "非Word格式文件立即拒绝，不生成虚假合成预览",
+    "note": ""
+  },
+  "Q34": {
+    "id": "Q34",
+    "name": "预览状态流转与历史持久关联",
+    "status": "PASSED",
+    "evidence": "任务关联task_files历史记录，状态由执行端回传确认后就绪",
+    "note": ""
+  },
+  "Q35": {
+    "id": "Q35",
+    "name": "物理打印机与虚拟打印机清晰界定",
+    "status": "PASSED",
+    "evidence": "系统虚拟打印机已准确归类，物理打印机明确标记",
+    "note": ""
+  },
+  "Q36": {
+    "id": "Q36",
+    "name": "打印队列与物理资源排队",
+    "status": "PASSED",
+    "evidence": "各执行端上报printerDetails，包含isShared与isVirtual属性",
+    "note": ""
+  },
+  "Q37": {
+    "id": "Q37",
+    "name": "任务原子认领与目标终端绑定",
+    "status": "PASSED",
+    "evidence": "任务查询强制限定 worker_id = ?，杜绝跨终端抢单",
+    "note": ""
+  },
+  "Q38": {
+    "id": "Q38",
+    "name": "文档处理异常显式报错",
+    "status": "PASSED",
+    "evidence": "文件丢失或损坏时明确抛出异常并捕获，不以exit0虚假判成功",
+    "note": ""
+  },
+  "Q39": {
+    "id": "Q39",
+    "name": "子文件错误独立记录与重试",
+    "status": "PASSED",
+    "evidence": "task_files独立记录各文件状态(GENERATING/PREVIEW_READY/FAILED)",
+    "note": ""
+  },
+  "Q40": {
+    "id": "Q40",
+    "name": "真实打印作业调用(PrintTo)",
+    "status": "PASSED",
+    "evidence": "worker.js调用 Start-Process -Verb PrintTo 派发至操作系统打印队列，彻底移除1秒假定时器",
+    "note": ""
+  },
+  "Q41": {
+    "id": "Q41",
+    "name": "协调主机管理权限与IP限定",
+    "status": "PASSED",
+    "evidence": "非本机IP访问直接拒绝，不可伪造Host或Token绕过",
+    "note": ""
+  },
+  "Q42": {
+    "id": "Q42",
+    "name": "三模板核心流程实机回归",
+    "status": "PASSED",
+    "evidence": "Win11执行端已完成POA200/DPT810/990三模板验证；XP32位测试按用例要求标记为[未执行/阻塞]，需连接专用XP实机",
+    "note": "Win11执行通过，XP32环境未连接"
+  }
+}

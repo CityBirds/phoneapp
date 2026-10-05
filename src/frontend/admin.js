@@ -108,6 +108,8 @@ async function handleRenameClient(clientId, currentName) {
 const API_BASE = window.location.origin;
 
 let currentMatcherData = null;
+let currentAnalyzeToken = null;
+let currentAnalyzeTmplId = null;
 
 window.addEventListener('DOMContentLoaded', () => {
   function handleHashRoute() {
@@ -144,7 +146,7 @@ let currentWorkerAllowedPaths = [];
 let currentWorkerTemplateConfigs = [];
 
 // Tab Navigation
-function switchTab(tabId) {
+async function switchTab(tabId) {
   const isDirectories = tabId === 'directories';
   const effectiveTab = isDirectories ? 'workers' : tabId;
 
@@ -163,13 +165,13 @@ function switchTab(tabId) {
     banner.style.display = isDirectories ? 'block' : 'none';
   }
 
-  if (effectiveTab === 'clients') loadClients();
-  if (effectiveTab === 'workers') loadWorkers();
-  if (effectiveTab === 'templates') loadTemplates();
-  if (effectiveTab === 'sales-persons') loadSalesPersons();
-  if (effectiveTab === 'sensor-configs') loadSensorConfigs();
-  if (effectiveTab === 'matcher') populateMatcherSelect();
-  if (effectiveTab === 'audit') loadAuditLogs();
+  if (effectiveTab === 'clients') await loadClients();
+  if (effectiveTab === 'workers') await loadWorkers();
+  if (effectiveTab === 'templates') await loadTemplates();
+  if (effectiveTab === 'sales-persons') await loadSalesPersons();
+  if (effectiveTab === 'sensor-configs') await loadSensorConfigs();
+  if (effectiveTab === 'matcher') await populateMatcherSelect();
+  if (effectiveTab === 'audit') await loadAuditLogs();
 }
 
 async function loadWorkers() {
@@ -946,26 +948,53 @@ async function deleteTemplate(tmplId) {
 }
 
 // ==================== FIELD MATCHER WORKBENCH ====================
+let cachedMatcherTmpls = null;
+let isPopulatingMatcherSelect = false;
+
 async function populateMatcherSelect(tmpls) {
   const select = document.getElementById('matcher-select-template');
   if (!select) return;
 
-  if (!tmpls) {
-    const res = await fetch(`${API_BASE}/api/templates`);
-    tmpls = await res.json();
+  if (tmpls) {
+    cachedMatcherTmpls = tmpls;
+  } else if (!cachedMatcherTmpls) {
+    if (isPopulatingMatcherSelect) {
+      // wait until populated by another call
+      while(isPopulatingMatcherSelect) await new Promise(r => setTimeout(r, 100));
+    } else {
+      isPopulatingMatcherSelect = true;
+      try {
+        const res = await fetch(`${API_BASE}/api/templates`);
+        if (!res.ok) throw new Error('加载模板列表失败');
+        cachedMatcherTmpls = await res.json();
+      } catch (e) {
+        select.innerHTML = `<option value="">加载失败: ${e.message}</option>`;
+        isPopulatingMatcherSelect = false;
+        throw e;
+      }
+      isPopulatingMatcherSelect = false;
+    }
   }
 
-  select.innerHTML = '<option value="">请选择需要分析匹配的模板...</option>' + tmpls.map(t => `
-    <option value="${t.id}">${t.model} - ${t.type === 'cert' ? '发货证书' : '装箱清单'} (${t.filename})</option>
-  `).join('');
+  if (cachedMatcherTmpls) {
+    select.innerHTML = '<option value="">请选择需要分析匹配的模板...</option>' + cachedMatcherTmpls.map(t => `
+      <option value="${t.id}">${escapeHtml(t.model)} - ${t.type === 'cert' ? '发货证书' : '装箱清单'} (${escapeHtml(t.filename)})</option>
+    `).join('');
+  }
 }
 
-function goToMatcher(tmplId) {
-  switchTab('matcher');
+async function goToMatcher(tmplId) {
+  await switchTab('matcher');
   const select = document.getElementById('matcher-select-template');
   if (select) {
+    if (!cachedMatcherTmpls || !cachedMatcherTmpls.find(t => t.id === tmplId)) {
+      alert('未找到该模板，可能已被删除或列表加载失败。');
+      return;
+    }
     select.value = tmplId;
-    runTemplateAnalyze();
+    if (currentAnalyzeTmplId !== tmplId) {
+      runTemplateAnalyze();
+    }
   }
 }
 
@@ -1004,6 +1033,10 @@ async function runTemplateAnalyze() {
   const tmplId = select ? select.value : '';
   if (!tmplId) return alert('请先选择模板');
 
+  currentAnalyzeTmplId = tmplId;
+  const token = Date.now();
+  currentAnalyzeToken = token;
+
   const container = document.getElementById('matcher-results-container');
   const tbody = document.getElementById('matcher-tbody');
   const sensorCard = document.getElementById('sensor-model-config-card');
@@ -1014,6 +1047,9 @@ async function runTemplateAnalyze() {
   try {
     const res = await fetch(`${API_BASE}/api/templates/${tmplId}/analyze`);
     const data = await res.json();
+
+    if (currentAnalyzeToken !== token) return; // Ignore stale response
+
     currentMatcherData = data;
     currentMatcherData.selectedChoices = {};
 
@@ -1030,8 +1066,10 @@ async function runTemplateAnalyze() {
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ targetLabel: lbl, docItems: data.docItems || [] })
             });
+            if (currentAnalyzeToken !== token) return; // Exit early if stale
             currentMatcherData.matchResults[lbl] = await mRes.json();
           } catch (e) {
+            if (currentAnalyzeToken !== token) return; // Exit early if stale
             currentMatcherData.matchResults[lbl] = { label: lbl, matchCount: 0, candidates: [] };
           }
         }
@@ -1086,7 +1124,9 @@ async function runTemplateAnalyze() {
 
     renderMatcherTable();
   } catch (err) {
-    tbody.innerHTML = `<tr><td colspan="8">分析失败: ${err.message}</td></tr>`;
+    if (currentAnalyzeToken === token) {
+      tbody.innerHTML = `<tr><td colspan="8">分析失败: ${err.message}</td></tr>`;
+    }
   }
 }
 
