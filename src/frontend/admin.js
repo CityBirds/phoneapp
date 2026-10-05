@@ -170,7 +170,7 @@ async function switchTab(tabId) {
   if (effectiveTab === 'templates') await loadTemplates();
   if (effectiveTab === 'sales-persons') await loadSalesPersons();
   if (effectiveTab === 'sensor-configs') await loadSensorConfigs();
-  if (effectiveTab === 'matcher') await populateMatcherSelect();
+  if (effectiveTab === 'matcher') await populateMatcherSelect(null, true);
   if (effectiveTab === 'audit') await loadAuditLogs();
 }
 
@@ -825,6 +825,9 @@ async function loadTemplates() {
 
   try {
     const tmpls = await safeFetchJson(`${API_BASE}/api/templates`);
+    if (Array.isArray(tmpls)) {
+      cachedMatcherTmpls = tmpls;
+    }
     if (!Array.isArray(tmpls) || tmpls.length === 0) {
       tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; padding: 24px; color: #94a3b8;">尚未上传模板</td></tr>';
       return;
@@ -924,6 +927,7 @@ async function handleUploadTemplate(e) {
 
   fileInput.value = '';
   alert(`模板文件 [${uploadSuccessData.filename}] 成功上传入库！`);
+  cachedMatcherTmpls = null;
 
   try {
     await loadTemplates();
@@ -941,6 +945,7 @@ async function deleteTemplate(tmplId) {
         'x-admin-token': 'phoneapp-admin-secret'
       }
     });
+    cachedMatcherTmpls = null;
     await loadTemplates();
   } catch (err) {
     alert('删除失败: ' + err.message);
@@ -951,13 +956,13 @@ async function deleteTemplate(tmplId) {
 let cachedMatcherTmpls = null;
 let isPopulatingMatcherSelect = false;
 
-async function populateMatcherSelect(tmpls) {
+async function populateMatcherSelect(tmpls, forceRefresh = false) {
   const select = document.getElementById('matcher-select-template');
   if (!select) return;
 
   if (tmpls) {
     cachedMatcherTmpls = tmpls;
-  } else if (!cachedMatcherTmpls) {
+  } else if (!cachedMatcherTmpls || forceRefresh) {
     if (isPopulatingMatcherSelect) {
       // wait until populated by another call
       while(isPopulatingMatcherSelect) await new Promise(r => setTimeout(r, 100));
@@ -971,23 +976,37 @@ async function populateMatcherSelect(tmpls) {
         select.innerHTML = `<option value="">加载失败: ${e.message}</option>`;
         isPopulatingMatcherSelect = false;
         throw e;
+      } finally {
+        isPopulatingMatcherSelect = false;
       }
-      isPopulatingMatcherSelect = false;
     }
   }
 
   if (cachedMatcherTmpls) {
+    const currentVal = select.value;
     select.innerHTML = '<option value="">请选择需要分析匹配的模板...</option>' + cachedMatcherTmpls.map(t => `
       <option value="${t.id}">${escapeHtml(t.model)} - ${t.type === 'cert' ? '发货证书' : '装箱清单'} (${escapeHtml(t.filename)})</option>
     `).join('');
+    if (currentVal && cachedMatcherTmpls.some(t => t.id === currentVal)) {
+      select.value = currentVal;
+    }
   }
 }
 
 async function goToMatcher(tmplId) {
+  // 若当前本地缓存不存在该模板，先执行强制刷新拉取最新模板库
+  if (!cachedMatcherTmpls || !cachedMatcherTmpls.some(t => t.id === tmplId)) {
+    try {
+      await populateMatcherSelect(null, true);
+    } catch (e) {
+      console.warn('刷新匹配器下拉框失败:', e);
+    }
+  }
+
   await switchTab('matcher');
   const select = document.getElementById('matcher-select-template');
   if (select) {
-    if (!cachedMatcherTmpls || !cachedMatcherTmpls.find(t => t.id === tmplId)) {
+    if (!cachedMatcherTmpls || !cachedMatcherTmpls.some(t => t.id === tmplId)) {
       alert('未找到该模板，可能已被删除或列表加载失败。');
       return;
     }
