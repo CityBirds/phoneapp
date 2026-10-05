@@ -12,7 +12,8 @@ const ALIAS_MAP = {
   '证书日期': ['date:', 'certificate date', 'date'],
   '仪器': ['instrument'],
   '主设备': ['主设备'],
-  '传感器': ['传感器']
+  '传感器': ['传感器'],
+  '销售人员': ['sales', 'salesperson', 'rep', '销售', '销售人员', 'customer', '客户']
 };
 
 const KNOWN_UNITS = ['ppm', '℃ dp', '℃', '°c', 'ma', '%rh', 'rh'];
@@ -124,6 +125,8 @@ function getTableColumnDataCells(item, docItems, targetLabel) {
 
   const sequentialCells = [];
   for (let i = seqStartIdx; i < cellItems.length; i += numCols) {
+    const seqNumCell = cellItems[i];
+    if (!seqNumCell || !/^\d+$/.test(seqNumCell.text ? seqNumCell.text.trim() : '')) break;
     const targetCell = cellItems[i + colOffset];
     if (!targetCell || FOOTER_TEXT_REGEX.test(targetCell.text || '')) break;
     sequentialCells.push(targetCell);

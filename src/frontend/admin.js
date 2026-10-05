@@ -148,12 +148,12 @@ function switchTab(tabId) {
   const isDirectories = tabId === 'directories';
   const effectiveTab = isDirectories ? 'workers' : tabId;
 
-  ['clients', 'workers', 'worker-detail', 'templates', 'matcher', 'audit'].forEach(t => {
+  ['clients', 'workers', 'worker-detail', 'templates', 'sales-persons', 'sensor-configs', 'matcher', 'audit'].forEach(t => {
     const sec = document.getElementById(`sec-${t}`);
     const side = document.getElementById(`side-${t}`);
     if (sec) sec.style.display = t === effectiveTab ? 'block' : 'none';
     if (side) {
-      if (t === effectiveTab) side.classList.add('active');
+      if (t === effectiveTab || ((effectiveTab === 'sales-persons' || effectiveTab === 'sensor-configs') && t === 'templates')) side.classList.add('active');
       else side.classList.remove('active');
     }
   });
@@ -166,6 +166,8 @@ function switchTab(tabId) {
   if (effectiveTab === 'clients') loadClients();
   if (effectiveTab === 'workers') loadWorkers();
   if (effectiveTab === 'templates') loadTemplates();
+  if (effectiveTab === 'sales-persons') loadSalesPersons();
+  if (effectiveTab === 'sensor-configs') loadSensorConfigs();
   if (effectiveTab === 'matcher') populateMatcherSelect();
   if (effectiveTab === 'audit') loadAuditLogs();
 }
@@ -582,6 +584,235 @@ async function checkWorkerTemplate(configId) {
   }
 }
 
+
+// ==================== SENSOR CONFIGS MANAGEMENT ====================
+let currentSensorConfigs = [];
+
+async function loadSensorConfigs() {
+  const tbody = document.getElementById('sensor-configs-tbody');
+  if (!tbody) return;
+
+  tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; padding: 20px; color: #64748b;">正在加载传感器配置列表...</td></tr>';
+
+  try {
+    const list = await safeFetchJson(`${API_BASE}/api/sensor-configs`);
+    currentSensorConfigs = Array.isArray(list) ? list : [];
+
+    if (currentSensorConfigs.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; padding: 24px; color: #94a3b8;">暂无各设备传感器配置，请添加</td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = currentSensorConfigs.map(item => {
+      const options = Array.isArray(item.sensor_options) ? item.sensor_options : [];
+      const optionsHtml = options.map(opt => `<span class="badge badge-warning" style="margin-right: 4px;">${escapeHtml(opt)}</span>`).join('');
+      const updatedTime = item.updated_at ? new Date(item.updated_at).toLocaleString('zh-CN') : '-';
+
+      return `
+        <tr>
+          <td><b style="color: #0f172a; font-size: 14px;">${escapeHtml(item.model)}</b></td>
+          <td>${optionsHtml || '<span style="color:#94a3b8;">无选项</span>'}</td>
+          <td><b>${escapeHtml(item.default_value || '无')}</b></td>
+          <td style="font-size: 12px; color: #64748b;">${updatedTime}</td>
+          <td style="text-align: right;">
+            <button type="button" class="btn btn-sm btn-secondary" onclick="editSensorConfig(${item.id})">✏️ 编辑</button>
+            <button type="button" class="btn btn-sm btn-danger" onclick="deleteSensorConfig(${item.id}, '${escapeHtml(item.model)}')">🗑️ 删除</button>
+          </td>
+        </tr>
+      `;
+    }).join('');
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="5" style="text-align: center; padding: 24px; color: #ef4444;">
+      加载传感器配置失败: ${escapeHtml(err.message)}
+      <button type="button" class="btn btn-secondary btn-sm" onclick="loadSensorConfigs()" style="margin-left: 10px;">🔄 重试</button>
+    </td></tr>`;
+  }
+}
+
+function previewSensorConfigFormOptions() {
+  const inputEl = document.getElementById('sensor-cfg-options');
+  const defaultSelect = document.getElementById('sensor-cfg-default');
+  const pillsBox = document.getElementById('sensor-cfg-preview-pills');
+
+  if (!inputEl || !pillsBox) return [];
+
+  const rawVal = inputEl.value || '';
+  const tokens = rawVal.split(/[，,]/);
+  const options = [];
+  tokens.forEach(t => {
+    const cleaned = t.trim();
+    if (cleaned && !options.includes(cleaned)) {
+      options.push(cleaned);
+    }
+  });
+
+  pillsBox.innerHTML = options.length > 0
+    ? options.map(opt => `<span class="badge badge-warning">${escapeHtml(opt)}</span>`).join('')
+    : '<span style="font-size: 12px; color: #94a3b8;">未配置有效选项</span>';
+
+  if (defaultSelect) {
+    const currentDefault = defaultSelect.value;
+    defaultSelect.innerHTML = '<option value="">(无默认值)</option>' + options.map(o => `
+      <option value="${escapeHtml(o)}" ${o === currentDefault ? 'selected' : ''}>${escapeHtml(o)}</option>
+    `).join('');
+  }
+
+  return options;
+}
+
+function resetSensorConfigForm() {
+  document.getElementById('sensor-form-title').innerText = '➕ 新增 / 编辑设备传感器配置';
+  document.getElementById('sensor-cfg-id').value = '';
+  document.getElementById('sensor-cfg-model').value = '';
+  document.getElementById('sensor-cfg-options').value = '';
+  document.getElementById('sensor-cfg-default').innerHTML = '<option value="">(无默认值)</option>';
+  document.getElementById('sensor-cfg-preview-pills').innerHTML = '';
+}
+
+function editSensorConfig(id) {
+  const item = currentSensorConfigs.find(c => c.id === id);
+  if (!item) return;
+
+  document.getElementById('sensor-form-title').innerText = `✏️ 编辑设备传感器配置: ${item.model}`;
+  document.getElementById('sensor-cfg-id').value = item.id;
+  document.getElementById('sensor-cfg-model').value = item.model;
+  
+  const optionsArr = Array.isArray(item.sensor_options) ? item.sensor_options : [];
+  document.getElementById('sensor-cfg-options').value = optionsArr.join('，');
+  
+  previewSensorConfigFormOptions();
+
+  if (item.default_value) {
+    document.getElementById('sensor-cfg-default').value = item.default_value;
+  }
+}
+
+async function handleSaveSensorConfig(e) {
+  e.preventDefault();
+  const id = document.getElementById('sensor-cfg-id').value;
+  const model = document.getElementById('sensor-cfg-model').value.trim();
+  const sensor_options = document.getElementById('sensor-cfg-options').value.trim();
+  const default_value = document.getElementById('sensor-cfg-default').value;
+
+  if (!model) return alert('请输入设备型号');
+  if (!sensor_options) return alert('请输入传感器型号选项');
+
+  try {
+    await safeFetchJson(`${API_BASE}/api/admin/sensor-configs`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-admin-token': 'phoneapp-admin-secret'
+      },
+      body: JSON.stringify({
+        id: id || undefined,
+        model,
+        sensor_options,
+        default_value
+      })
+    });
+
+    resetSensorConfigForm();
+    alert(`设备 [${model}] 的传感器配置保存成功！`);
+    await loadSensorConfigs();
+  } catch (err) {
+    alert('保存传感器配置失败: ' + err.message);
+  }
+}
+
+async function deleteSensorConfig(id, model) {
+  if (!confirm(`确定要删除设备 [${model}] 的传感器配置吗？`)) return;
+
+  try {
+    await safeFetchJson(`${API_BASE}/api/admin/sensor-configs/${id}`, {
+      method: 'DELETE',
+      headers: {
+        'x-admin-token': 'phoneapp-admin-secret'
+      }
+    });
+
+    await loadSensorConfigs();
+  } catch (err) {
+    alert('删除传感器配置失败: ' + err.message);
+  }
+}
+
+// ==================== SALES PERSONS MANAGEMENT ====================
+async function loadSalesPersons() {
+  const tbody = document.getElementById('sales-persons-tbody');
+  if (!tbody) return;
+
+  tbody.innerHTML = '<tr><td colspan="4" style="text-align: center; padding: 20px; color: #64748b;">正在加载销售人员列表...</td></tr>';
+
+  try {
+    const list = await safeFetchJson(`${API_BASE}/api/sales-persons`);
+    if (!Array.isArray(list) || list.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="4" style="text-align: center; padding: 24px; color: #94a3b8;">暂无销售人员，请添加</td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = list.map(item => {
+      const createdTime = item.created_at ? new Date(item.created_at).toLocaleString('zh-CN') : '-';
+      return `
+        <tr>
+          <td><b>${item.id}</b></td>
+          <td><b style="color: #0f172a; font-size: 14px;">${escapeHtml(item.name)}</b></td>
+          <td style="font-size: 12px; color: #64748b;">${createdTime}</td>
+          <td style="text-align: right;">
+            <button type="button" class="btn btn-sm btn-danger" onclick="deleteSalesPerson(${item.id}, '${escapeHtml(item.name)}')">🗑️ 删除</button>
+          </td>
+        </tr>
+      `;
+    }).join('');
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="4" style="text-align: center; padding: 24px; color: #ef4444;">
+      加载销售人员失败: ${escapeHtml(err.message)}
+      <button type="button" class="btn btn-secondary btn-sm" onclick="loadSalesPersons()" style="margin-left: 10px;">🔄 重试</button>
+    </td></tr>`;
+  }
+}
+
+async function handleAddSalesPerson(e) {
+  e.preventDefault();
+  const inputEl = document.getElementById('sales-person-name-input');
+  const name = inputEl ? inputEl.value.trim() : '';
+
+  if (!name) return alert('请输入销售人员姓名');
+
+  try {
+    await safeFetchJson(`${API_BASE}/api/admin/sales-persons`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-admin-token': 'phoneapp-admin-secret'
+      },
+      body: JSON.stringify({ name })
+    });
+
+    inputEl.value = '';
+    alert(`销售人员 [${name}] 已成功添加！`);
+    await loadSalesPersons();
+  } catch (err) {
+    alert('添加销售人员失败: ' + err.message);
+  }
+}
+
+async function deleteSalesPerson(id, name) {
+  if (!confirm(`确定要删除销售人员 [${name}] 吗？`)) return;
+
+  try {
+    await safeFetchJson(`${API_BASE}/api/admin/sales-persons/${id}`, {
+      method: 'DELETE',
+      headers: {
+        'x-admin-token': 'phoneapp-admin-secret'
+      }
+    });
+
+    await loadSalesPersons();
+  } catch (err) {
+    alert('删除销售人员失败: ' + err.message);
+  }
+}
 
 // ==================== TEMPLATE LIBRARY MANAGEMENT (FIX-01) ====================
 async function loadTemplates() {

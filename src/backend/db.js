@@ -60,10 +60,42 @@ const schema = [
   'CREATE TABLE IF NOT EXISTS audit_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, req_id TEXT, client_id TEXT, client_name TEXT, action TEXT NOT NULL, details TEXT, timestamp TEXT NOT NULL);',
   'CREATE TABLE IF NOT EXISTS worker_allowed_paths (id INTEGER PRIMARY KEY AUTOINCREMENT, worker_id TEXT NOT NULL, root_path TEXT NOT NULL, allow_read INTEGER NOT NULL DEFAULT 1, allow_write INTEGER NOT NULL DEFAULT 1, allow_create INTEGER NOT NULL DEFAULT 0, version INTEGER NOT NULL DEFAULT 1, sync_status TEXT NOT NULL DEFAULT \'SYNCED\', check_status TEXT NOT NULL DEFAULT \'PENDING\', check_message TEXT, checked_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(worker_id, root_path));',
   'CREATE TABLE IF NOT EXISTS worker_save_configs (id INTEGER PRIMARY KEY AUTOINCREMENT, worker_id TEXT NOT NULL, template_id TEXT NOT NULL, doc_type TEXT NOT NULL, root_dir TEXT NOT NULL, save_mode TEXT NOT NULL DEFAULT \'direct\', subfolder_rule TEXT DEFAULT \'deviceSn\', allow_create INTEGER NOT NULL DEFAULT 0, is_enabled INTEGER NOT NULL DEFAULT 0, version INTEGER NOT NULL DEFAULT 1, check_status TEXT NOT NULL DEFAULT \'PENDING\', check_message TEXT, checked_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(worker_id, template_id, doc_type));',
-  'CREATE TABLE IF NOT EXISTS worker_directory_checks (id INTEGER PRIMARY KEY AUTOINCREMENT, check_type TEXT NOT NULL DEFAULT \'save_config\', target_id INTEGER, config_id INTEGER, worker_id TEXT NOT NULL, version INTEGER NOT NULL, root_dir TEXT NOT NULL, allow_create INTEGER NOT NULL DEFAULT 0, allow_read INTEGER NOT NULL DEFAULT 1, allow_write INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL DEFAULT \'PENDING\', created_at TEXT NOT NULL);'
+  'CREATE TABLE IF NOT EXISTS worker_directory_checks (id INTEGER PRIMARY KEY AUTOINCREMENT, check_type TEXT NOT NULL DEFAULT \'save_config\', target_id INTEGER, config_id INTEGER, worker_id TEXT NOT NULL, version INTEGER NOT NULL, root_dir TEXT NOT NULL, allow_create INTEGER NOT NULL DEFAULT 0, allow_read INTEGER NOT NULL DEFAULT 1, allow_write INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL DEFAULT \'PENDING\', created_at TEXT NOT NULL);',
+  'CREATE TABLE IF NOT EXISTS sales_persons (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL);',
+  'CREATE TABLE IF NOT EXISTS sensor_configs (id INTEGER PRIMARY KEY AUTOINCREMENT, model TEXT UNIQUE NOT NULL, sensor_options TEXT NOT NULL, default_value TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);'
 ].join('\n');
 
 db.exec(schema);
+
+// Seed default sales persons if table is empty
+try {
+  const salesCount = db.prepare('SELECT COUNT(*) as count FROM sales_persons').get();
+  if (salesCount.count === 0) {
+    db.prepare('INSERT INTO sales_persons (name, created_at) VALUES (?, ?)').run('陈文', new Date().toISOString());
+  }
+} catch (e) {}
+
+// Seed default sensor configs if table is empty
+try {
+  const sensorCount = db.prepare('SELECT COUNT(*) as count FROM sensor_configs').get();
+  if (sensorCount.count === 0) {
+    const now = new Date().toISOString();
+    db.prepare('INSERT INTO sensor_configs (model, sensor_options, default_value, created_at, updated_at) VALUES (?, ?, ?, ?, ?)').run(
+      'POA200',
+      JSON.stringify(['PSR-12-223(封装）', 'PMT210SEN']),
+      'PSR-12-223(封装）',
+      now,
+      now
+    );
+    db.prepare('INSERT INTO sensor_configs (model, sensor_options, default_value, created_at, updated_at) VALUES (?, ?, ?, ?, ?)').run(
+      'PGA500-EX',
+      JSON.stringify(['PSR-12-223']),
+      'PSR-12-223',
+      now,
+      now
+    );
+  }
+} catch (e) {}
 try { db.exec('ALTER TABLE tasks ADD COLUMN model_id TEXT;'); } catch (e) {}
 try { db.exec('ALTER TABLE tasks ADD COLUMN bundle_id TEXT;'); } catch (e) {}
 try { db.exec('ALTER TABLE templates ADD COLUMN draft_mappings TEXT;'); } catch (e) {}

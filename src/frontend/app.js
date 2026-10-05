@@ -40,6 +40,8 @@ const state = {
   selectedWorker: null,
   workers: [],
   bundles: [],
+  salesPersons: [],
+  sensorConfigs: [],
   activeBundle: null,
   currentModel: 'POA200',
   hasPump: true,
@@ -55,6 +57,8 @@ window.addEventListener('DOMContentLoaded', async () => {
   initClientIdentity();
   initFormDefaults();
   await loadPublishedBundles();
+  await loadSalesPersons();
+  await loadSensorConfigs();
   await loadWorkers();
   await syncClientNameFromServer();
 
@@ -365,24 +369,50 @@ function onModelChange() {
   const docCombo = bundle.doc_combo;
   const showCert = docCombo === 'cert_and_packing' || docCombo === 'cert_only';
   const showPacking = docCombo === 'cert_and_packing' || docCombo === 'packing_only';
-  const isPOA200 = bundle.model_display === 'POA200';
 
-  // Toggle UI sections dynamically based on Published Bundle
+  const currentModelStr = (bundle.model_display || bundle.model || '').trim();
+  const matchedConfig = state.sensorConfigs.find(c => (c.model || '').trim().toLowerCase() === currentModelStr.toLowerCase());
+
+  // Toggle UI sections dynamically based on Published Bundle & Sensor Config
   const pumpGroup = document.getElementById('pump-group');
   const sensorModelGroup = document.getElementById('sensor-model-group');
+  const salesPersonGroup = document.getElementById('sales-person-group');
   const certFieldsGroup = document.getElementById('cert-fields-card');
   const testPointsCard = document.getElementById('test-points-card');
   const packingSection = document.getElementById('packing-section');
 
-  if (pumpGroup) pumpGroup.style.display = isPOA200 ? 'block' : 'none';
-  if (sensorModelGroup) sensorModelGroup.style.display = isPOA200 ? 'block' : 'none';
+  // Smart pump switch logic (Requirement 3):
+  // Show pump switch button ONLY if:
+  // 1) doc_combo contains packing list (cert_and_packing or packing_only)
+  // 2) associated template filename contains "带泵"
+  const packingFilename = bundle.packingTemplate?.filename || '';
+  const certFilename = bundle.certTemplate?.filename || '';
+  const hasPackingDoc = docCombo === 'cert_and_packing' || docCombo === 'packing_only';
+  const tmplHasPumpKeyword = packingFilename.includes('带泵') || certFilename.includes('带泵');
+
+  const shouldShowPump = hasPackingDoc && tmplHasPumpKeyword;
+
+  if (pumpGroup) {
+    pumpGroup.style.display = shouldShowPump ? 'block' : 'none';
+  }
+
+  if (!shouldShowPump) {
+    setPumpOption(false);
+  } else {
+    setPumpOption(true);
+  }
+
+  if (matchedConfig && Array.isArray(matchedConfig.sensor_options) && matchedConfig.sensor_options.length > 0) {
+    if (sensorModelGroup) sensorModelGroup.style.display = 'block';
+    populateSensorModelOptionsByConfig(matchedConfig, bundle);
+  } else {
+    if (sensorModelGroup) sensorModelGroup.style.display = 'none';
+  }
+
+  if (salesPersonGroup) salesPersonGroup.style.display = showCert ? 'block' : 'none';
   if (certFieldsGroup) certFieldsGroup.style.display = showCert ? 'block' : 'none';
   if (testPointsCard) testPointsCard.style.display = showCert ? 'block' : 'none';
   if (packingSection) packingSection.style.display = showPacking ? 'block' : 'none';
-
-  if (isPOA200) {
-    populateSensorModelOptions(bundle);
-  }
 
   if (showCert) {
     renderTestPoints();
@@ -391,6 +421,46 @@ function onModelChange() {
   if (showPacking) {
     initPackingItemsForModel();
   }
+}
+
+async function loadSensorConfigs() {
+  try {
+    const list = await safeFetchJson(`${API_BASE}/api/sensor-configs`);
+    state.sensorConfigs = Array.isArray(list) ? list : [];
+  } catch (e) {
+    console.warn('Load sensor configs error:', e);
+    state.sensorConfigs = [];
+  }
+}
+
+async function loadSalesPersons() {
+  const select = document.getElementById('sales-person');
+  if (!select) return;
+
+  try {
+    const list = await safeFetchJson(`${API_BASE}/api/sales-persons`);
+    state.salesPersons = Array.isArray(list) ? list : [];
+
+    if (state.salesPersons.length === 0) {
+      select.innerHTML = '<option value="陈文">陈文</option>';
+      return;
+    }
+
+    select.innerHTML = state.salesPersons.map(sp => `<option value="${escapeHtml(sp.name)}">${escapeHtml(sp.name)}</option>`).join('');
+  } catch (e) {
+    console.warn('Load sales persons error:', e);
+    select.innerHTML = '<option value="陈文">陈文</option>';
+  }
+}
+
+function populateSensorModelOptionsByConfig(matchedConfig, bundle) {
+  const select = document.getElementById('sensor-model');
+  if (!select) return;
+
+  let options = matchedConfig.sensor_options || [];
+  let defaultVal = matchedConfig.default_value || options[0] || '';
+
+  select.innerHTML = options.map(opt => `<option value="${escapeHtml(opt)}" ${opt === defaultVal ? 'selected' : ''}>${escapeHtml(opt)}</option>`).join('');
 }
 
 function populateSensorModelOptions(bundle) {
@@ -408,7 +478,7 @@ function populateSensorModelOptions(bundle) {
     }
   }
 
-  select.innerHTML = options.map(opt => `<option value="${opt}" ${opt === defaultVal ? 'selected' : ''}>${opt}</option>`).join('');
+  select.innerHTML = options.map(opt => `<option value="${escapeHtml(opt)}" ${opt === defaultVal ? 'selected' : ''}>${escapeHtml(opt)}</option>`).join('');
 }
 
 function setPumpOption(hasPump) {
@@ -473,8 +543,7 @@ function initPackingItemsForModel() {
   const deviceSn = deviceSnEl ? deviceSnEl.value.trim() : 'EX10260902';
 
   if (state.packingItems.length > 0 && state.packingItems[0]) {
-    const isPOA200 = bundle && bundle.model_display === 'POA200';
-    state.packingItems[0].remark = `SN: ${deviceSn}${isPOA200 && state.hasPump ? '带泵' : ''}`;
+    state.packingItems[0].remark = `SN: ${deviceSn}${state.hasPump ? '带泵' : ''}`;
   }
 
   renderPackingTable();
@@ -483,8 +552,7 @@ function initPackingItemsForModel() {
 function syncDeviceSnToPackingList() {
   const deviceSn = document.getElementById('device-sn').value.trim();
   if (state.packingItems && state.packingItems.length > 0) {
-    const isPOA200 = state.currentModel === 'POA200';
-    state.packingItems[0].remark = `SN: ${deviceSn}${isPOA200 && state.hasPump ? '带泵' : ''}`;
+    state.packingItems[0].remark = `SN: ${deviceSn}${state.hasPump ? '带泵' : ''}`;
     renderPackingTable();
   }
 }
@@ -576,6 +644,8 @@ async function submitTaskForm() {
   if (!bundle) return alert('当前未选择有效的已发布配置组合');
 
   const deviceSn = document.getElementById('device-sn').value.trim();
+  const salesPersonEl = document.getElementById('sales-person');
+  const salesPerson = salesPersonEl ? salesPersonEl.value.trim() : '陈文';
   const shippingLocation = document.getElementById('shipping-location') ? document.getElementById('shipping-location').value.trim() : '苏州';
 
   const ambientTempEl = document.getElementById('ambient-temp');
@@ -619,9 +689,14 @@ async function submitTaskForm() {
   const isPOA200 = bundle.model_display === 'POA200';
 
   let sensorModel = undefined;
-  if (isPOA200) {
+  const currentModelStr = (bundle.model_display || bundle.model || '').trim();
+  const matchedSensorConfig = state.sensorConfigs.find(c => (c.model || '').trim().toLowerCase() === currentModelStr.toLowerCase());
+
+  if (matchedSensorConfig && Array.isArray(matchedSensorConfig.sensor_options) && matchedSensorConfig.sensor_options.length > 0) {
     const sensorModelEl = document.getElementById('sensor-model');
-    sensorModel = sensorModelEl ? sensorModelEl.value : 'PSR-12-223(封装）';
+    if (sensorModelEl && sensorModelEl.value) {
+      sensorModel = sensorModelEl.value;
+    }
   }
 
   let sensorSn = '';
@@ -670,10 +745,11 @@ async function submitTaskForm() {
     bundleId: bundle.bundle_id,
     docCombo: bundle.doc_combo,
     deviceSn,
+    salesPerson,
     shippingLocation,
     ambientTemp,
     relativeHumidity,
-    hasPump: isPOA200 ? state.hasPump : false,
+    hasPump: state.hasPump,
     certDate,
     testPoints,
     packingItems: isPackingNeeded ? state.packingItems : []

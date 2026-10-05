@@ -75,6 +75,12 @@
           <label>设备序列号 (Inst. SN.)</label>
           <input type="text" id="device-sn" class="form-control" value="EX10260902" placeholder="例如: EX10260902" oninput="syncDeviceSnToPackingList()">
         </div>
+        <div class="form-group" id="sales-person-group">
+          <label>销售人员</label>
+          <select id="sales-person" class="form-control">
+            <!-- Dynamically populated from /api/sales-persons -->
+          </select>
+        </div>
         <div class="form-group" id="location-group">
           <label>发货目的地 (仅用于文件命名)</label>
           <input type="text" id="shipping-location" class="form-control" value="南京" placeholder="例如: 南京">

@@ -4,11 +4,12 @@ const { generateCertFilename, generatePackingListFilename, generateDuplicateCopy
 const { findFieldCandidates } = require('../src/common/matcher');
 const { getBeijingCalendarRange } = require('../src/common/utils');
 
-test('Conditional Naming Engine - POA200 Cert & Packing List (T07-T11)', () => {
+test('Conditional Naming Engine - POA200 Cert & Packing List (Latest Spec)', () => {
   const certName = generateCertFilename({
     model: 'POA200',
     deviceSn: 'AP10007513',
     acceptedDate: '2026-04-03',
+    salesPerson: '陈文',
     shippingLocation: '南京',
     sensorModel: 'PSR-12-223(封装）',
     hasPump: true,
@@ -17,36 +18,37 @@ test('Conditional Naming Engine - POA200 Cert & Packing List (T07-T11)', () => {
 
   assert.strictEqual(
     certName,
-    'POA200证书AP10007513-20260403发南京订单-PSR-12-223(封装）带泵.doc'
+    'POA200证书AP10007513-20260403-发陈文-PSR-12-223(封装）.doc'
   );
 
   const packName = generatePackingListFilename({
     model: 'POA200',
     deviceSn: 'AP10007513',
     acceptedDate: '2026-04-03',
+    shippingLocation: '南京',
     hasPump: true,
     extension: '.doc'
   });
 
   assert.strictEqual(
     packName,
-    'POA200(140)AP10007513发货清单20260403带泵.doc'
+    'POA200发货清单AP10007513带泵-发南京20260403.doc'
   );
 });
 
-test('Conditional Naming Engine - Non-POA200 Without Pump (T05, T09, T10)', () => {
+test('Conditional Naming Engine - Non-POA200 Without Pump (Latest Spec)', () => {
   const packNameOther = generatePackingListFilename({
     model: 'DPT810',
     deviceSn: 'A010007031',
     acceptedDate: '2026-04-03',
+    shippingLocation: '南京',
     hasPump: false,
     extension: '.doc'
   });
 
-  // Should NOT contain (140) and NOT contain 带泵
   assert.strictEqual(
     packNameOther,
-    'DPT810A010007031发货清单20260403.doc'
+    'DPT810发货清单A010007031-发南京20260403.doc'
   );
 });
 

@@ -530,6 +530,155 @@ function seedDefaultTemplates() {
 }
 seedDefaultTemplates();
 
+// Helper to parse comma-separated string (Chinese and English commas) into unique trimmed array
+function parseCommaSeparatedOptions(str) {
+  if (!str) return [];
+  const rawStr = typeof str === 'string' ? str : (Array.isArray(str) ? str.join(',') : String(str));
+  const tokens = rawStr.split(/[，,]/);
+  const options = [];
+  tokens.forEach(t => {
+    const cleaned = t.trim();
+    if (cleaned && !options.includes(cleaned)) {
+      options.push(cleaned);
+    }
+  });
+  return options;
+}
+
+// ==================== SENSOR CONFIGS MANAGEMENT ====================
+app.get('/api/sensor-configs', (req, res) => {
+  try {
+    const configs = db.prepare('SELECT * FROM sensor_configs ORDER BY model ASC').all().map(c => ({
+      ...c,
+      sensor_options: JSON.parse(c.sensor_options || '[]')
+    }));
+    res.json(configs);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/admin/sensor-configs', requireAdminAccess, (req, res) => {
+  try {
+    const { id, model, sensor_options, default_value } = req.body;
+    if (!model || typeof model !== 'string' || !model.trim()) {
+      return res.status(400).json({ error: '设备型号 (model) 不能为空' });
+    }
+    const cleanModel = model.trim();
+    const parsedOptions = parseCommaSeparatedOptions(sensor_options);
+    if (parsedOptions.length === 0) {
+      return res.status(400).json({ error: '传感器型号选项不能为空' });
+    }
+
+    let cleanDefault = default_value ? String(default_value).trim() : null;
+    if (cleanDefault && !parsedOptions.includes(cleanDefault)) {
+      cleanDefault = parsedOptions[0];
+    } else if (!cleanDefault && parsedOptions.length > 0) {
+      cleanDefault = parsedOptions[0];
+    }
+
+    const now = new Date().toISOString();
+    const optionsJson = JSON.stringify(parsedOptions);
+
+    let existing = id ? db.prepare('SELECT * FROM sensor_configs WHERE id = ?').get(id) : null;
+    if (!existing) {
+      existing = db.prepare('SELECT * FROM sensor_configs WHERE LOWER(TRIM(model)) = LOWER(?)').get(cleanModel);
+    }
+
+    let configId;
+    if (existing) {
+      configId = existing.id;
+      db.prepare(`
+        UPDATE sensor_configs
+        SET model = ?, sensor_options = ?, default_value = ?, updated_at = ?
+        WHERE id = ?
+      `).run(cleanModel, optionsJson, cleanDefault, now, existing.id);
+    } else {
+      const ins = db.prepare(`
+        INSERT INTO sensor_configs (model, sensor_options, default_value, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(cleanModel, optionsJson, cleanDefault, now, now);
+      configId = ins.lastInsertRowid;
+    }
+
+    logAudit(null, 'ADMIN', 'Admin', 'SAVE_SENSOR_CONFIG', { id: configId, model: cleanModel, options: parsedOptions, default_value: cleanDefault });
+    const saved = db.prepare('SELECT * FROM sensor_configs WHERE id = ?').get(configId);
+    res.json({
+      success: true,
+      config: {
+        ...saved,
+        sensor_options: JSON.parse(saved.sensor_options || '[]')
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/admin/sensor-configs/:id', requireAdminAccess, (req, res) => {
+  try {
+    const { id } = req.params;
+    const existing = db.prepare('SELECT * FROM sensor_configs WHERE id = ?').get(id);
+    if (!existing) {
+      return res.status(404).json({ error: '传感器配置不存在' });
+    }
+
+    db.prepare('DELETE FROM sensor_configs WHERE id = ?').run(id);
+    logAudit(null, 'ADMIN', 'Admin', 'DELETE_SENSOR_CONFIG', { id, model: existing.model });
+    res.json({ success: true, id });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ==================== SALES PERSONS MANAGEMENT ====================
+app.get('/api/sales-persons', (req, res) => {
+  try {
+    const list = db.prepare('SELECT * FROM sales_persons ORDER BY id ASC').all();
+    res.json(list);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/admin/sales-persons', requireAdminAccess, (req, res) => {
+  try {
+    const { name } = req.body;
+    if (!name || typeof name !== 'string' || !name.trim()) {
+      return res.status(400).json({ error: '销售人员姓名不能为空' });
+    }
+    const cleanName = name.trim();
+    const now = new Date().toISOString();
+
+    const existing = db.prepare('SELECT * FROM sales_persons WHERE name = ?').get(cleanName);
+    if (existing) {
+      return res.status(400).json({ error: `销售人员 [${cleanName}] 已存在，请勿重复添加` });
+    }
+
+    const ins = db.prepare('INSERT INTO sales_persons (name, created_at) VALUES (?, ?)').run(cleanName, now);
+    logAudit(null, 'ADMIN', 'Admin', 'ADD_SALES_PERSON', { id: ins.lastInsertRowid, name: cleanName });
+    res.json({ success: true, id: ins.lastInsertRowid, name: cleanName, created_at: now });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/admin/sales-persons/:id', requireAdminAccess, (req, res) => {
+  try {
+    const { id } = req.params;
+    const existing = db.prepare('SELECT * FROM sales_persons WHERE id = ?').get(id);
+    if (!existing) {
+      return res.status(404).json({ error: '销售人员不存在' });
+    }
+
+    db.prepare('DELETE FROM sales_persons WHERE id = ?').run(id);
+    logAudit(null, 'ADMIN', 'Admin', 'DELETE_SALES_PERSON', { id, name: existing.name });
+    res.json({ success: true, id });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ==================== CLIENT MANAGEMENT ====================
 app.post('/api/clients/register', (req, res) => {
   let { clientId, name } = req.body;
@@ -1625,6 +1774,7 @@ app.post('/api/tasks/submit', (req, res) => {
     bundleId,
     docCombo,
     deviceSn,
+    salesPerson,
     shippingLocation = '南京',
     sensorModel,
     sensorSn,
@@ -1675,29 +1825,20 @@ app.post('/api/tasks/submit', (req, res) => {
     });
   }
 
-  // F10: Sensor Model validation for non-POA200 models
-  if (resolvedModel.displayName !== 'POA200') {
-    if (sensorModel && String(sensorModel).trim() !== '') {
-      return res.status(400).json({
-        error: `非 POA200 型号 (${resolvedModel.displayName}) 严禁提交 sensorModel 传感器参数！(F10)`
-      });
-    }
-  } else {
-    try {
-      const tmpl = db.prepare("SELECT * FROM templates WHERE model = 'POA200' AND type = 'cert'").get();
-      if (tmpl && tmpl.field_mappings) {
-        const mappings = JSON.parse(tmpl.field_mappings);
-        const options = mappings.sensorModelConfig?.options || [];
-        if (options.length > 0 && sensorModel) {
-          if (!options.includes(sensorModel)) {
-            return res.status(400).json({
-              error: `传感器型号 [${sensorModel}] 不属于已发布的有效选项列表 (${options.join(', ')})！(F10)`
-            });
-          }
+  // Sensor Model option validation against sensor_configs table if configured for the model
+  try {
+    const sensorCfg = db.prepare('SELECT * FROM sensor_configs WHERE LOWER(TRIM(model)) = LOWER(?)').get(resolvedModel.displayName);
+    if (sensorCfg) {
+      const options = JSON.parse(sensorCfg.sensor_options || '[]');
+      if (options.length > 0 && sensorModel) {
+        if (!options.includes(sensorModel)) {
+          return res.status(400).json({
+            error: `传感器型号 [${sensorModel}] 不属于型号 (${resolvedModel.displayName}) 已配置的有效选项列表 (${options.join(', ')})！`
+          });
         }
       }
-    } catch (e) {}
-  }
+    }
+  } catch (e) {}
 
   // J05: Validate Device Serial Number consistency across packing list if present
   if (Array.isArray(packingItems) && packingItems.length > 0) {
@@ -1861,6 +2002,7 @@ app.post('/api/tasks/submit', (req, res) => {
 
   const acceptedAt = new Date().toISOString();
   const formData = JSON.stringify({
+    salesPerson,
     shippingLocation,
     sensorModel: resolvedModel.displayName === 'POA200' ? sensorModel : undefined,
     sensorSn: resolvedModel.displayName === 'POA200' ? sensorSn : undefined,
@@ -1891,6 +2033,7 @@ app.post('/api/tasks/submit', (req, res) => {
       model: resolvedModel.displayName,
       deviceSn: String(deviceSn),
       acceptedDate: acceptedAt,
+      salesPerson,
       shippingLocation,
       sensorModel: resolvedModel.displayName === 'POA200' ? sensorModel : undefined,
       hasPump: resolvedModel.displayName === 'POA200' ? hasPump : false
@@ -1907,7 +2050,8 @@ app.post('/api/tasks/submit', (req, res) => {
       model: resolvedModel.displayName,
       deviceSn: String(deviceSn),
       acceptedDate: acceptedAt,
-      hasPump: resolvedModel.displayName === 'POA200' ? hasPump : false
+      shippingLocation,
+      hasPump: Boolean(hasPump)
     });
 
     db.prepare(`

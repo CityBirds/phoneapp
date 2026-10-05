@@ -127,7 +127,7 @@ test('R10 / D04: Model Alias Mapping (990, 990-Ex, DPT-990-EX -> same modelId)',
   assert.equal(r1.displayName, '990');
 });
 
-test('F10: Server Rejects Non-POA Model SensorModel Parameter Submission', async () => {
+test('F10: Server Rejects Unconfigured SensorModel Parameter Submission', async () => {
   const app = require('../src/backend/server');
   const server = http.createServer(app);
   await new Promise(resolve => server.listen(serverPort + 1, resolve));
@@ -140,7 +140,7 @@ test('F10: Server Rejects Non-POA Model SensorModel Parameter Submission', async
       body: { workerId: 'worker-spec-test', name: 'Spec Worker', status: 'ONLINE' }
     });
 
-    // 2. Submit 990 task with sensorModel -> should be rejected
+    // 2. Submit POA200 task with unconfigured sensorModel -> should be rejected
     const res = await fetchJson(`http://localhost:${serverPort + 1}/api/tasks/submit`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -149,14 +149,14 @@ test('F10: Server Rejects Non-POA Model SensorModel Parameter Submission', async
         clientId: 'client_spec',
         clientName: 'Tester',
         workerId: 'worker-spec-test',
-        model: '990',
+        model: 'POA200',
         deviceSn: 'EX10260902',
-        sensorModel: 'PSR-12-223(封装）' // Invalid for non-POA!
+        sensorModel: 'UNCONFIGURED_SENSOR_XYZ' // Invalid option!
       }
     });
 
-    assert.equal(res.status, 400, 'Non-POA sensorModel submission must be rejected');
-    assert.ok(res.data.error.includes('严禁提交 sensorModel'), 'Error should state non-POA sensorModel forbidden');
+    assert.equal(res.status, 400, 'Unconfigured sensorModel submission must be rejected');
+    assert.ok(res.data.error.includes('不属于'), 'Error should state sensorModel option invalid');
   } finally {
     server.close();
   }

@@ -86,7 +86,13 @@
             </table>
           </div>
         </div>
+
+        
       </section>
+
+      
+
+      
 
       <!-- TAB 2: WORKER & PRINTER MONITORING (C02, R03, R04) -->
       <section id="sec-workers" class="admin-panel" style="display: none;">
@@ -246,6 +252,134 @@
             </table>
           </div>
         </div>
+      
+
+        <!-- Section Bottom Action Entries: Sales Persons & Sensor Configs -->
+        <div class="card" style="margin-top: 20px; background: #f8fafc; display: flex; flex-direction: column; gap: 12px;">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div>
+              <h4 style="margin: 0; color: #0f172a;">👤 销售人员名单配置</h4>
+              <p style="margin: 4px 0 0 0; font-size: 13px; color: #64748b;">该销售客户名单适用于所有的证书模板字段，可在手机端发货任务中动态选择与替换。</p>
+            </div>
+            <button type="button" class="btn btn-primary" onclick="switchTab('sales-persons')">👤 进入销售人员名单配置 ↗</button>
+          </div>
+          <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 4px 0;">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div>
+              <h4 style="margin: 0; color: #0f172a;">⚙️ 各设备传感器型号配置</h4>
+              <p style="margin: 4px 0 0 0; font-size: 13px; color: #64748b;">支持按设备型号集中配置对应的传感器选项，手机端选择型号时将自动按型号动态联动下拉框。</p>
+            </div>
+            <button type="button" class="btn btn-primary" onclick="switchTab('sensor-configs')">⚙️ 进入各设备传感器型号配置 ↗</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- SUBPAGE: SALES PERSONS CONFIGURATION -->
+      <section id="sec-sales-persons" class="admin-panel" style="display: none;">
+        <div class="panel-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+          <div>
+            <button type="button" class="btn btn-secondary btn-sm" onclick="switchTab('templates')">← 返回模板库集中管理</button>
+            <h2 style="margin-top: 10px;">👤 销售人员名单配置</h2>
+            <p style="font-size: 13px; color: #64748b; margin-top: 4px;">该销售客户名单适用于所有的证书模板字段。新增或修改的销售人员将实时同步至手机端发货任务下拉框。</p>
+          </div>
+        </div>
+
+        <div class="card" style="margin-bottom: 20px;">
+          <h3>➕ 添加新销售人员</h3>
+          <form id="add-sales-person-form" onsubmit="handleAddSalesPerson(event)" style="display: flex; gap: 12px; margin-top: 12px; align-items: center;">
+            <input type="text" id="sales-person-name-input" class="form-control" placeholder="请输入销售人员姓名 (例如: 张三, 陈文)" required style="max-width: 320px;">
+            <button type="submit" class="btn btn-primary">➕ 添加销售人员</button>
+          </form>
+        </div>
+
+        <div class="card">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
+            <h3>已有销售人员列表</h3>
+            <button type="button" class="btn btn-sm btn-outline" onclick="loadSalesPersons()">🔄 刷新列表</button>
+          </div>
+          <div class="table-responsive">
+            <table class="admin-table">
+              <thead>
+                <tr>
+                  <th style="width: 80px;">ID</th>
+                  <th>销售人员姓名</th>
+                  <th>创建时间</th>
+                  <th style="width: 120px; text-align: right;">操作</th>
+                </tr>
+              </thead>
+              <tbody id="sales-persons-tbody">
+                <!-- Dynamically loaded -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- SUBPAGE: SENSOR CONFIGS MANAGEMENT -->
+      <section id="sec-sensor-configs" class="admin-panel" style="display: none;">
+        <div class="panel-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+          <div>
+            <button type="button" class="btn btn-secondary btn-sm" onclick="switchTab('templates')">← 返回模板库集中管理</button>
+            <h2 style="margin-top: 10px;">⚙️ 各设备传感器型号配置</h2>
+            <p style="font-size: 13px; color: #64748b; margin-top: 4px;">按设备型号集中配置对应的传感器选项，支持逗号分隔去重。手机端选择相应设备型号时将自动按型号联动显示。</p>
+          </div>
+        </div>
+
+        <div class="card" style="margin-bottom: 20px;">
+          <h3 id="sensor-form-title">➕ 新增 / 编辑设备传感器配置</h3>
+          <form id="sensor-config-form" onsubmit="handleSaveSensorConfig(event)">
+            <input type="hidden" id="sensor-cfg-id">
+            <div style="display: grid; grid-template-columns: 1fr 2fr 1fr auto; gap: 12px; margin-top: 12px; align-items: flex-end;">
+              <div class="form-group">
+                <label>设备型号 (model) *</label>
+                <input type="text" id="sensor-cfg-model" class="form-control" placeholder="如 POA200, PGA500-EX" required>
+              </div>
+              <div class="form-group">
+                <label>传感器型号选项 (逗号分隔) *</label>
+                <input type="text" id="sensor-cfg-options" class="form-control" placeholder="如 PSR-12-223(封装）, PMT210SEN" required oninput="previewSensorConfigFormOptions()">
+              </div>
+              <div class="form-group">
+                <label>默认选中的型号 (可选)</label>
+                <select id="sensor-cfg-default" class="form-control">
+                  <option value="">(无默认值)</option>
+                </select>
+              </div>
+              <div style="display: flex; gap: 8px;">
+                <button type="button" class="btn btn-secondary" onclick="resetSensorConfigForm()" style="height: 38px;">重置</button>
+                <button type="submit" class="btn btn-primary" style="height: 38px;">保存传感器配置</button>
+              </div>
+            </div>
+            <div style="margin-top: 10px;">
+              <b>解析去重选项预览：</b>
+              <div id="sensor-cfg-preview-pills" style="margin-top: 6px; display: flex; gap: 8px; flex-wrap: wrap;">
+                <!-- Dynamic pills -->
+              </div>
+            </div>
+          </form>
+        </div>
+
+        <div class="card">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
+            <h3>各设备型号已配置传感器清单</h3>
+            <button type="button" class="btn btn-sm btn-outline" onclick="loadSensorConfigs()">🔄 刷新列表</button>
+          </div>
+          <div class="table-responsive">
+            <table class="admin-table">
+              <thead>
+                <tr>
+                  <th style="width: 140px;">设备型号</th>
+                  <th>可选传感器型号选项</th>
+                  <th>默认选中项</th>
+                  <th style="width: 180px;">更新时间</th>
+                  <th style="width: 140px; text-align: right;">操作</th>
+                </tr>
+              </thead>
+              <tbody id="sensor-configs-tbody">
+                <!-- Dynamically loaded -->
+              </tbody>
+            </table>
+          </div>
+        </div>
       </section>
 
       <!-- TAB 4: FIELD MATCHER (C04, C05, T03: 自动识别字段位置辅助匹配) -->
@@ -306,30 +440,6 @@
           </div>
         </div>
 
-        <div id="sensor-model-config-card" class="card" style="margin-top: 20px; display: none;">
-          <h3>⚙️ POA200 传感器型号下拉选项配置 (仅用于文件命名)</h3>
-          <p style="font-size: 13px; color: #64748b; margin-top: 4px;">
-            针对 POA200 模板配置传感器型号下拉选项（支持中文逗号“，”或英文逗号“,”分隔）。仅用于发货证书文件命名，不写入 Word 正文，不强求 Word 位置坐标。
-          </p>
-          <div style="display: grid; grid-template-columns: 2fr 1fr; gap: 16px; margin-top: 12px; align-items: start;">
-            <div class="form-group">
-              <label>传感器型号选项 (输入格式：型号A， 型号B,型号A,, 型号C)</label>
-              <input type="text" id="sensor-options-input" class="form-control" value="PSR-12-223(封装）， PMT210SEN" oninput="previewSensorOptions()">
-            </div>
-            <div class="form-group">
-              <label>默认选中的型号（可选）</label>
-              <select id="sensor-default-select" class="form-control">
-                <option value="">(无默认值)</option>
-              </select>
-            </div>
-          </div>
-          <div style="margin-top: 10px;">
-            <b>解析去重选项预览：</b>
-            <div id="sensor-options-preview-pills" style="margin-top: 6px; display: flex; gap: 8px; flex-wrap: wrap;">
-              <!-- Dynamic Pills -->
-            </div>
-          </div>
-        </div>
       </section>
 
       <!-- TAB 5: AUDIT LOGS & GLOBAL TASKS (C13, R33) -->

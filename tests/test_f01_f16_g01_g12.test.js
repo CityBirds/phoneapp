@@ -170,18 +170,18 @@ test('F09: Non-POA certificate filename generation without sensor segment', () =
     model: 'DPT810',
     deviceSn: 'A10009999',
     acceptedDate: '2026-09-28',
+    salesPerson: '陈文',
     shippingLocation: '成都',
     sensorModel: undefined,
     hasPump: false
   });
 
-  assert.equal(name, 'DPT810证书A10009999-20260928发成都订单.doc');
+  assert.equal(name, 'DPT810证书A10009999-20260928-发陈文.doc');
   assert.ok(!name.includes('undefined'));
-  assert.ok(!name.includes('订单-.doc'));
 });
 
-// F10: Reject non-POA sensor model submission or out-of-option submission
-test('F10: Server rejects non-POA sensor model parameter submission', async () => {
+// F10: Reject unconfigured sensor model submission
+test('F10: Server rejects unconfigured sensor model parameter submission', async () => {
   // First ensure worker is online so task submission proceeds to validation
   await fetch(`http://localhost:${PORT}/api/workers/heartbeat`, {
     method: 'POST',
@@ -201,15 +201,15 @@ test('F10: Server rejects non-POA sensor model parameter submission', async () =
       clientId: 'client_f10',
       clientName: 'Tester',
       workerId: 'worker-val-f10',
-      model: 'DPT810',
-      deviceSn: 'A10009999',
-      sensorModel: 'PSR-12-223(封装）' // Non-POA model sending sensorModel should be rejected!
+      model: 'POA200',
+      deviceSn: 'AP10007513',
+      sensorModel: 'UNCONFIGURED_XYZ' // Unconfigured option!
     })
   });
 
   assert.equal(res.status, 400);
   const data = await res.json();
-  assert.ok(data.error.includes('严禁提交 sensorModel'));
+  assert.ok(data.error.includes('不属于'));
 });
 
 // F11: POA sensor model does not overwrite packing list spec PMT210SEN
