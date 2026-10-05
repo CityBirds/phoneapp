@@ -95,19 +95,20 @@ function resolveModelAlias(inputModel) {
     }
   }
 
-  // Default hardcoded alias resolution fallback
+  // Default hardcoded alias resolution fallback (strict matching to avoid cross-model collision)
   const upper = str.toUpperCase();
-  if (upper === 'POA200' || upper.includes('POA')) {
+  if (upper === 'POA200' || upper === 'POA-200' || upper === 'POA 200') {
     return { modelId: 'model_poa200', displayName: 'POA200' };
   }
-  if (upper === 'DPT810' || upper.includes('810')) {
+  if (upper === 'DPT810' || upper === 'DPT-810' || upper === 'DPT 810') {
     return { modelId: 'model_dpt810', displayName: 'DPT810' };
   }
-  if (upper === '990' || upper === '990-EX' || upper === 'DPT-990-EX' || upper.includes('990')) {
+  if (upper === '990' || upper === '990-EX' || upper === 'DPT-990-EX' || upper === 'DPT-990-Ex') {
     return { modelId: 'model_990', displayName: '990' };
   }
 
-  return { modelId: `model_${upper.toLowerCase()}`, displayName: upper };
+  const cleanKey = upper.toLowerCase().replace(/[^a-z0-9_-]/g, '');
+  return { modelId: `model_${cleanKey || 'unknown'}`, displayName: upper };
 }
 
 // Three-in-One Template Validation Helper
@@ -834,6 +835,21 @@ function isPathInWorkerAllowedPaths(workerId, targetPath, requireWrite = true, s
 
 app.get('/api/published-bundles', (req, res) => {
   const { workerId } = req.query;
+
+  // Auto-heal / sync published bundles for any models that have valid published templates but no active bundle
+  try {
+    const publishedTmplModels = db.prepare("SELECT DISTINCT model FROM templates WHERE published_at IS NOT NULL").all();
+    for (const row of publishedTmplModels) {
+      const resolved = resolveModelAlias(row.model);
+      const hasActive = db.prepare("SELECT 1 FROM published_bundles WHERE (model_id = ? OR model_display = ?) AND status = 'PUBLISHED'").get(resolved.modelId, row.model);
+      if (!hasActive) {
+        syncPublishedBundlesForModel(row.model);
+      }
+    }
+  } catch (e) {
+    console.warn('[SyncBundles Auto-Heal Warning]', e.message);
+  }
+
   const rawBundles = db.prepare("SELECT * FROM published_bundles WHERE status = 'PUBLISHED' ORDER BY id ASC").all();
   const validBundles = [];
 
@@ -863,8 +879,26 @@ app.get('/api/published-bundles', (req, res) => {
 
     // When workerId is specified, filter by worker enablement and determine effective docCombo (Section 5, WC-11, WC-12)
     if (workerId) {
-      const certCfg = certTmpl ? db.prepare('SELECT * FROM worker_save_configs WHERE worker_id = ? AND template_id = ? AND doc_type = ?').get(workerId, certTmpl.id, 'cert') : null;
-      const packCfg = packTmpl ? db.prepare('SELECT * FROM worker_save_configs WHERE worker_id = ? AND template_id = ? AND doc_type = ?').get(workerId, packTmpl.id, 'packing') : null;
+      let certCfg = certTmpl ? db.prepare('SELECT * FROM worker_save_configs WHERE worker_id = ? AND template_id = ? AND doc_type = ?').get(workerId, certTmpl.id, 'cert') : null;
+      let packCfg = packTmpl ? db.prepare('SELECT * FROM worker_save_configs WHERE worker_id = ? AND template_id = ? AND doc_type = ?').get(workerId, packTmpl.id, 'packing') : null;
+
+      // Model-level fallback: if exact template_id was not matched (e.g. template re-uploaded or version updated), match by model
+      if (!certCfg && certTmpl) {
+        certCfg = db.prepare(`
+          SELECT wsc.* FROM worker_save_configs wsc
+          JOIN templates t ON wsc.template_id = t.id
+          WHERE wsc.worker_id = ? AND (t.model = ? OR t.model = ?) AND wsc.doc_type = 'cert'
+          ORDER BY wsc.updated_at DESC
+        `).get(workerId, certTmpl.model, b.model_display);
+      }
+      if (!packCfg && packTmpl) {
+        packCfg = db.prepare(`
+          SELECT wsc.* FROM worker_save_configs wsc
+          JOIN templates t ON wsc.template_id = t.id
+          WHERE wsc.worker_id = ? AND (t.model = ? OR t.model = ?) AND wsc.doc_type = 'packing'
+          ORDER BY wsc.updated_at DESC
+        `).get(workerId, packTmpl.model, b.model_display);
+      }
 
       const certEnabled = certCfg && Boolean(certCfg.is_enabled);
       const packEnabled = packCfg && Boolean(packCfg.is_enabled);
@@ -974,6 +1008,17 @@ app.post('/api/templates/upload', requireAdminAccess, upload.single('templateFil
 
   const userModel = String(model).trim();
   const resolved = resolveModelAlias(userModel);
+  try {
+    const existingModel = db.prepare('SELECT id FROM models WHERE id = ?').get(resolved.modelId);
+    if (!existingModel) {
+      db.prepare('INSERT OR IGNORE INTO models (id, display_name, aliases, created_at) VALUES (?, ?, ?, ?)').run(
+        resolved.modelId,
+        userModel,
+        JSON.stringify([userModel]),
+        new Date().toISOString()
+      );
+    }
+  } catch (e) {}
   const originalName = fixMulterFilename(req.file.originalname);
   const cleanKey = userModel.toLowerCase().replace(/[^a-zA-Z0-9_-]/g, '');
   const tmplId = `tmpl_${cleanKey || resolved.displayName.toLowerCase()}_${type}_${Date.now()}`;
