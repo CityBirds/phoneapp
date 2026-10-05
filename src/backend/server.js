@@ -1830,15 +1830,27 @@ app.post('/api/tasks/submit', (req, res) => {
     const sensorCfg = db.prepare('SELECT * FROM sensor_configs WHERE LOWER(TRIM(model)) = LOWER(?)').get(resolvedModel.displayName);
     if (sensorCfg) {
       const options = JSON.parse(sensorCfg.sensor_options || '[]');
-      if (options.length > 0 && sensorModel) {
-        if (!options.includes(sensorModel)) {
+      if (options.length > 0) {
+        if (sensorModel && !options.includes(sensorModel)) {
           return res.status(400).json({
             error: `传感器型号 [${sensorModel}] 不属于型号 (${resolvedModel.displayName}) 已配置的有效选项列表 (${options.join(', ')})！`
           });
         }
+      } else if (sensorModel) {
+        return res.status(400).json({
+          error: `设备型号 (${resolvedModel.displayName}) 未配置有效的传感器型号，拒绝提交传感器参数！`
+        });
       }
+    } else if (sensorModel) {
+      return res.status(400).json({
+        error: `设备型号 (${resolvedModel.displayName}) 未配置传感器型号选项，拒绝提交传感器参数！`
+      });
     }
-  } catch (e) {}
+  } catch (e) {
+    if (e.message && e.message.includes('拒绝')) {
+      return res.status(400).json({ error: e.message });
+    }
+  }
 
   // J05: Validate Device Serial Number consistency across packing list if present
   if (Array.isArray(packingItems) && packingItems.length > 0) {
@@ -2004,7 +2016,7 @@ app.post('/api/tasks/submit', (req, res) => {
   const formData = JSON.stringify({
     salesPerson,
     shippingLocation,
-    sensorModel: resolvedModel.displayName === 'POA200' ? sensorModel : undefined,
+    sensorModel: sensorModel ? String(sensorModel).trim() : undefined,
     sensorSn: resolvedModel.displayName === 'POA200' ? sensorSn : undefined,
     ambientTemp,
     relativeHumidity,
@@ -2035,7 +2047,7 @@ app.post('/api/tasks/submit', (req, res) => {
       acceptedDate: acceptedAt,
       salesPerson,
       shippingLocation,
-      sensorModel: resolvedModel.displayName === 'POA200' ? sensorModel : undefined,
+      sensorModel: sensorModel ? String(sensorModel).trim() : undefined,
       hasPump: resolvedModel.displayName === 'POA200' ? hasPump : false
     });
 

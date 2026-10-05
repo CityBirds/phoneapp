@@ -5,6 +5,17 @@
 
 const API_BASE = window.location.origin;
 
+// HTML Escape Helper (R01, P01)
+function escapeHtml(str) {
+  if (str === null || str === undefined) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
 // Safe JSON Fetch helper (Handles HTML and non-JSON responses cleanly)
 async function safeFetchJson(url, options = {}) {
   let res;
@@ -42,6 +53,7 @@ const state = {
   bundles: [],
   salesPersons: [],
   sensorConfigs: [],
+  sensorConfigLoadFailed: false,
   activeBundle: null,
   currentModel: 'POA200',
   hasPump: true,
@@ -56,9 +68,9 @@ const state = {
 window.addEventListener('DOMContentLoaded', async () => {
   initClientIdentity();
   initFormDefaults();
+  await loadSensorConfigs();
   await loadPublishedBundles();
   await loadSalesPersons();
-  await loadSensorConfigs();
   await loadWorkers();
   await syncClientNameFromServer();
 
@@ -240,7 +252,8 @@ async function selectWorker(worker, shouldSwitchTab = true) {
     state.currentModel = '';
   }
 
-  // Reload published bundles for this specific worker (Section 5, WC-11, WC-12)
+  // Reload published bundles and sensor configs for this specific worker (Section 5, WC-11, WC-12)
+  await loadSensorConfigs();
   await loadPublishedBundles(worker.id);
 
   if (shouldSwitchTab) {
@@ -402,12 +415,7 @@ function onModelChange() {
     setPumpOption(true);
   }
 
-  if (matchedConfig && Array.isArray(matchedConfig.sensor_options) && matchedConfig.sensor_options.length > 0) {
-    if (sensorModelGroup) sensorModelGroup.style.display = 'block';
-    populateSensorModelOptionsByConfig(matchedConfig, bundle);
-  } else {
-    if (sensorModelGroup) sensorModelGroup.style.display = 'none';
-  }
+  refreshSensorOptions();
 
   if (salesPersonGroup) salesPersonGroup.style.display = showCert ? 'block' : 'none';
   if (certFieldsGroup) certFieldsGroup.style.display = showCert ? 'block' : 'none';
@@ -427,9 +435,59 @@ async function loadSensorConfigs() {
   try {
     const list = await safeFetchJson(`${API_BASE}/api/sensor-configs`);
     state.sensorConfigs = Array.isArray(list) ? list : [];
+    state.sensorConfigLoadFailed = false;
   } catch (e) {
     console.warn('Load sensor configs error:', e);
     state.sensorConfigs = [];
+    state.sensorConfigLoadFailed = true;
+  }
+  refreshSensorOptions();
+}
+
+function refreshSensorOptions() {
+  const sensorModelGroup = document.getElementById('sensor-model-group');
+  const select = document.getElementById('sensor-model');
+  const statusTip = document.getElementById('sensor-config-status');
+  const retryBtn = document.getElementById('btn-retry-sensor-configs');
+  if (!sensorModelGroup || !select) return;
+
+  if (state.sensorConfigLoadFailed) {
+    sensorModelGroup.style.display = 'block';
+    if (statusTip) {
+      statusTip.style.display = 'block';
+      statusTip.className = 'status-tip error';
+      statusTip.innerHTML = '⚠️ 传感器可选配置加载失败，请重试';
+    }
+    if (retryBtn) retryBtn.style.display = 'inline-block';
+    return;
+  }
+
+  if (statusTip) statusTip.style.display = 'none';
+  if (retryBtn) retryBtn.style.display = 'none';
+
+  const bundle = state.activeBundle;
+  const currentModelStr = (bundle ? (bundle.model_display || bundle.model || '') : state.currentModel || '').trim();
+  const matchedConfig = state.sensorConfigs.find(c => (c.model || '').trim().toLowerCase() === currentModelStr.toLowerCase());
+
+  if (matchedConfig && Array.isArray(matchedConfig.sensor_options) && matchedConfig.sensor_options.length > 0) {
+    sensorModelGroup.style.display = 'block';
+    const options = matchedConfig.sensor_options;
+    const defaultVal = matchedConfig.default_value || options[0] || '';
+    const currentVal = select.value;
+
+    select.innerHTML = options.map(opt => `<option value="${escapeHtml(opt)}">${escapeHtml(opt)}</option>`).join('');
+
+    if (currentVal && options.includes(currentVal)) {
+      select.value = currentVal;
+    } else {
+      select.value = defaultVal;
+      if (currentVal && !options.includes(currentVal)) {
+        alert(`已选择的传感器型号 [${currentVal}] 在最新配置中已失效或被删除，已自动重置为默认值 [${defaultVal}]，请核对。`);
+      }
+    }
+  } else {
+    sensorModelGroup.style.display = 'none';
+    select.innerHTML = '';
   }
 }
 
@@ -485,6 +543,7 @@ function setPumpOption(hasPump) {
   state.hasPump = hasPump;
   document.getElementById('pump-yes').className = hasPump ? 'toggle-btn active' : 'toggle-btn';
   document.getElementById('pump-no').className = !hasPump ? 'toggle-btn active' : 'toggle-btn';
+  syncDeviceSnToPackingList();
 }
 
 function renderTestPoints() {
@@ -528,6 +587,42 @@ function renderTestPoints() {
   `).join('');
 }
 
+function findMainDeviceRowIndex() {
+  if (!state.packingItems || state.packingItems.length === 0) return -1;
+  const bundle = state.activeBundle;
+  const packTmpl = bundle ? bundle.packingTemplate : null;
+
+  if (packTmpl && packTmpl.field_mappings) {
+    const mappings = packTmpl.field_mappings;
+    if (typeof mappings.mainDeviceRowIndex === 'number' && mappings.mainDeviceRowIndex >= 0) {
+      if (state.packingItems[mappings.mainDeviceRowIndex]) return mappings.mainDeviceRowIndex;
+    }
+    if (typeof mappings.mainDeviceRowNumber === 'number' && mappings.mainDeviceRowNumber >= 1) {
+      const idx = state.packingItems.findIndex(it => (it.index || 0) === mappings.mainDeviceRowNumber);
+      if (idx !== -1) return idx;
+    }
+  }
+
+  // Exact name or row heuristics
+  const mainIdx = state.packingItems.findIndex(it => (it.name || '').trim() === '主设备');
+  if (mainIdx !== -1) return mainIdx;
+
+  // Fallback to row 1 if verified to be protected / standard main row
+  const protectedRows = (packTmpl && packTmpl.field_mappings && packTmpl.field_mappings.protectedRows) || [1];
+  if (state.packingItems[0] && (state.packingItems[0].isProtected || protectedRows.includes(1))) {
+    return 0;
+  }
+
+  return -1;
+}
+
+function generateMainDeviceRemark(sn, hasPump) {
+  const cleanSn = String(sn || '').trim();
+  if (!cleanSn) return '';
+  const pumpStr = hasPump ? '带泵' : '';
+  return `SN: ${cleanSn}${pumpStr}`;
+}
+
 function initPackingItemsForModel() {
   const bundle = state.activeBundle;
   const packTmpl = bundle ? bundle.packingTemplate : null;
@@ -539,20 +634,24 @@ function initPackingItemsForModel() {
 
   state.packingItems = JSON.parse(JSON.stringify(itemsConfig));
 
-  const deviceSnEl = document.getElementById('device-sn');
-  const deviceSn = deviceSnEl ? deviceSnEl.value.trim() : 'EX10260902';
-
-  if (state.packingItems.length > 0 && state.packingItems[0]) {
-    state.packingItems[0].remark = `SN: ${deviceSn}${state.hasPump ? '带泵' : ''}`;
-  }
-
-  renderPackingTable();
+  syncDeviceSnToPackingList();
 }
 
 function syncDeviceSnToPackingList() {
-  const deviceSn = document.getElementById('device-sn').value.trim();
-  if (state.packingItems && state.packingItems.length > 0) {
-    state.packingItems[0].remark = `SN: ${deviceSn}${state.hasPump ? '带泵' : ''}`;
+  if (!state.packingItems || state.packingItems.length === 0) return;
+  const deviceSnEl = document.getElementById('device-sn');
+  const rawSn = deviceSnEl ? deviceSnEl.value : '';
+  const mainIdx = findMainDeviceRowIndex();
+
+  if (mainIdx === -1) {
+    console.warn('Unable to locate main device row in packing items');
+    return;
+  }
+
+  const targetRow = state.packingItems[mainIdx];
+  const newRemark = generateMainDeviceRemark(rawSn, state.hasPump);
+  if (targetRow.remark !== newRemark) {
+    targetRow.remark = newRemark;
     renderPackingTable();
   }
 }
@@ -572,13 +671,19 @@ function renderPackingTable() {
       ? `${item.name} <span class="badge badge-warning">保护行</span>`
       : `<input type="text" class="form-control" value="${item.name || ''}" placeholder="自定义物料名称" onchange="updatePackingItem(${idx}, 'name', this.value)">`;
 
+    const mainDeviceIdx = findMainDeviceRowIndex();
+    const isMainDeviceRow = (idx === mainDeviceIdx);
+    const remarkCell = isMainDeviceRow
+      ? `<input type="text" class="form-control" value="${escapeHtml(item.remark || '')}" readonly style="background: #f1f5f9; color: #334155;">`
+      : `<input type="text" class="form-control" value="${escapeHtml(item.remark || '')}" onchange="updatePackingItem(${idx}, 'remark', this.value)">`;
+
     return `
       <tr>
         <td><b>${rowNum}</b></td>
         <td>${nameInput}</td>
-        <td><input type="text" class="form-control" value="${item.spec || ''}" onchange="updatePackingItem(${idx}, 'spec', this.value)"></td>
+        <td><input type="text" class="form-control" value="${escapeHtml(item.spec || '')}" onchange="updatePackingItem(${idx}, 'spec', this.value)"></td>
         <td><input type="number" class="form-control" style="width: 60px;" value="${item.count || 1}" onchange="updatePackingItem(${idx}, 'count', this.value)"></td>
-        <td><input type="text" class="form-control" style="width: 60px;" value="${item.unit || '件'}" onchange="updatePackingItem(${idx}, 'unit', this.value)"></td>
+        <td><input type="text" class="form-control" style="width: 60px;" value="${escapeHtml(item.unit || '件')}" onchange="updatePackingItem(${idx}, 'unit', this.value)"></td>
         <td>${isProtected 
             ? (item.standard || '是') 
             : `<select class="form-control" style="width: 65px; padding: 2px 4px; font-size: 13px;" onchange="updatePackingItem(${idx}, 'standard', this.value)">
@@ -586,7 +691,7 @@ function renderPackingTable() {
                 <option value="是" ${item.standard !== '否' ? 'selected' : ''}>是</option>
               </select>`
           }</td>
-        <td><input type="text" class="form-control" value="${item.remark || ''}" onchange="updatePackingItem(${idx}, 'remark', this.value)"></td>
+        <td>${remarkCell}</td>
         <td>
           ${isProtected 
             ? '<span style="color: #94a3b8; font-size: 12px;">不可删</span>' 
@@ -708,15 +813,20 @@ async function submitTaskForm() {
     }
   }
 
-  // Validate custom material names in packing list
+  // Sync Device SN and validate custom material names in packing list
   if (isPackingNeeded) {
+    syncDeviceSnToPackingList();
+    const mainIdx = findMainDeviceRowIndex();
+    if (mainIdx === -1) {
+      alert('无法确定装箱清单中的主设备行，请检查模板配置！');
+      return;
+    }
     for (let i = 0; i < state.packingItems.length; i++) {
       const item = state.packingItems[i];
       if (!item.name || !item.name.trim()) {
         return alert(`第 ${i + 1} 行物料名称不能为空，请输入有效的自定义物料名称！`);
       }
     }
-    state.packingItems[0].remark = `SN: ${deviceSn}${isPOA200 && state.hasPump ? '带泵' : ''}`;
   }
 
   // Dynamic test points gathering based on DOM table rows
@@ -755,8 +865,10 @@ async function submitTaskForm() {
     packingItems: isPackingNeeded ? state.packingItems : []
   };
 
-  if (isPOA200 && sensorModel) {
+  if (sensorModel) {
     payload.sensorModel = sensorModel;
+  }
+  if (isPOA200 && sensorSn) {
     payload.sensorSn = sensorSn;
   }
 
@@ -1037,6 +1149,8 @@ function switchNavTab(tabName) {
     loadHistoryList();
   } else if (tabName === 'workers') {
     loadWorkers();
+  } else if (tabName === 'create') {
+    loadSensorConfigs();
   }
 }
 
