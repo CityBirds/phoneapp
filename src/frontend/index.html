@@ -73,7 +73,7 @@
         <div class="card-title">共用单值字段 (同步到证书与清单)</div>
         <div class="form-group">
           <label>设备序列号 (Inst. SN.)</label>
-          <input type="text" id="device-sn" class="form-control" value="EX10260902" placeholder="例如: EX10260902" oninput="syncDeviceSnToPackingList()">
+          <input type="text" id="device-sn" class="form-control" value="EX10260902" placeholder="例如: EX10260902" onchange="syncDeviceSnToPackingList()" onblur="syncDeviceSnToPackingList()">
         </div>
         <div class="form-group" id="sales-person-group">
           <label>销售人员</label>
@@ -82,14 +82,16 @@
           </select>
         </div>
         <div class="form-group" id="location-group">
-          <label>发货目的地 (仅用于文件命名)</label>
+          <label>发货目的地</label>
           <input type="text" id="shipping-location" class="form-control" value="南京" placeholder="例如: 南京">
         </div>
         <div class="form-group" id="sensor-model-group" style="display: none;">
-          <label>传感器型号 (仅适用 POA200)</label>
+          <label>传感器型号</label>
           <select id="sensor-model" class="form-control">
             <!-- Dynamically populated -->
           </select>
+          <div id="sensor-config-status" class="status-tip" style="display: none; margin-top: 8px; font-size: 13px;"></div>
+          <button type="button" id="btn-retry-sensor-configs" class="btn btn-sm btn-primary" style="display: none; margin-top: 8px;" onclick="loadSensorConfigs()">🔄 重试加载配置</button>
         </div>
       </div>
 
