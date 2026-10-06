@@ -100,6 +100,9 @@ function resolveModelAlias(inputModel) {
   if (upper === 'POA200' || upper === 'POA-200' || upper === 'POA 200') {
     return { modelId: 'model_poa200', displayName: 'POA200' };
   }
+  if (upper === 'POA3500' || upper === 'POA-3500' || upper === 'POA 3500' || upper === '3500') {
+    return { modelId: 'model_poa3500', displayName: 'POA3500' };
+  }
   if (upper === 'DPT810' || upper === 'DPT-810' || upper === 'DPT 810') {
     return { modelId: 'model_dpt810', displayName: 'DPT810' };
   }
@@ -241,6 +244,51 @@ function syncPublishedBundlesForModel(modelName) {
       });
     });
   } else if (validCertTmpls.length > 0) {
+    let fallbackPackTmpl = null;
+    if (validPackTmpls.length === 0 && (mName.toUpperCase().includes('POA') || mName === '3500')) {
+      const poaPack = db.prepare("SELECT * FROM templates WHERE model = 'POA200' AND type = 'packing' AND published_at IS NOT NULL").get();
+      if (poaPack) {
+        const v = validateTemplateThreeInOne(poaPack);
+        if (v.valid) {
+          fallbackPackTmpl = { ...poaPack, mappings: v.mappings };
+        }
+      }
+    }
+
+    if (fallbackPackTmpl) {
+      validCertTmpls.forEach(certTmpl => {
+        const fullBundleId = `bundle_${mName.toLowerCase()}_full`;
+        const fullOptionName = '带清单';
+        const fullSnapshot = {
+          model: mName,
+          docCombo: 'cert_and_packing',
+          certTemplate: { ...certTmpl, field_mappings: certTmpl.mappings },
+          packingTemplate: { ...fallbackPackTmpl, field_mappings: fallbackPackTmpl.mappings },
+          tableConfig: certTmpl.mappings.tableConfig || null,
+          testPoints: certTmpl.mappings.testPoints || [],
+          packingItems: ensureMainDeviceSpec(fallbackPackTmpl.mappings.packingItems || [], mName),
+          sensorModelConfig: certTmpl.mappings.sensorModelConfig || {}
+        };
+        db.prepare(`
+          INSERT INTO published_bundles (id, bundle_id, version, model_id, model_display, option_name, doc_combo, cert_template_id, packing_template_id, status, published_at, config_snapshot)
+          VALUES (?, ?, ?, ?, ?, ?, 'cert_and_packing', ?, ?, 'PUBLISHED', ?, ?)
+          ON CONFLICT(id) DO UPDATE SET
+            bundle_id = excluded.bundle_id,
+            version = excluded.version,
+            model_id = excluded.model_id,
+            model_display = excluded.model_display,
+            option_name = excluded.option_name,
+            doc_combo = excluded.doc_combo,
+            cert_template_id = excluded.cert_template_id,
+            packing_template_id = excluded.packing_template_id,
+            status = 'PUBLISHED',
+            published_at = excluded.published_at,
+            config_snapshot = excluded.config_snapshot
+        `).run(fullBundleId, fullBundleId, certTmpl.version || 'v1.0', resolved.modelId, mName, fullOptionName, certTmpl.id, fallbackPackTmpl.id, now, JSON.stringify(fullSnapshot));
+        generatedBundleIds.add(fullBundleId);
+      });
+    }
+
     validCertTmpls.forEach(certTmpl => {
       const bundleId = `bundle_${mName.toLowerCase()}_cert`;
       const optionName = '仅证书';
@@ -403,6 +451,10 @@ function seedDefaultTemplates() {
     INSERT OR IGNORE INTO models (id, display_name, aliases, created_at)
     VALUES (?, ?, ?, ?)
   `).run('model_990', '990', JSON.stringify(['990', '990-Ex', 'DPT-990-EX', 'DPT-990-Ex']), now);
+  db.prepare(`
+    INSERT OR IGNORE INTO models (id, display_name, aliases, created_at)
+    VALUES (?, ?, ?, ?)
+  `).run('model_poa3500', 'POA3500', JSON.stringify(['POA3500', 'POA-3500', 'POA 3500', '3500']), now);
 
   // 2. Seed Templates
   const samplesDir = path.join(__dirname, '../../samples');
@@ -1842,6 +1894,9 @@ app.post('/api/tasks/validate-directories', (req, res) => {
     if (!packTmpl) {
       packTmpl = db.prepare("SELECT * FROM templates WHERE (model = ? OR model = ?) AND type = 'packing'").get(model, resolvedModel.displayName);
     }
+    if (!packTmpl && (resolvedModel.displayName.toUpperCase().includes('POA') || model === '3500')) {
+      packTmpl = db.prepare("SELECT * FROM templates WHERE model = 'POA200' AND type = 'packing'").get();
+    }
 
     if (!packTmpl) {
       errors.push(`未找到 ${resolvedModel.displayName} 对应的装箱清单模板`);
@@ -2063,6 +2118,9 @@ app.post('/api/tasks/submit', (req, res) => {
     }
     if (!packTmpl) {
       packTmpl = db.prepare("SELECT * FROM templates WHERE (model = ? OR model = ?) AND type = 'packing'").get(model, resolvedModel.displayName);
+    }
+    if (!packTmpl && (resolvedModel.displayName.toUpperCase().includes('POA') || model === '3500')) {
+      packTmpl = db.prepare("SELECT * FROM templates WHERE model = 'POA200' AND type = 'packing'").get();
     }
 
     if (!packTmpl) {
@@ -2304,7 +2362,57 @@ app.get('/api/worker/tasks/pending', (req, res) => {
       db.prepare("UPDATE tasks SET status = 'IN_PROGRESS', worker_id = ? WHERE id = ?").run(workerId, task.id);
       db.exec('COMMIT');
 
-      const files = db.prepare('SELECT * FROM task_files WHERE task_id = ?').all(task.id);
+      let bundle = null;
+      if (task.bundle_id) {
+        bundle = db.prepare('SELECT * FROM published_bundles WHERE bundle_id = ?').get(task.bundle_id);
+      }
+      if (!bundle && task.model_id) {
+        bundle = db.prepare('SELECT * FROM published_bundles WHERE model_id = ?').get(task.model_id);
+      }
+
+      const files = db.prepare('SELECT * FROM task_files WHERE task_id = ?').all(task.id).map(f => {
+        let templateId = null;
+        let fieldMappings = null;
+        if (bundle) {
+          if (f.file_type === 'cert') {
+            templateId = bundle.cert_template_id;
+            if (bundle.config_snapshot) {
+              try {
+                const snap = JSON.parse(bundle.config_snapshot);
+                if (snap.certTemplate && snap.certTemplate.field_mappings) {
+                  fieldMappings = snap.certTemplate.field_mappings;
+                }
+              } catch (e) {}
+            }
+          } else if (f.file_type === 'packing') {
+            templateId = bundle.packing_template_id;
+            if (bundle.config_snapshot) {
+              try {
+                const snap = JSON.parse(bundle.config_snapshot);
+                if (snap.packingTemplate && snap.packingTemplate.field_mappings) {
+                  fieldMappings = snap.packingTemplate.field_mappings;
+                }
+              } catch (e) {}
+            }
+          }
+        }
+        if (!templateId) {
+          let tmpl = db.prepare("SELECT * FROM templates WHERE (model = ? OR model = ?) AND type = ? AND published_at IS NOT NULL").get(task.model, resolvedModel.displayName, f.file_type);
+          if (!tmpl && f.file_type === 'packing' && (resolvedModel.displayName.toUpperCase().includes('POA') || task.model === '3500')) {
+            tmpl = db.prepare("SELECT * FROM templates WHERE model = 'POA200' AND type = 'packing' AND published_at IS NOT NULL").get();
+          }
+          if (tmpl) {
+            templateId = tmpl.id;
+            fieldMappings = JSON.parse(tmpl.draft_mappings || tmpl.field_mappings || '{}');
+          }
+        }
+        return {
+          ...f,
+          template_id: templateId,
+          field_mappings: fieldMappings
+        };
+      });
+
       return res.json([{
         ...task,
         form_data: JSON.parse(task.form_data || '{}'),

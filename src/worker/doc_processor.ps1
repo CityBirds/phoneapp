@@ -268,6 +268,38 @@ try {
 
                             $cells = $targetTable.Range.Cells
                             $hasCustomCols = ($null -ne $tc.columns -and $tc.columns.Count -gt 0)
+                            # Sync table headers from tableConfig if specified
+                            $headerRowIdx = if ($null -ne $tc.headerRow) { [int]$tc.headerRow + 1 } else { $startRowIdx - 1 }
+                            if ($headerRowIdx -gt 0 -and $hasCustomCols) {
+                                foreach ($colDef in $tc.columns) {
+                                    $cIdx = [int]$colDef.colIdx + 1
+                                    $lbl = [string]$colDef.label
+                                    if ($lbl -ne "") {
+                                        $written = $false
+                                        try {
+                                            $targetTable.Cell($headerRowIdx, $cIdx).Range.Text = $lbl
+                                            $written = $true
+                                        } catch {}
+                                        if (-not $written) {
+                                            try {
+                                                $targetTable.Rows.Item($headerRowIdx).Cells.Item($cIdx).Range.Text = $lbl
+                                                $written = $true
+                                            } catch {}
+                                        }
+                                        if (-not $written) {
+                                            for ($ci = 1; $ci -le $cells.Count; $ci++) {
+                                                try {
+                                                    $cell = $cells.Item($ci)
+                                                    if ($cell.RowIndex -eq $headerRowIdx -and $cell.ColumnIndex -eq $cIdx) {
+                                                        $cell.Range.Text = $lbl
+                                                        break
+                                                    }
+                                                } catch {}
+                                            }
+                                        }
+                                    }
+                                }
+                            }
 
                             for ($p = 0; $p -lt $testPoints.Count; $p++) {
                                 $targetR = $startRowIdx + $p
@@ -275,45 +307,56 @@ try {
                                 $ptName = if ($null -ne $tp.name) { $tp.name } else { $tp.label }
                                 $stdVal = if ($null -ne $tp.std) { $tp.std } else { $tp.standard }
                                 $actVal = if ($null -ne $tp.act) { $tp.act } else { $tp.actual }
-
-                                for ($ci = 1; $ci -le $cells.Count; $ci++) {
-                                    try {
-                                        $cell = $cells.Item($ci)
-                                        if ($cell.RowIndex -eq $targetR) {
-                                            if ($hasCustomCols) {
-                                                foreach ($colDef in $tc.columns) {
-                                                    $cIdx = [int]$colDef.colIdx + 1
-                                                    if ($cell.ColumnIndex -eq $cIdx) {
-                                                        $k = $colDef.key
-                                                        $cVal = $null
-                                                        if ($null -ne $tp.values) {
-                                                            if ($null -ne $tp.values.$k) { $cVal = $tp.values.$k }
-                                                            elseif ($null -ne $tp.values."$($colDef.colIdx)") { $cVal = $tp.values."$($colDef.colIdx)" }
-                                                            elseif ($null -ne $tp.values."$($colDef.label)") { $cVal = $tp.values."$($colDef.label)" }
-                                                        }
-                                                        if ($null -eq $cVal) {
-                                                            if ($colDef.isSeq -and $null -ne $ptName) { $cVal = $ptName }
-                                                            elseif ($colDef.isStd -and $null -ne $stdVal) { $cVal = $stdVal }
-                                                            elseif ($colDef.isAct -and $null -ne $actVal) { $cVal = $actVal }
-                                                        }
-                                                        if ($null -ne $cVal -and "$cVal" -ne "") {
+                                if ($hasCustomCols) {
+                                    foreach ($colDef in $tc.columns) {
+                                        $cIdx = [int]$colDef.colIdx + 1
+                                        $k = [string]$colDef.key
+                                        $cVal = $null
+                                        if ($null -ne $tp.values) {
+                                            if ($null -ne $tp.values.$k) { $cVal = $tp.values.$k }
+                                            elseif ($null -ne $tp.values."$($colDef.colIdx)") { $cVal = $tp.values."$($colDef.colIdx)" }
+                                            elseif ($null -ne $tp.values."$($colDef.label)") { $cVal = $tp.values."$($colDef.label)" }
+                                        }
+                                        if ($null -eq $cVal) {
+                                            if ($colDef.isSeq -and $null -ne $ptName) { $cVal = $ptName }
+                                            elseif ($colDef.isStd -and $null -ne $stdVal) { $cVal = $stdVal }
+                                            elseif ($colDef.isAct -and $null -ne $actVal) { $cVal = $actVal }
+                                        }
+                                        if ($null -ne $cVal -and "$cVal" -ne "") {
+                                            $written = $false
+                                            try {
+                                                $targetTable.Cell($targetR, $cIdx).Range.Text = [string]$cVal
+                                                $written = $true
+                                            } catch {}
+                                            if (-not $written) {
+                                                try {
+                                                    $targetTable.Rows.Item($targetR).Cells.Item($cIdx).Range.Text = [string]$cVal
+                                                    $written = $true
+                                                } catch {}
+                                            }
+                                            if (-not $written) {
+                                                for ($ci = 1; $ci -le $cells.Count; $ci++) {
+                                                    try {
+                                                        $cell = $cells.Item($ci)
+                                                        if ($cell.RowIndex -eq $targetR -and $cell.ColumnIndex -eq $cIdx) {
                                                             $cell.Range.Text = [string]$cVal
+                                                            break
                                                         }
-                                                    }
-                                                }
-                                            } else {
-                                                if ($pointColIdx -gt 0 -and $cell.ColumnIndex -eq $pointColIdx -and $null -ne $ptName -and "$ptName" -ne "") {
-                                                    $cell.Range.Text = [string]$ptName
-                                                }
-                                                if ($stdColIdx -gt 0 -and $cell.ColumnIndex -eq $stdColIdx -and $null -ne $stdVal -and "$stdVal" -ne "") {
-                                                    $cell.Range.Text = [string]$stdVal
-                                                }
-                                                if ($actColIdx -gt 0 -and $cell.ColumnIndex -eq $actColIdx -and $null -ne $actVal -and "$actVal" -ne "") {
-                                                    $cell.Range.Text = [string]$actVal
+                                                    } catch {}
                                                 }
                                             }
                                         }
-                                    } catch {}
+                                    }
+                                } else {
+                                    if ($pointColIdx -gt 0 -and $null -ne $ptName -and "$ptName" -ne "") {
+                                        try { $targetTable.Cell($targetR, $pointColIdx).Range.Text = [string]$ptName } catch {}
+                                    }
+                                    if ($stdColIdx -gt 0 -and $null -ne $stdVal -and "$stdVal" -ne "") {
+                                        try { $targetTable.Cell($targetR, $stdColIdx).Range.Text = [string]$stdVal } catch {}
+                                    }
+                                    if ($actColIdx -gt 0 -and $null -ne $actVal -and "$actVal" -ne "") {
+                                        try { $targetTable.Cell($targetR, $actColIdx).Range.Text = [string]$actVal } catch {}
+                                    }
                                 }
                             }
                             $writtenByCoords = $true

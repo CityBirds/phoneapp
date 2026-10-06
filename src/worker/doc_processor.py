@@ -91,7 +91,10 @@ def process_word_document(template_path, output_path, data):
                             table.Cell(7, 2).Range.Text = device_sn
 
                         test_points = form_data.get('testPoints', [])
-                        tc = cert_template.get('field_mappings', {}).get('tableConfig') if cert_template else None
+                        field_mappings = data.get('fieldMappings') or data.get('field_mappings') or {}
+                        if not field_mappings and cert_template:
+                            field_mappings = cert_template.get('field_mappings') or {}
+                        tc = field_mappings.get('tableConfig') or data.get('tableConfig') or (cert_template.get('field_mappings', {}).get('tableConfig') if cert_template else None)
                         columns = tc.get('columns', []) if tc else []
                         start_r = tc.get('startRow', 12) + 1 if tc and tc.get('startRow') is not None else 13
 
@@ -102,6 +105,19 @@ def process_word_document(template_path, output_path, data):
                         while table.Rows.Count > needed_rows and table.Rows.Count > start_r:
                             try: table.Rows.Item(table.Rows.Count).Delete()
                             except: break
+
+                        if columns and start_r > 1:
+                            header_r = tc.get('headerRow', start_r - 2) + 1 if 'headerRow' in tc else start_r - 1
+                            if 1 <= header_r <= table.Rows.Count:
+                                for col_def in columns:
+                                    c_idx = col_def.get('colIdx', 0) + 1
+                                    c_lbl = col_def.get('label')
+                                    if c_lbl:
+                                        try:
+                                            table.Cell(header_r, c_idx).Range.Text = str(c_lbl)
+                                        except Exception:
+                                            try: table.Rows.Item(header_r).Cells.Item(c_idx).Range.Text = str(c_lbl)
+                                            except Exception: pass
 
                         for idx, tp in enumerate(test_points):
                             r_idx = start_r + idx
@@ -118,8 +134,12 @@ def process_word_document(template_path, output_path, data):
                                         elif col_def.get('isSeq') and tp.get('name'): val = tp.get('name')
                                         elif col_def.get('isStd') and tp.get('std') is not None: val = tp.get('std')
                                         elif col_def.get('isAct') and tp.get('act') is not None: val = tp.get('act')
-                                        if val is not None and table.Columns.Count >= c_idx:
-                                            table.Cell(r_idx, c_idx).Range.Text = str(val)
+                                        if val is not None:
+                                            try:
+                                                table.Cell(r_idx, c_idx).Range.Text = str(val)
+                                            except Exception:
+                                                try: table.Rows.Item(r_idx).Cells.Item(c_idx).Range.Text = str(val)
+                                                except Exception: pass
                                 else:
                                     std_val = tp.get('std') if tp.get('std') is not None else tp.get('standard')
                                     act_val = tp.get('act') if tp.get('act') is not None else tp.get('actual')

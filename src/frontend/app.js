@@ -754,15 +754,16 @@ function renderTestPoints() {
         placeholder = col.label || '';
       }
 
-      const inputId = col.isStd ? `id="tp-std-${i + 1}"` : (col.isAct ? `id="tp-act-${i + 1}"` : '');
-
+      let inputAttr = `id="tp-cell-${i}-${colKey}" data-row="${i}" data-col-key="${escapeHtml(colKey)}" data-col-idx="${col.colIdx}"`;
+      if (col.isStd) inputAttr += ` id="tp-std-${i + 1}" data-cell-id="tp-cell-${i}-${colKey}"`;
+      else if (col.isAct) inputAttr += ` id="tp-act-${i + 1}" data-cell-id="tp-cell-${i}-${colKey}"`;
       cellsHtml += `
         <td>
           <input type="text" 
-                 ${inputId}
-                 class="form-control" 
+                 ${inputAttr}
+                 class="form-control tp-dyn-input" 
                  value="${escapeHtml(val)}" 
-                 placeholder="${escapeHtml(placeholder)}"
+                 placeholder="${escapeHtml(placeholder)}" 
                  onchange="updateTestPointCell(${i}, '${escapeHtml(colKey)}', ${col.colIdx}, this.value, '${col.role || 'other'}')">
         </td>
       `;
@@ -1140,21 +1141,42 @@ async function submitTaskForm() {
   const columns = getActiveTestPointColumns(tc);
 
   const testPoints = (state.testPoints || []).map((p, i) => {
-    const stdEl = document.getElementById(`tp-std-${i + 1}`);
-    const actEl = document.getElementById(`tp-act-${i + 1}`);
     const values = { ...(p.values || {}) };
+    let liveStd = p.std || '';
+    let liveAct = p.act || '';
+    let liveName = p.name || `测试点 ${i + 1}`;
+
     columns.forEach(col => {
-      if (values[col.key] === undefined) {
-        if (col.isSeq) values[col.key] = p.name || String(i + 1);
-        else if (col.isStd) values[col.key] = stdEl ? stdEl.value.trim() : (p.std || '');
-        else if (col.isAct) values[col.key] = actEl ? actEl.value.trim() : (p.act || '');
+      const el = document.getElementById(`tp-cell-${i}-${col.key}`)
+        || (col.isStd ? document.getElementById(`tp-std-${i + 1}`) : null)
+        || (col.isAct ? document.getElementById(`tp-act-${i + 1}`) : null)
+        || (document.querySelector ? document.querySelector(`[data-row="${i}"][data-col-key="${col.key}"]`) : null);
+
+      let liveVal = el ? el.value.trim() : (values[col.key] !== undefined ? values[col.key] : (values[String(col.colIdx)] !== undefined ? values[String(col.colIdx)] : ''));
+      if (liveVal === '' && col.isSeq) liveVal = liveName;
+      if (liveVal === '' && col.isStd) liveVal = liveStd;
+      if (liveVal === '' && col.isAct) liveVal = liveAct;
+
+      values[col.key] = liveVal;
+      values[String(col.colIdx)] = liveVal;
+      values[col.label] = liveVal;
+
+      if (col.isSeq && liveVal) {
+        liveName = liveVal;
+        const num = parseInt(liveVal, 10);
+        if (!isNaN(num)) p.point = num;
+      } else if (col.isStd && liveVal) {
+        liveStd = liveVal;
+      } else if (col.isAct && liveVal) {
+        liveAct = liveVal;
       }
     });
+
     return {
-      point: i + 1,
-      name: p.name || `测试点 ${i + 1}`,
-      std: stdEl ? stdEl.value.trim() : (p.std || ''),
-      act: actEl ? actEl.value.trim() : (p.act || ''),
+      point: p.point || (i + 1),
+      name: liveName,
+      std: liveStd,
+      act: liveAct,
       values
     };
   });

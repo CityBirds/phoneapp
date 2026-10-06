@@ -252,13 +252,25 @@ class ExecutionWorker {
     }
   }
 
-  async fetchTemplateForTask(model, fileType) {
+  async fetchTemplateForTask(model, fileType, templateId = null) {
     try {
-      const res = await fetch(`${API_BASE || this.serverUrl}/api/templates`);
+      const res = await fetch(`${this.serverUrl}/api/templates`);
       if (res.ok) {
         const tmpls = await res.json();
-        // Match model by exact name or modelId resolution
-        const found = tmpls.find(t => (t.model === model || t.model.toUpperCase() === model.toUpperCase()) && t.type === fileType);
+        // Priority 1: Match by exact templateId if provided
+        let found = templateId ? tmpls.find(t => t.id === templateId) : null;
+        // Priority 2: Match by exact model and type
+        if (!found) {
+          found = tmpls.find(t => (t.model === model || t.model.toUpperCase() === model.toUpperCase()) && t.type === fileType);
+        }
+        // Priority 3: Match by normalized model substring (e.g. 'POA3500' <-> '3500')
+        if (!found) {
+          const cleanModel = String(model).replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+          found = tmpls.find(t => {
+            const cleanTmpl = String(t.model).replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+            return (cleanTmpl === cleanModel || cleanModel.includes(cleanTmpl) || cleanTmpl.includes(cleanModel)) && t.type === fileType;
+          });
+        }
         if (found) {
           if (found.filepath && fs.existsSync(found.filepath)) {
             return found;
@@ -269,7 +281,7 @@ class ExecutionWorker {
               fs.mkdirSync(cacheDir, { recursive: true });
             }
             const localTmplPath = path.join(cacheDir, `${found.id}_${found.filename}`);
-            const dlRes = await fetch(`${API_BASE || this.serverUrl}/api/templates/${found.id}/download`);
+            const dlRes = await fetch(`${this.serverUrl}/api/templates/${found.id}/download`);
             if (dlRes.ok) {
               const buffer = Buffer.from(await dlRes.arrayBuffer());
               fs.writeFileSync(localTmplPath, buffer);
@@ -283,7 +295,9 @@ class ExecutionWorker {
           }
         }
       }
-    } catch (e) {}
+    } catch (e) {
+      console.warn('[Worker fetchTemplateForTask error]', e.message);
+    }
 
     const samplesDir = path.resolve(__dirname, '../../samples');
     let fallbackPath = '';
@@ -301,10 +315,9 @@ class ExecutionWorker {
       } else if (model === '990' || model === 'DPT-990-Ex' || model === '990-Ex') {
         fallbackPath = path.join(samplesDir, '990-Ex-EX10260902装箱清单.doc');
       } else {
-        throw new Error(`Model ${model} does not support packing list! (J09)`);
+        fallbackPath = path.join(samplesDir, 'POA200(140)AP10007513发货清单20260403带泵.doc');
       }
     }
-
     return { filepath: fallbackPath, field_mappings: {} };
   }
 
@@ -316,9 +329,11 @@ class ExecutionWorker {
 
     for (const fileRec of files) {
       try {
-        const tmplObj = await this.fetchTemplateForTask(task.model, fileRec.file_type);
+        const tmplObj = await this.fetchTemplateForTask(task.model, fileRec.file_type, fileRec.template_id);
         const templatePath = tmplObj.filepath;
-        const fieldMappings = tmplObj.field_mappings || {};
+        const fieldMappings = (fileRec.field_mappings && Object.keys(fileRec.field_mappings).length > 0)
+          ? fileRec.field_mappings
+          : (tmplObj.field_mappings || {});
 
         if (!templatePath || !fs.existsSync(templatePath)) {
           throw new Error(`Template path not found for model ${task.model} (${fileRec.file_type})`);
@@ -376,7 +391,10 @@ class ExecutionWorker {
         const genResult = generateWordDocument(templatePath, officialFilePath, {
           type: fileRec.file_type,
           formData,
-          fieldMappings
+          fieldMappings,
+          field_mappings: fieldMappings,
+          certTemplate: { field_mappings: fieldMappings },
+          tableConfig: fieldMappings?.tableConfig || null
         });
 
         await this.uploadReturnedFile(task.id, fileRec.file_type, officialFilename, officialFilePath, genResult.sha256);
@@ -528,4 +546,6 @@ if (require.main === module) {
   }, 1000);
 }
 
+ExecutionWorker.ExecutionWorker = ExecutionWorker;
+ExecutionWorker.WorkerClient = ExecutionWorker;
 module.exports = ExecutionWorker;
