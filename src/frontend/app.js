@@ -428,6 +428,10 @@ function onModelChange() {
 
   if (showPacking) {
     initPackingItemsForModel();
+  } else {
+    state.packingItems = [];
+    const tbody = document.getElementById('packing-items-body');
+    if (tbody) tbody.innerHTML = '';
   }
 }
 
@@ -634,10 +638,43 @@ function initPackingItemsForModel() {
 
   state.packingItems = JSON.parse(JSON.stringify(itemsConfig));
 
-  syncDeviceSnToPackingList();
+  // 当前选中的设备型号名称（例如 DPT-990-Ex）
+  const curModel = (bundle ? (bundle.model_display || bundle.model) : state.currentModel) || '';
+
+  // 1. 若模板尚未配置物料明细，自动按当前型号生成标准物料明细
+  if (!state.packingItems || state.packingItems.length === 0) {
+    const isPOA = curModel.toUpperCase().includes('POA');
+    state.packingItems = [
+      { index: 1, name: '主设备', spec: curModel || '设备', count: 1, unit: '台', standard: '是', remark: '', isProtected: true }
+    ];
+    if (isPOA) {
+      state.packingItems.push({ index: 2, name: '传感器', spec: 'PMT210SEN', count: 1, unit: '支', standard: '是', remark: '', isProtected: true });
+      state.packingItems.push({ index: 3, name: '仪器包装箱', spec: 'ABS', count: 1, unit: '个', standard: '是', remark: '' });
+      state.packingItems.push({ index: 4, name: '用户手册', spec: '中英文', count: 1, unit: '份', standard: '是', remark: '' });
+    } else {
+      state.packingItems.push({ index: 2, name: '包装箱', spec: 'ABS', count: 1, unit: '个', standard: '是', remark: '' });
+      state.packingItems.push({ index: 3, name: '用户手册', spec: '中英文', count: 1, unit: '本', standard: '是', remark: '' });
+      state.packingItems.push({ index: 4, name: '操作说明', spec: '中英文', count: 1, unit: '份', standard: '是', remark: '' });
+    }
+  }
+
+  // 2. 核心修复：确保主设备行（保护行）的规格/型号严格对应当前选择的型号！
+  let mainIdx = findMainDeviceRowIndex();
+  if (mainIdx === -1 && state.packingItems.length > 0) {
+    mainIdx = 0;
+  }
+  if (mainIdx !== -1 && curModel) {
+    state.packingItems[mainIdx].spec = curModel;
+  }
+
+  // 3. 同步设备序列号与备注
+  syncDeviceSnToPackingList(false);
+
+  // 4. 无论备注是否变更，切换型号时必须强制重新渲染装箱清单表格！
+  renderPackingTable();
 }
 
-function syncDeviceSnToPackingList() {
+function syncDeviceSnToPackingList(render = true) {
   if (!state.packingItems || state.packingItems.length === 0) return;
   const deviceSnEl = document.getElementById('device-sn');
   const rawSn = deviceSnEl ? deviceSnEl.value : '';
@@ -650,8 +687,9 @@ function syncDeviceSnToPackingList() {
 
   const targetRow = state.packingItems[mainIdx];
   const newRemark = generateMainDeviceRemark(rawSn, state.hasPump);
-  if (targetRow.remark !== newRemark) {
-    targetRow.remark = newRemark;
+  const changed = (targetRow.remark !== newRemark);
+  targetRow.remark = newRemark;
+  if (render && changed) {
     renderPackingTable();
   }
 }

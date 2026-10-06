@@ -155,6 +155,19 @@ function validateTemplateThreeInOne(tmpl) {
 }
 
 // Dynamic Document Combo Builder for Model
+function ensureMainDeviceSpec(items, modelName) {
+  if (!Array.isArray(items) || items.length === 0) return items;
+  const cloned = JSON.parse(JSON.stringify(items));
+  let mainIdx = cloned.findIndex(it => (it.name || '').trim() === '主设备');
+  if (mainIdx === -1) mainIdx = 0;
+  if (cloned[mainIdx] && modelName) {
+    if (!cloned[mainIdx].spec || cloned[mainIdx].spec.trim() === '' || (cloned[mainIdx].spec === 'POA200' && !modelName.toUpperCase().includes('POA'))) {
+      cloned[mainIdx].spec = modelName;
+    }
+  }
+  return cloned;
+}
+
 function syncPublishedBundlesForModel(modelName) {
   const resolved = resolveModelAlias(modelName);
   const mName = modelName;
@@ -202,7 +215,7 @@ function syncPublishedBundlesForModel(modelName) {
           certTemplate: { ...certTmpl, field_mappings: certTmpl.mappings },
           packingTemplate: { ...packTmpl, field_mappings: packTmpl.mappings },
           testPoints: certTmpl.mappings.testPoints || [],
-          packingItems: packTmpl.mappings.packingItems || [],
+          packingItems: ensureMainDeviceSpec(packTmpl.mappings.packingItems || [], mName),
           sensorModelConfig: certTmpl.mappings.sensorModelConfig || {}
         };
 
@@ -269,7 +282,7 @@ function syncPublishedBundlesForModel(modelName) {
         certTemplate: null,
         packingTemplate: { ...packTmpl, field_mappings: packTmpl.mappings },
         testPoints: [],
-        packingItems: packTmpl.mappings.packingItems || [],
+        packingItems: ensureMainDeviceSpec(packTmpl.mappings.packingItems || [], mName),
         sensorModelConfig: {}
       };
 
