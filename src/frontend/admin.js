@@ -1310,6 +1310,8 @@ async function saveMatchedRules(isDraft = false) {
   let stdLabel = '';
   let actCandidate = null;
   let actLabel = '';
+  let pointCandidate = null;
+  let pointLabel = '';
 
   currentMatcherData.targetLabels.forEach(lbl => {
     const isNamingOnly = lbl === 'sensorModel' || lbl === '传感器型号';
@@ -1335,8 +1337,12 @@ async function saveMatchedRules(isDraft = false) {
         actCandidate = chosen;
         actLabel = lbl;
         return; // Exclude from singleFields!
+      } else if (normLbl === 'gas' || normLbl.includes('gas') || normLbl.includes('point') || normLbl.includes('测试点') || normLbl.includes('step') || normLbl.includes('序号') || normLbl.includes('介质')) {
+        pointCandidate = chosen;
+        pointLabel = lbl;
+        return; // Exclude from singleFields!
       } else {
-        // Other auxiliary table columns in certificate (such as Gas, mA Output, etc.)
+        // Other auxiliary table columns in certificate (such as mA Output, etc.)
         return; // Exclude from singleFields!
       }
     }
@@ -1368,6 +1374,21 @@ async function saveMatchedRules(isDraft = false) {
       else if (stdLabel.includes('ppm')) unit = 'ppm';
       else if (stdLabel.includes('mA') || stdLabel.includes('ma')) unit = 'mA';
 
+      // If pointCandidate was not explicitly in choices, search for adjacent column to the left
+      if (!pointCandidate) {
+        const pCand = Object.values(currentMatcherData.matchResults || {}).flatMap(m => m.candidates || []).find(c => {
+          return c.suggestedValueLocation && c.suggestedValueLocation.tableIdx === loc.tableIdx && c.suggestedValueLocation.colIdx === loc.colIdx - 1;
+        });
+        if (pCand) {
+          pointCandidate = pCand;
+          pointLabel = pCand.matchedLabel;
+        }
+      }
+
+      const pointVals = pointCandidate && pointCandidate.fullValues && pointCandidate.fullValues.length >= rowCount
+        ? pointCandidate.fullValues
+        : (pointCandidate?.sampleValues || []);
+
       const defaultValues = [];
       testPoints = [];
       for (let i = 0; i < rowCount; i++) {
@@ -1376,8 +1397,10 @@ async function saveMatchedRules(isDraft = false) {
           val = `${val} ${unit}`;
         }
         defaultValues.push(val);
+        const ptName = (pointVals && pointVals[i]) ? pointVals[i] : `测试点 ${i + 1}`;
         testPoints.push({
           point: i + 1,
+          name: ptName,
           std: val,
           act: ''
         });
@@ -1387,6 +1410,7 @@ async function saveMatchedRules(isDraft = false) {
         tableIdx: loc.tableIdx,
         headerRow: loc.startRow > 0 ? loc.startRow - 1 : 0,
         headers: {
+          point: pointLabel || '测试点 / 介质',
           standard: stdLabel,
           actual: actLabel
         },
@@ -1395,6 +1419,11 @@ async function saveMatchedRules(isDraft = false) {
         rowCount,
         unit,
         defaultValues,
+        pointNames: pointVals,
+        pointCol: pointCandidate && pointCandidate.suggestedValueLocation ? {
+          label: pointLabel,
+          colIdx: pointCandidate.suggestedValueLocation.colIdx
+        } : null,
         standardCol: {
           label: stdLabel,
           colIdx: loc.colIdx

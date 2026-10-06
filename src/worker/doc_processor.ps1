@@ -253,13 +253,20 @@ try {
                         $endRowIdx = if ($null -ne $tc.endRow) { [int]$tc.endRow + 1 } else { -1 }
                         $stdColIdx = if ($tc.standardCol -and $null -ne $tc.standardCol.colIdx) { [int]$tc.standardCol.colIdx + 1 } elseif ($tc.standardCol) { [int]$tc.standardCol + 1 } else { -1 }
                         $actColIdx = if ($tc.actualCol -and $null -ne $tc.actualCol.colIdx) { [int]$tc.actualCol.colIdx + 1 } elseif ($tc.actualCol) { [int]$tc.actualCol + 1 } else { -1 }
+                        $pointColIdx = if ($tc.pointCol -and $null -ne $tc.pointCol.colIdx) { [int]$tc.pointCol.colIdx + 1 } elseif ($tc.pointCol) { [int]$tc.pointCol + 1 } else { -1 }
 
                         if ($startRowIdx -gt 0) {
+                            # Dynamically expand table rows if user added extra test points
+                            $neededRows = $startRowIdx + $testPoints.Count - 1
+                            while ($targetTable.Rows.Count -lt $neededRows) {
+                                try { [void]$targetTable.Rows.Add() } catch { break }
+                            }
+
                             $cells = $targetTable.Range.Cells
                             for ($p = 0; $p -lt $testPoints.Count; $p++) {
                                 $targetR = $startRowIdx + $p
-                                if ($endRowIdx -gt 0 -and $targetR -gt $endRowIdx) { break }
                                 $tp = $testPoints[$p]
+                                $ptName = if ($null -ne $tp.name) { $tp.name } else { $tp.label }
                                 $stdVal = if ($null -ne $tp.std) { $tp.std } else { $tp.standard }
                                 $actVal = if ($null -ne $tp.act) { $tp.act } else { $tp.actual }
 
@@ -267,6 +274,9 @@ try {
                                     try {
                                         $cell = $cells.Item($ci)
                                         if ($cell.RowIndex -eq $targetR) {
+                                            if ($pointColIdx -gt 0 -and $cell.ColumnIndex -eq $pointColIdx -and $null -ne $ptName -and "$ptName" -ne "") {
+                                                $cell.Range.Text = [string]$ptName
+                                            }
                                             if ($stdColIdx -gt 0 -and $cell.ColumnIndex -eq $stdColIdx -and $null -ne $stdVal -and "$stdVal" -ne "") {
                                                 $cell.Range.Text = [string]$stdVal
                                             }

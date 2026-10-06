@@ -114,15 +114,19 @@
 
       <!-- Test Point Data Table Card -->
       <div class="card" id="test-points-card">
-        <div class="card-title">发货证书测量点数据</div>
+        <div class="card-title">
+          <span>发货证书测量点数据</span>
+          <button type="button" class="btn btn-sm" onclick="addTestPointRow()">+ 添加测量点</button>
+        </div>
         <div class="table-scroll-hint">⇄ 可横向左右滑动</div>
         <div class="table-responsive">
           <table id="test-points-table" class="scroll-table">
             <thead>
               <tr>
-                <th class="col-point">测试点</th>
+                <th class="col-point" id="th-point-name">测试点 / 介质</th>
                 <th class="col-test-val">标准值</th>
                 <th class="col-test-val">实测值 (待填)</th>
+                <th style="width: 70px;">操作</th>
               </tr>
             </thead>
             <tbody id="test-points-body">

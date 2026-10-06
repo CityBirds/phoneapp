@@ -60,6 +60,7 @@ const state = {
   currentTask: null,
   activePreviewType: 'cert',
   historyRange: 'today',
+  testPoints: [],
   packingItems: []
 };
 
@@ -423,7 +424,11 @@ function onModelChange() {
   if (packingSection) packingSection.style.display = showPacking ? 'block' : 'none';
 
   if (showCert) {
-    renderTestPoints();
+    initTestPointsForModel();
+  } else {
+    state.testPoints = [];
+    const tbody = document.getElementById('test-points-body');
+    if (tbody) tbody.innerHTML = '';
   }
 
   if (showPacking) {
@@ -550,10 +555,7 @@ function setPumpOption(hasPump) {
   syncDeviceSnToPackingList();
 }
 
-function renderTestPoints() {
-  const tbody = document.getElementById('test-points-body');
-  if (!tbody) return;
-
+function initTestPointsForModel() {
   const bundle = state.activeBundle;
   const certTmpl = bundle ? bundle.certTemplate : null;
   const snapshot = bundle ? bundle.config_snapshot : {};
@@ -568,6 +570,7 @@ function renderTestPoints() {
       for (let i = 0; i < tc.rowCount; i++) {
         pts.push({
           point: i + 1,
+          name: tc.pointNames && tc.pointNames[i] ? tc.pointNames[i] : `测试点 ${i + 1}`,
           std: tc.defaultValues && tc.defaultValues[i] ? tc.defaultValues[i] : '',
           act: ''
         });
@@ -576,19 +579,85 @@ function renderTestPoints() {
   }
 
   pts = pts || [];
+  const tc = certTmpl && certTmpl.field_mappings ? certTmpl.field_mappings.tableConfig : null;
+  state.testPoints = pts.map((p, i) => {
+    let ptName = p.name || p.label;
+    if (!ptName && tc && tc.pointNames && tc.pointNames[i]) {
+      ptName = tc.pointNames[i];
+    }
+    return {
+      point: p.point || i + 1,
+      name: ptName || `测试点 ${i + 1}`,
+      std: p.std !== undefined ? p.std : (p.standard || ''),
+      act: p.act !== undefined ? p.act : (p.actual || '')
+    };
+  });
 
-  if (pts.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="3" style="text-align: center; color: #94a3b8; padding: 16px;">当前配置未定义测量点表格区</td></tr>';
+  renderTestPoints();
+}
+
+function renderTestPoints() {
+  const tbody = document.getElementById('test-points-body');
+  if (!tbody) return;
+
+  const bundle = state.activeBundle;
+  const certTmpl = bundle ? bundle.certTemplate : null;
+  const tc = certTmpl && certTmpl.field_mappings ? certTmpl.field_mappings.tableConfig : null;
+  const pointColName = (tc && tc.headers && tc.headers.point) || '测试点 / 介质';
+  const thPoint = document.getElementById('th-point-name');
+  if (thPoint) thPoint.innerText = pointColName;
+
+  if (!state.testPoints || state.testPoints.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="4" style="text-align: center; color: #94a3b8; padding: 16px;">当前证书暂无测量点，可点击右上角「+ 添加测量点」新增</td></tr>';
     return;
   }
 
-  tbody.innerHTML = pts.map((p, i) => `
-    <tr>
-      <td>测试点 ${p.point || i + 1}</td>
-      <td><input type="text" id="tp-std-${i + 1}" class="form-control" value="${p.std || ''}"></td>
-      <td><input type="text" id="tp-act-${i + 1}" class="form-control" value="" placeholder="实测值 (待填)"></td>
-    </tr>
-  `).join('');
+  tbody.innerHTML = state.testPoints.map((p, i) => {
+    const ptName = p.name || `测试点 ${p.point || i + 1}`;
+    return `
+      <tr>
+        <td>
+          <input type="text" class="form-control" value="${escapeHtml(ptName)}" placeholder="测试点名称/介质" onchange="updateTestPoint(${i}, 'name', this.value)">
+        </td>
+        <td>
+          <input type="text" id="tp-std-${i + 1}" class="form-control" value="${escapeHtml(p.std || '')}" placeholder="标准值" onchange="updateTestPoint(${i}, 'std', this.value)">
+        </td>
+        <td>
+          <input type="text" id="tp-act-${i + 1}" class="form-control" value="${escapeHtml(p.act || '')}" placeholder="实测值 (待填)" onchange="updateTestPoint(${i}, 'act', this.value)">
+        </td>
+        <td>
+          <button type="button" class="btn btn-sm btn-danger" onclick="deleteTestPointRow(${i})">删除</button>
+        </td>
+      </tr>
+    `;
+  }).join('');
+}
+
+function updateTestPoint(idx, key, val) {
+  if (state.testPoints && state.testPoints[idx]) {
+    state.testPoints[idx][key] = val;
+  }
+}
+
+function addTestPointRow() {
+  if (!state.testPoints) state.testPoints = [];
+  const newNum = state.testPoints.length + 1;
+  state.testPoints.push({
+    point: newNum,
+    name: `测试点 ${newNum}`,
+    std: '',
+    act: ''
+  });
+  renderTestPoints();
+}
+
+function deleteTestPointRow(idx) {
+  if (!state.testPoints || !state.testPoints[idx]) return;
+  state.testPoints.splice(idx, 1);
+  state.testPoints.forEach((p, i) => {
+    p.point = i + 1;
+  });
+  renderTestPoints();
 }
 
 function findMainDeviceRowIndex() {
@@ -867,19 +936,16 @@ async function submitTaskForm() {
     }
   }
 
-  // Dynamic test points gathering based on DOM table rows
-  const testPoints = [];
-  const tpRows = document.querySelectorAll('#test-points-body tr');
-  tpRows.forEach((row, i) => {
+  // Dynamic test points gathering based on state.testPoints
+  const testPoints = (state.testPoints || []).map((p, i) => {
     const stdEl = document.getElementById(`tp-std-${i + 1}`);
     const actEl = document.getElementById(`tp-act-${i + 1}`);
-    if (stdEl && actEl) {
-      testPoints.push({
-        point: i + 1,
-        std: stdEl.value.trim(),
-        act: actEl.value.trim()
-      });
-    }
+    return {
+      point: i + 1,
+      name: p.name || `测试点 ${i + 1}`,
+      std: stdEl ? stdEl.value.trim() : (p.std || ''),
+      act: actEl ? actEl.value.trim() : (p.act || '')
+    };
   });
 
   const reqId = 'req_' + Date.now() + '_' + Math.random().toString(36).substring(2, 8);
