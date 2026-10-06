@@ -1110,6 +1110,17 @@ async function runTemplateAnalyze() {
         }
       });
       if (saved.tableConfig) {
+        if (Array.isArray(saved.tableConfig.columns)) {
+          saved.tableConfig.columns.forEach(col => {
+            if (col.label && currentMatcherData.selectedChoices[col.label] === undefined) {
+              const m = currentMatcherData.matchResults[col.label];
+              if (m && m.candidates) {
+                const idx = m.candidates.findIndex(c => c.location?.colIdx === col.colIdx || c.suggestedValueLocation?.colIdx === col.colIdx);
+                if (idx >= 0) currentMatcherData.selectedChoices[col.label] = idx;
+              }
+            }
+          });
+        }
         if (saved.tableConfig.standardCol?.label && currentMatcherData.selectedChoices[saved.tableConfig.standardCol.label] === undefined) {
           const m = currentMatcherData.matchResults[saved.tableConfig.standardCol.label];
           if (m && m.candidates) {
@@ -1312,6 +1323,7 @@ async function saveMatchedRules(isDraft = false) {
   let actLabel = '';
   let pointCandidate = null;
   let pointLabel = '';
+  const matchedTableCols = [];
 
   currentMatcherData.targetLabels.forEach(lbl => {
     const isNamingOnly = lbl === 'sensorModel' || lbl === '传感器型号';
@@ -1329,22 +1341,49 @@ async function saveMatchedRules(isDraft = false) {
 
     // Separate certificate measurement table columns
     if (tmpl.type === 'cert' && isTableCol) {
-      if (normLbl === 'value' || normLbl.includes('value') || normLbl.includes('standard') || normLbl.includes('std') || normLbl.includes('nist') || normLbl.includes('标准')) {
+      const loc = chosen.suggestedValueLocation;
+      const isSeq = normLbl.includes('test point number') || normLbl.includes('testpoint') || normLbl.includes('point') || normLbl.includes('step') || normLbl.includes('序号') || normLbl.includes('测试点');
+      const isAct = normLbl.includes('analyzer') || normLbl.includes('actual') || normLbl.includes('reading') || normLbl.includes('实测') || normLbl.includes('指示') || normLbl.includes('indication');
+      const isStd = !isSeq && !isAct && (normLbl === 'value' || normLbl.includes('value') || normLbl.includes('standard') || normLbl.includes('std') || normLbl.includes('nist') || normLbl.includes('标准'));
+
+      let role = 'text';
+      if (isSeq) role = 'seq';
+      else if (isStd) role = 'standard';
+      else if (isAct) role = 'actual';
+      else if (normLbl.includes('gas') || normLbl.includes('介质')) role = 'gas';
+
+      const fullVals = (chosen.fullValues && chosen.fullValues.length > 0)
+        ? chosen.fullValues
+        : (chosen.sampleValues || []);
+
+      matchedTableCols.push({
+        label: lbl,
+        normLbl,
+        candidate: chosen,
+        loc,
+        colIdx: loc.colIdx,
+        tableIdx: loc.tableIdx,
+        startRow: loc.startRow,
+        endRow: loc.endRow,
+        role,
+        isSeq,
+        isStd,
+        isAct,
+        fullValues: fullVals
+      });
+
+      if (isStd && !stdCandidate) {
         stdCandidate = chosen;
         stdLabel = lbl;
-        return; // Exclude from singleFields!
-      } else if (normLbl.includes('analyzer') || normLbl.includes('actual') || normLbl.includes('reading') || normLbl.includes('实测') || normLbl.includes('指示') || normLbl.includes('indication')) {
+      } else if (isAct && !actCandidate) {
         actCandidate = chosen;
         actLabel = lbl;
-        return; // Exclude from singleFields!
-      } else if (normLbl === 'gas' || normLbl.includes('gas') || normLbl.includes('point') || normLbl.includes('测试点') || normLbl.includes('step') || normLbl.includes('序号') || normLbl.includes('介质')) {
+      } else if (isSeq && !pointCandidate) {
         pointCandidate = chosen;
         pointLabel = lbl;
-        return; // Exclude from singleFields!
-      } else {
-        // Other auxiliary table columns in certificate (such as mA Output, etc.)
-        return; // Exclude from singleFields!
       }
+
+      return; // Exclude from singleFields!
     }
 
     if (tmpl.type === 'packing' && isTableCol) {
@@ -1362,76 +1401,109 @@ async function saveMatchedRules(isDraft = false) {
 
   // Construct complete measurement tableConfig and testPoints for cert
   if (tmpl.type === 'cert') {
-    if (stdCandidate && stdCandidate.suggestedValueLocation) {
-      const loc = stdCandidate.suggestedValueLocation;
-      const rowCount = loc.endRow - loc.startRow + 1;
-      const fullVals = stdCandidate.fullValues && stdCandidate.fullValues.length >= rowCount
-        ? stdCandidate.fullValues
-        : (stdCandidate.sampleValues || []);
+    if (matchedTableCols.length > 0) {
+      // Sort in ascending order of colIdx ("以在模板文件的顺序为准")
+      matchedTableCols.sort((a, b) => a.colIdx - b.colIdx);
 
-      let unit = '';
-      if (stdLabel.includes('℃ dp') || stdLabel.includes('℃')) unit = '℃ dp';
-      else if (stdLabel.includes('ppm')) unit = 'ppm';
-      else if (stdLabel.includes('mA') || stdLabel.includes('ma')) unit = 'mA';
+      const firstCol = matchedTableCols[0];
+      const tableIdx = firstCol.tableIdx;
+      const startRow = Math.min(...matchedTableCols.map(c => c.startRow));
+      const endRow = Math.max(...matchedTableCols.map(c => c.endRow));
+      const rowCount = Math.max(1, endRow - startRow + 1);
 
-      // If pointCandidate was not explicitly in choices, search for adjacent column to the left
-      if (!pointCandidate) {
+      // Identify standard and actual column candidates for backward compatibility
+      let stdColObj = matchedTableCols.find(c => c.isStd) || matchedTableCols.find(c => c.role === 'standard');
+      let actColObj = matchedTableCols.find(c => c.isAct) || matchedTableCols.find(c => c.role === 'actual');
+      let pointColObj = matchedTableCols.find(c => c.isSeq) || matchedTableCols.find(c => c.role === 'seq');
+
+      // If pointColObj is not present, search left adjacent column in match candidates
+      if (!pointColObj && stdColObj) {
         const pCand = Object.values(currentMatcherData.matchResults || {}).flatMap(m => m.candidates || []).find(c => {
-          return c.suggestedValueLocation && c.suggestedValueLocation.tableIdx === loc.tableIdx && c.suggestedValueLocation.colIdx === loc.colIdx - 1;
+          return c.suggestedValueLocation && c.suggestedValueLocation.tableIdx === tableIdx && c.suggestedValueLocation.colIdx === stdColObj.colIdx - 1;
         });
-        if (pCand) {
-          pointCandidate = pCand;
-          pointLabel = pCand.matchedLabel;
+        if (pCand && pCand.suggestedValueLocation) {
+          const loc = pCand.suggestedValueLocation;
+          pointColObj = {
+            label: pCand.matchedLabel || '测试点',
+            normLbl: (pCand.matchedLabel || '').toLowerCase(),
+            candidate: pCand,
+            loc,
+            colIdx: loc.colIdx,
+            tableIdx: loc.tableIdx,
+            startRow: loc.startRow,
+            endRow: loc.endRow,
+            role: 'seq',
+            isSeq: true,
+            isStd: false,
+            isAct: false,
+            fullValues: pCand.fullValues || pCand.sampleValues || []
+          };
+          matchedTableCols.unshift(pointColObj);
+          matchedTableCols.sort((a, b) => a.colIdx - b.colIdx);
         }
       }
 
-      const pointVals = pointCandidate && pointCandidate.fullValues && pointCandidate.fullValues.length >= rowCount
-        ? pointCandidate.fullValues
-        : (pointCandidate?.sampleValues || []);
+      // Unit detection
+      let unit = '';
+      const unitSource = matchedTableCols.map(c => c.label).join(' ');
+      if (unitSource.includes('℃ dp') || unitSource.includes('℃')) unit = '℃ dp';
+      else if (unitSource.includes('ppm')) unit = 'ppm';
+      else if (unitSource.includes('mA') || unitSource.includes('ma')) unit = 'mA';
 
-      const defaultValues = [];
+      // Full list of columns in template file order
+      const columns = matchedTableCols.map(col => ({
+        key: `col_${col.colIdx}`,
+        label: col.label,
+        colIdx: col.colIdx,
+        role: col.role,
+        isSeq: col.isSeq,
+        isStd: col.isStd,
+        isAct: col.isAct,
+        defaultValues: col.fullValues || []
+      }));
+
       testPoints = [];
       for (let i = 0; i < rowCount; i++) {
-        let val = fullVals[i] || '';
-        if (val && unit && !val.includes(unit)) {
-          val = `${val} ${unit}`;
-        }
-        defaultValues.push(val);
-        const ptName = (pointVals && pointVals[i]) ? pointVals[i] : `测试点 ${i + 1}`;
-        testPoints.push({
+        const rowItem = {
           point: i + 1,
-          name: ptName,
-          std: val,
-          act: ''
+          values: {}
+        };
+        columns.forEach(col => {
+          let val = (col.defaultValues && col.defaultValues[i]) ? col.defaultValues[i] : '';
+          if (col.isSeq && !val) val = String(i + 1);
+          if (col.isStd && val && unit && !val.includes(unit)) val = `${val} ${unit}`;
+          rowItem.values[col.key] = val;
+          rowItem.values[String(col.colIdx)] = val;
+          rowItem.values[col.label] = val;
         });
+
+        // Backward compatibility properties
+        const stdVal = (stdColObj && stdColObj.fullValues && stdColObj.fullValues[i]) ? stdColObj.fullValues[i] : '';
+        rowItem.std = (stdVal && unit && !stdVal.includes(unit)) ? `${stdVal} ${unit}` : stdVal;
+        rowItem.act = (actColObj && actColObj.fullValues && actColObj.fullValues[i]) ? actColObj.fullValues[i] : '';
+        rowItem.name = (pointColObj && pointColObj.fullValues && pointColObj.fullValues[i]) ? pointColObj.fullValues[i] : `测试点 ${i + 1}`;
+
+        testPoints.push(rowItem);
       }
 
       tableConfig = {
-        tableIdx: loc.tableIdx,
-        headerRow: loc.startRow > 0 ? loc.startRow - 1 : 0,
+        tableIdx,
+        headerRow: startRow > 0 ? startRow - 1 : 0,
         headers: {
-          point: pointLabel || '测试点 / 介质',
-          standard: stdLabel,
-          actual: actLabel
+          point: pointColObj ? pointColObj.label : (matchedTableCols[0] ? matchedTableCols[0].label : '测试点'),
+          standard: stdColObj ? stdColObj.label : '标准值',
+          actual: actColObj ? actColObj.label : '实测值'
         },
-        startRow: loc.startRow,
-        endRow: loc.endRow,
+        columns,
+        startRow,
+        endRow,
         rowCount,
         unit,
-        defaultValues,
-        pointNames: pointVals,
-        pointCol: pointCandidate && pointCandidate.suggestedValueLocation ? {
-          label: pointLabel,
-          colIdx: pointCandidate.suggestedValueLocation.colIdx
-        } : null,
-        standardCol: {
-          label: stdLabel,
-          colIdx: loc.colIdx
-        },
-        actualCol: actCandidate && actCandidate.suggestedValueLocation ? {
-          label: actLabel,
-          colIdx: actCandidate.suggestedValueLocation.colIdx
-        } : null
+        defaultValues: stdColObj ? testPoints.map(p => p.std) : [],
+        pointNames: pointColObj ? pointColObj.fullValues : (columns[0]?.defaultValues || []),
+        pointCol: pointColObj ? { label: pointColObj.label, colIdx: pointColObj.colIdx } : null,
+        standardCol: stdColObj ? { label: stdColObj.label, colIdx: stdColObj.colIdx } : null,
+        actualCol: actColObj ? { label: actColObj.label, colIdx: actColObj.colIdx } : null
       };
     } else if (currentMatcherData.tableConfig) {
       tableConfig = currentMatcherData.tableConfig;

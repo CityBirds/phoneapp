@@ -259,8 +259,28 @@ class ExecutionWorker {
         const tmpls = await res.json();
         // Match model by exact name or modelId resolution
         const found = tmpls.find(t => (t.model === model || t.model.toUpperCase() === model.toUpperCase()) && t.type === fileType);
-        if (found && found.filepath && fs.existsSync(found.filepath)) {
-          return found;
+        if (found) {
+          if (found.filepath && fs.existsSync(found.filepath)) {
+            return found;
+          }
+          try {
+            const cacheDir = path.join(this.workingDir, 'cached_templates');
+            if (!fs.existsSync(cacheDir)) {
+              fs.mkdirSync(cacheDir, { recursive: true });
+            }
+            const localTmplPath = path.join(cacheDir, `${found.id}_${found.filename}`);
+            const dlRes = await fetch(`${API_BASE || this.serverUrl}/api/templates/${found.id}/download`);
+            if (dlRes.ok) {
+              const buffer = Buffer.from(await dlRes.arrayBuffer());
+              fs.writeFileSync(localTmplPath, buffer);
+              return {
+                ...found,
+                filepath: localTmplPath
+              };
+            }
+          } catch (dlErr) {
+            console.warn('[Worker Template Download Warning]', dlErr.message);
+          }
         }
       }
     } catch (e) {}

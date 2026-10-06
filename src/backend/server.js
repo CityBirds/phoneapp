@@ -5,7 +5,7 @@ const path = require('path');
 const fs = require('fs');
 const db = require('./db');
 const { generateCertFilename, generatePackingListFilename } = require('../common/naming');
-const { findFieldCandidates, inferFieldType } = require('../common/matcher');
+const { findFieldCandidates, inferFieldType, normalizeText } = require('../common/matcher');
 const { extractDocumentStructure } = require('../common/doc_structure');
 const { getBeijingCalendarRange, generateUUID, getFileSha256 } = require('../common/utils');
 const { generateDocumentPreview } = require('./preview');
@@ -214,6 +214,7 @@ function syncPublishedBundlesForModel(modelName) {
           docCombo: 'cert_and_packing',
           certTemplate: { ...certTmpl, field_mappings: certTmpl.mappings },
           packingTemplate: { ...packTmpl, field_mappings: packTmpl.mappings },
+          tableConfig: certTmpl.mappings.tableConfig || null,
           testPoints: certTmpl.mappings.testPoints || [],
           packingItems: ensureMainDeviceSpec(packTmpl.mappings.packingItems || [], mName),
           sensorModelConfig: certTmpl.mappings.sensorModelConfig || {}
@@ -248,6 +249,7 @@ function syncPublishedBundlesForModel(modelName) {
         docCombo: 'cert_only',
         certTemplate: { ...certTmpl, field_mappings: certTmpl.mappings },
         packingTemplate: null,
+        tableConfig: certTmpl.mappings.tableConfig || null,
         testPoints: certTmpl.mappings.testPoints || [],
         packingItems: [],
         sensorModelConfig: certTmpl.mappings.sensorModelConfig || {}
@@ -1077,6 +1079,46 @@ app.delete('/api/templates/:id', requireAdminAccess, (req, res) => {
   res.json({ success: true, id: req.params.id });
 });
 
+
+function detectCertificateTableHeaders(docItems, model) {
+  const cells = (docItems || []).filter(x => x.type === 'cell');
+  if (cells.length === 0) return null;
+
+  const tables = [...new Set(cells.map(x => x.tableIdx))];
+  let bestRow = null;
+  let maxScore = -1;
+
+  for (const t of tables) {
+    const tCells = cells.filter(x => x.tableIdx === t);
+    const rows = [...new Set(tCells.map(x => x.rowIdx))].sort((a,b) => a - b);
+    for (const r of rows) {
+      const rCells = tCells.filter(x => x.rowIdx === r && x.text && x.text.trim()).sort((a,b) => a.colIdx - b.colIdx);
+      if (rCells.length < 2) continue;
+
+      let score = 0;
+      for (const c of rCells) {
+        const norm = normalizeText(c.text);
+        if (norm.includes('test point number') || norm.includes('testpoint') || norm.includes('point') || norm.includes('step') || norm.includes('序号') || norm.includes('测试点')) score += 3;
+        if (norm.includes('standard') || norm.includes('nist') || norm.includes('value') || norm.includes('标准')) score += 3;
+        if (norm.includes('analyzer') || norm.includes('actual') || norm.includes('reading') || norm.includes('实测') || norm.includes('指示') || norm.includes('indication')) score += 3;
+        if (norm.includes('gas') || norm.includes('介质') || norm.includes('output')) score += 2;
+        if (norm.includes('ppm') || norm.includes('℃') || norm.includes('ma') || norm.includes('dp')) score += 1;
+      }
+
+      if (score > maxScore && score >= 4) {
+        maxScore = score;
+        bestRow = rCells;
+      }
+    }
+  }
+
+  if (bestRow && bestRow.length >= 2) {
+    // Return extracted clean labels in colIdx order!
+    return bestRow.map(c => c.text.replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim()).filter(Boolean);
+  }
+  return null;
+}
+
 app.get('/api/templates/:id/analyze', (req, res) => {
   const tmpl = db.prepare('SELECT * FROM templates WHERE id = ?').get(req.params.id);
   if (!tmpl) return res.status(404).json({ error: 'Template not found' });
@@ -1092,12 +1134,16 @@ app.get('/api/templates/:id/analyze', (req, res) => {
 
   let targetLabels = [];
   if (tmpl.type === 'cert') {
-    if (tmpl.model === '990') {
-      targetLabels = ['Inst. SN.', 'Instrument', 'Date:', 'Ambient Temperature:', 'Relative Humidity', 'NIST Traceable Standard ℃ dp', 'Analyzer ℃ dp'];
+    const baseCertLabels = ['Inst. SN.', 'Instrument', 'Date:', 'Ambient Temperature:', 'Relative Humidity'];
+    const detectedTableCols = detectCertificateTableHeaders(docItems, tmpl.model);
+    if (detectedTableCols && detectedTableCols.length >= 2) {
+      targetLabels = [...baseCertLabels, ...detectedTableCols];
+    } else if (tmpl.model === '990') {
+      targetLabels = [...baseCertLabels, 'NIST Traceable Standard ℃ dp', 'Analyzer ℃ dp'];
     } else if (tmpl.model === 'DPT810') {
-      targetLabels = ['Inst. SN.', 'Instrument', 'Date:', 'Ambient Temperature:', 'Relative Humidity', 'Analyzer Under Test mA'];
+      targetLabels = [...baseCertLabels, 'Analyzer Under Test mA'];
     } else {
-      targetLabels = ['Inst. SN.', 'Instrument', 'Date:', 'Ambient Temperature:', 'Relative Humidity', 'Analyzer pv ppm'];
+      targetLabels = [...baseCertLabels, 'Analyzer pv ppm'];
     }
   } else {
     targetLabels = ['主设备', '传感器', '名称', '规格', '数量', '备注'];

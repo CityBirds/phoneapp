@@ -91,16 +91,42 @@ def process_word_document(template_path, output_path, data):
                             table.Cell(7, 2).Range.Text = device_sn
 
                         test_points = form_data.get('testPoints', [])
-                        for idx, tp in enumerate(test_points):
-                            r_idx = 13 + idx
-                            if table.Rows.Count >= r_idx:
-                                std_val = tp.get('std') if tp.get('std') is not None else tp.get('standard')
-                                act_val = tp.get('act') if tp.get('act') is not None else tp.get('actual')
-                                if std_val is not None and table.Columns.Count >= 2:
-                                    table.Cell(r_idx, 2).Range.Text = str(std_val)
-                                if act_val is not None and table.Columns.Count >= 3:
-                                    table.Cell(r_idx, 3).Range.Text = str(act_val)
+                        tc = cert_template.get('field_mappings', {}).get('tableConfig') if cert_template else None
+                        columns = tc.get('columns', []) if tc else []
+                        start_r = tc.get('startRow', 12) + 1 if tc and tc.get('startRow') is not None else 13
 
+                        needed_rows = start_r + len(test_points) - 1
+                        while table.Rows.Count < needed_rows:
+                            try: table.Rows.Add()
+                            except: break
+                        while table.Rows.Count > needed_rows and table.Rows.Count > start_r:
+                            try: table.Rows.Item(table.Rows.Count).Delete()
+                            except: break
+
+                        for idx, tp in enumerate(test_points):
+                            r_idx = start_r + idx
+                            if table.Rows.Count >= r_idx:
+                                if columns:
+                                    for col_def in columns:
+                                        c_idx = col_def.get('colIdx', 0) + 1
+                                        c_key = col_def.get('key')
+                                        val = None
+                                        vals = tp.get('values', {})
+                                        if c_key in vals: val = vals[c_key]
+                                        elif str(col_def.get('colIdx')) in vals: val = vals[str(col_def.get('colIdx'))]
+                                        elif col_def.get('label') in vals: val = vals[col_def.get('label')]
+                                        elif col_def.get('isSeq') and tp.get('name'): val = tp.get('name')
+                                        elif col_def.get('isStd') and tp.get('std') is not None: val = tp.get('std')
+                                        elif col_def.get('isAct') and tp.get('act') is not None: val = tp.get('act')
+                                        if val is not None and table.Columns.Count >= c_idx:
+                                            table.Cell(r_idx, c_idx).Range.Text = str(val)
+                                else:
+                                    std_val = tp.get('std') if tp.get('std') is not None else tp.get('standard')
+                                    act_val = tp.get('act') if tp.get('act') is not None else tp.get('actual')
+                                    if std_val is not None and table.Columns.Count >= 2:
+                                        table.Cell(r_idx, 2).Range.Text = str(std_val)
+                                    if act_val is not None and table.Columns.Count >= 3:
+                                        table.Cell(r_idx, 3).Range.Text = str(act_val)
                     elif doc_type == 'packing':
                         pump_str = "带泵" if (is_poa and has_pump) else ""
                         main_remark = f"SN: {device_sn} {pump_str}".strip() if pump_str else f"SN: {device_sn}"

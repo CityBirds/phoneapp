@@ -555,41 +555,144 @@ function setPumpOption(hasPump) {
   syncDeviceSnToPackingList();
 }
 
+function getActiveTestPointColumns(tc) {
+  if (tc && Array.isArray(tc.columns) && tc.columns.length > 0) {
+    return [...tc.columns].sort((a, b) => (a.colIdx ?? 0) - (b.colIdx ?? 0));
+  }
+  const cols = [];
+  if (tc && tc.pointCol) {
+    cols.push({
+      key: 'name',
+      label: tc.headers?.point || tc.pointCol.label || '序号/测试点',
+      colIdx: tc.pointCol.colIdx ?? 0,
+      isSeq: true,
+      role: 'seq'
+    });
+  } else {
+    cols.push({
+      key: 'name',
+      label: (tc && tc.headers?.point) || '序号/测试点',
+      colIdx: 0,
+      isSeq: true,
+      role: 'seq'
+    });
+  }
+  if (tc && tc.standardCol) {
+    cols.push({
+      key: 'std',
+      label: tc.headers?.standard || tc.standardCol.label || '标准值',
+      colIdx: tc.standardCol.colIdx ?? 1,
+      isStd: true,
+      role: 'standard'
+    });
+  } else {
+    cols.push({
+      key: 'std',
+      label: (tc && tc.headers?.standard) || '标准值',
+      colIdx: 1,
+      isStd: true,
+      role: 'standard'
+    });
+  }
+  if (tc && tc.actualCol) {
+    cols.push({
+      key: 'act',
+      label: tc.headers?.actual || tc.actualCol.label || '实测值',
+      colIdx: tc.actualCol.colIdx ?? 2,
+      isAct: true,
+      role: 'actual'
+    });
+  } else {
+    cols.push({
+      key: 'act',
+      label: (tc && tc.headers?.actual) || '实测值',
+      colIdx: 2,
+      isAct: true,
+      role: 'actual'
+    });
+  }
+  cols.sort((a, b) => (a.colIdx ?? 0) - (b.colIdx ?? 0));
+  return cols;
+}
+
 function initTestPointsForModel() {
   const bundle = state.activeBundle;
   const certTmpl = bundle ? bundle.certTemplate : null;
   const snapshot = bundle ? bundle.config_snapshot : {};
+  const tc = (certTmpl && certTmpl.field_mappings && certTmpl.field_mappings.tableConfig)
+    || (snapshot && snapshot.tableConfig);
+  const columns = getActiveTestPointColumns(tc);
 
   let pts = (certTmpl && certTmpl.field_mappings && certTmpl.field_mappings.testPoints)
     || (snapshot && snapshot.testPoints);
 
-  if ((!pts || pts.length === 0) && certTmpl && certTmpl.field_mappings && certTmpl.field_mappings.tableConfig) {
-    const tc = certTmpl.field_mappings.tableConfig;
-    if (tc.rowCount > 0) {
-      pts = [];
-      for (let i = 0; i < tc.rowCount; i++) {
-        pts.push({
-          point: i + 1,
-          name: tc.pointNames && tc.pointNames[i] ? tc.pointNames[i] : `测试点 ${i + 1}`,
-          std: tc.defaultValues && tc.defaultValues[i] ? tc.defaultValues[i] : '',
-          act: ''
-        });
-      }
+  if ((!pts || pts.length === 0) && tc && tc.rowCount > 0) {
+    pts = [];
+    for (let i = 0; i < tc.rowCount; i++) {
+      const rowItem = {
+        point: i + 1,
+        values: {}
+      };
+      columns.forEach(col => {
+        let val = (col.defaultValues && col.defaultValues[i]) ? col.defaultValues[i] : '';
+        if (col.isSeq && !val) val = String(i + 1);
+        rowItem.values[col.key] = val;
+        rowItem.values[String(col.colIdx)] = val;
+        rowItem.values[col.label] = val;
+      });
+      pts.push(rowItem);
     }
   }
 
   pts = pts || [];
-  const tc = certTmpl && certTmpl.field_mappings ? certTmpl.field_mappings.tableConfig : null;
   state.testPoints = pts.map((p, i) => {
+    const values = { ...(p.values || {}) };
+    columns.forEach(col => {
+      if (values[col.key] === undefined) {
+        if (values[String(col.colIdx)] !== undefined) {
+          values[col.key] = values[String(col.colIdx)];
+        } else if (values[col.label] !== undefined) {
+          values[col.key] = values[col.label];
+        } else if (col.isSeq) {
+          values[col.key] = p.name || p.label || String(i + 1);
+        } else if (col.isStd) {
+          values[col.key] = p.std !== undefined ? p.std : (p.standard || '');
+        } else if (col.isAct) {
+          values[col.key] = p.act !== undefined ? p.act : (p.actual || '');
+        } else if (col.defaultValues && col.defaultValues[i]) {
+          values[col.key] = col.defaultValues[i];
+        } else {
+          values[col.key] = '';
+        }
+      }
+    });
+
     let ptName = p.name || p.label;
-    if (!ptName && tc && tc.pointNames && tc.pointNames[i]) {
+    const seqCol = columns.find(c => c.isSeq);
+    if (seqCol && values[seqCol.key]) {
+      ptName = values[seqCol.key];
+    } else if (!ptName && tc && tc.pointNames && tc.pointNames[i]) {
       ptName = tc.pointNames[i];
     }
+
+    const stdCol = columns.find(c => c.isStd);
+    let stdVal = p.std !== undefined ? p.std : (p.standard || '');
+    if (stdCol && values[stdCol.key] !== undefined) {
+      stdVal = values[stdCol.key];
+    }
+
+    const actCol = columns.find(c => c.isAct);
+    let actVal = p.act !== undefined ? p.act : (p.actual || '');
+    if (actCol && values[actCol.key] !== undefined) {
+      actVal = values[actCol.key];
+    }
+
     return {
       point: p.point || i + 1,
       name: ptName || `测试点 ${i + 1}`,
-      std: p.std !== undefined ? p.std : (p.standard || ''),
-      act: p.act !== undefined ? p.act : (p.actual || '')
+      std: stdVal,
+      act: actVal,
+      values
     };
   });
 
@@ -603,59 +706,154 @@ function renderTestPoints() {
   const bundle = state.activeBundle;
   const certTmpl = bundle ? bundle.certTemplate : null;
   const tc = certTmpl && certTmpl.field_mappings ? certTmpl.field_mappings.tableConfig : null;
-  const pointColName = (tc && tc.headers && tc.headers.point) || '测试点 / 介质';
-  const thPoint = document.getElementById('th-point-name');
-  if (thPoint) thPoint.innerText = pointColName;
+  const columns = getActiveTestPointColumns(tc);
 
+  // Render Table Headers <thead> in exact template order with exact template names!
+  const thead = document.getElementById('test-points-thead');
+  if (thead) {
+    let thHtml = '<tr>';
+    columns.forEach(col => {
+      let title = col.label || '列';
+      thHtml += `<th class="col-test-dyn">${escapeHtml(title)}</th>`;
+    });
+    thHtml += '<th style="width: 70px; text-align: center;">操作</th></tr>';
+    thead.innerHTML = thHtml;
+  }
+
+  const colSpan = columns.length + 1;
   if (!state.testPoints || state.testPoints.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="4" style="text-align: center; color: #94a3b8; padding: 16px;">当前证书暂无测量点，可点击右上角「+ 添加测量点」新增</td></tr>';
+    tbody.innerHTML = `<tr><td colspan="${colSpan}" style="text-align: center; color: #94a3b8; padding: 16px;">当前证书暂无测量点，可点击右上角「+ 添加测量点」新增</td></tr>`;
     return;
   }
 
   tbody.innerHTML = state.testPoints.map((p, i) => {
-    const ptName = p.name || `测试点 ${p.point || i + 1}`;
-    return `
-      <tr>
+    let cellsHtml = '';
+    columns.forEach(col => {
+      const colKey = col.key;
+      let val = '';
+      if (p.values && p.values[colKey] !== undefined) {
+        val = p.values[colKey];
+      } else if (p.values && p.values[String(col.colIdx)] !== undefined) {
+        val = p.values[String(col.colIdx)];
+      } else if (col.isSeq) {
+        val = p.name || String(i + 1);
+      } else if (col.isStd) {
+        val = p.std !== undefined ? p.std : '';
+      } else if (col.isAct) {
+        val = p.act !== undefined ? p.act : '';
+      }
+
+      let placeholder = '';
+      if (col.isAct) {
+        placeholder = '实测值 (待填)';
+      } else if (col.isStd) {
+        placeholder = '标准值';
+      } else if (col.isSeq) {
+        placeholder = String(i + 1);
+      } else {
+        placeholder = col.label || '';
+      }
+
+      const inputId = col.isStd ? `id="tp-std-${i + 1}"` : (col.isAct ? `id="tp-act-${i + 1}"` : '');
+
+      cellsHtml += `
         <td>
-          <input type="text" class="form-control" value="${escapeHtml(ptName)}" placeholder="测试点名称/介质" onchange="updateTestPoint(${i}, 'name', this.value)">
+          <input type="text" 
+                 ${inputId}
+                 class="form-control" 
+                 value="${escapeHtml(val)}" 
+                 placeholder="${escapeHtml(placeholder)}"
+                 onchange="updateTestPointCell(${i}, '${escapeHtml(colKey)}', ${col.colIdx}, this.value, '${col.role || 'other'}')">
         </td>
-        <td>
-          <input type="text" id="tp-std-${i + 1}" class="form-control" value="${escapeHtml(p.std || '')}" placeholder="标准值" onchange="updateTestPoint(${i}, 'std', this.value)">
-        </td>
-        <td>
-          <input type="text" id="tp-act-${i + 1}" class="form-control" value="${escapeHtml(p.act || '')}" placeholder="实测值 (待填)" onchange="updateTestPoint(${i}, 'act', this.value)">
-        </td>
-        <td>
-          <button type="button" class="btn btn-sm btn-danger" onclick="deleteTestPointRow(${i})">删除</button>
-        </td>
-      </tr>
+      `;
+    });
+
+    cellsHtml += `
+      <td style="text-align: center;">
+        <button type="button" class="btn btn-sm btn-danger" onclick="deleteTestPointRow(${i})">删除</button>
+      </td>
     `;
+
+    return `<tr>${cellsHtml}</tr>`;
   }).join('');
+}
+
+function updateTestPointCell(rowIdx, colKey, colIdx, val, role) {
+  if (!state.testPoints || !state.testPoints[rowIdx]) return;
+  const p = state.testPoints[rowIdx];
+  if (!p.values) p.values = {};
+  p.values[colKey] = val;
+  p.values[String(colIdx)] = val;
+
+  if (role === 'seq') {
+    p.name = val;
+    const num = parseInt(val, 10);
+    if (!isNaN(num)) p.point = num;
+  } else if (role === 'std') {
+    p.std = val;
+  } else if (role === 'act') {
+    p.act = val;
+  } else {
+    p[colKey] = val;
+  }
 }
 
 function updateTestPoint(idx, key, val) {
   if (state.testPoints && state.testPoints[idx]) {
     state.testPoints[idx][key] = val;
+    if (!state.testPoints[idx].values) state.testPoints[idx].values = {};
+    state.testPoints[idx].values[key] = val;
   }
 }
 
 function addTestPointRow() {
   if (!state.testPoints) state.testPoints = [];
+  const bundle = state.activeBundle;
+  const certTmpl = bundle ? bundle.certTemplate : null;
+  const tc = certTmpl && certTmpl.field_mappings ? certTmpl.field_mappings.tableConfig : null;
+  const columns = getActiveTestPointColumns(tc);
+
   const newNum = state.testPoints.length + 1;
-  state.testPoints.push({
+  const newRow = {
     point: newNum,
-    name: `测试点 ${newNum}`,
+    name: String(newNum),
     std: '',
-    act: ''
+    act: '',
+    values: {}
+  };
+
+  columns.forEach(col => {
+    let defVal = '';
+    if (col.isSeq) {
+      defVal = String(newNum);
+    }
+    newRow.values[col.key] = defVal;
+    newRow.values[String(col.colIdx)] = defVal;
+    newRow.values[col.label] = defVal;
   });
+
+  state.testPoints.push(newRow);
   renderTestPoints();
 }
 
 function deleteTestPointRow(idx) {
   if (!state.testPoints || !state.testPoints[idx]) return;
   state.testPoints.splice(idx, 1);
+  const bundle = state.activeBundle;
+  const tc = bundle?.certTemplate?.field_mappings?.tableConfig;
+  const columns = getActiveTestPointColumns(tc);
+  const seqCol = columns.find(c => c.isSeq);
+
   state.testPoints.forEach((p, i) => {
     p.point = i + 1;
+    if (seqCol && p.values) {
+      if (!p.values[seqCol.key] || /^\d+$/.test(p.values[seqCol.key])) {
+        p.values[seqCol.key] = String(i + 1);
+        p.values[String(seqCol.colIdx)] = String(i + 1);
+        p.values[seqCol.label] = String(i + 1);
+        p.name = String(i + 1);
+      }
+    }
   });
   renderTestPoints();
 }
@@ -936,15 +1134,28 @@ async function submitTaskForm() {
     }
   }
 
-  // Dynamic test points gathering based on state.testPoints
+  // Dynamic test points gathering based on state.testPoints and template columns
+  const certTmpl = bundle ? bundle.certTemplate : null;
+  const tc = certTmpl && certTmpl.field_mappings ? certTmpl.field_mappings.tableConfig : null;
+  const columns = getActiveTestPointColumns(tc);
+
   const testPoints = (state.testPoints || []).map((p, i) => {
     const stdEl = document.getElementById(`tp-std-${i + 1}`);
     const actEl = document.getElementById(`tp-act-${i + 1}`);
+    const values = { ...(p.values || {}) };
+    columns.forEach(col => {
+      if (values[col.key] === undefined) {
+        if (col.isSeq) values[col.key] = p.name || String(i + 1);
+        else if (col.isStd) values[col.key] = stdEl ? stdEl.value.trim() : (p.std || '');
+        else if (col.isAct) values[col.key] = actEl ? actEl.value.trim() : (p.act || '');
+      }
+    });
     return {
       point: i + 1,
       name: p.name || `测试点 ${i + 1}`,
       std: stdEl ? stdEl.value.trim() : (p.std || ''),
-      act: actEl ? actEl.value.trim() : (p.act || '')
+      act: actEl ? actEl.value.trim() : (p.act || ''),
+      values
     };
   });
 

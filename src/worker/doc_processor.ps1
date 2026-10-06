@@ -262,7 +262,13 @@ try {
                                 try { [void]$targetTable.Rows.Add() } catch { break }
                             }
 
+                            while ($targetTable.Rows.Count -gt $neededRows -and $targetTable.Rows.Count -gt $startRowIdx) {
+                                try { [void]$targetTable.Rows.Item($targetTable.Rows.Count).Delete() } catch { break }
+                            }
+
                             $cells = $targetTable.Range.Cells
+                            $hasCustomCols = ($null -ne $tc.columns -and $tc.columns.Count -gt 0)
+
                             for ($p = 0; $p -lt $testPoints.Count; $p++) {
                                 $targetR = $startRowIdx + $p
                                 $tp = $testPoints[$p]
@@ -274,14 +280,37 @@ try {
                                     try {
                                         $cell = $cells.Item($ci)
                                         if ($cell.RowIndex -eq $targetR) {
-                                            if ($pointColIdx -gt 0 -and $cell.ColumnIndex -eq $pointColIdx -and $null -ne $ptName -and "$ptName" -ne "") {
-                                                $cell.Range.Text = [string]$ptName
-                                            }
-                                            if ($stdColIdx -gt 0 -and $cell.ColumnIndex -eq $stdColIdx -and $null -ne $stdVal -and "$stdVal" -ne "") {
-                                                $cell.Range.Text = [string]$stdVal
-                                            }
-                                            if ($actColIdx -gt 0 -and $cell.ColumnIndex -eq $actColIdx -and $null -ne $actVal -and "$actVal" -ne "") {
-                                                $cell.Range.Text = [string]$actVal
+                                            if ($hasCustomCols) {
+                                                foreach ($colDef in $tc.columns) {
+                                                    $cIdx = [int]$colDef.colIdx + 1
+                                                    if ($cell.ColumnIndex -eq $cIdx) {
+                                                        $k = $colDef.key
+                                                        $cVal = $null
+                                                        if ($null -ne $tp.values) {
+                                                            if ($null -ne $tp.values.$k) { $cVal = $tp.values.$k }
+                                                            elseif ($null -ne $tp.values."$($colDef.colIdx)") { $cVal = $tp.values."$($colDef.colIdx)" }
+                                                            elseif ($null -ne $tp.values."$($colDef.label)") { $cVal = $tp.values."$($colDef.label)" }
+                                                        }
+                                                        if ($null -eq $cVal) {
+                                                            if ($colDef.isSeq -and $null -ne $ptName) { $cVal = $ptName }
+                                                            elseif ($colDef.isStd -and $null -ne $stdVal) { $cVal = $stdVal }
+                                                            elseif ($colDef.isAct -and $null -ne $actVal) { $cVal = $actVal }
+                                                        }
+                                                        if ($null -ne $cVal -and "$cVal" -ne "") {
+                                                            $cell.Range.Text = [string]$cVal
+                                                        }
+                                                    }
+                                                }
+                                            } else {
+                                                if ($pointColIdx -gt 0 -and $cell.ColumnIndex -eq $pointColIdx -and $null -ne $ptName -and "$ptName" -ne "") {
+                                                    $cell.Range.Text = [string]$ptName
+                                                }
+                                                if ($stdColIdx -gt 0 -and $cell.ColumnIndex -eq $stdColIdx -and $null -ne $stdVal -and "$stdVal" -ne "") {
+                                                    $cell.Range.Text = [string]$stdVal
+                                                }
+                                                if ($actColIdx -gt 0 -and $cell.ColumnIndex -eq $actColIdx -and $null -ne $actVal -and "$actVal" -ne "") {
+                                                    $cell.Range.Text = [string]$actVal
+                                                }
                                             }
                                         }
                                     } catch {}
