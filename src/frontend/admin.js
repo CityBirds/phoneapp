@@ -1343,7 +1343,7 @@ async function saveMatchedRules(isDraft = false) {
     if (tmpl.type === 'cert' && isTableCol) {
       const loc = chosen.suggestedValueLocation;
       const isSeq = normLbl.includes('test point number') || normLbl.includes('testpoint') || normLbl.includes('point') || normLbl.includes('step') || normLbl.includes('序号') || normLbl.includes('测试点');
-      const isAct = normLbl.includes('analyzer') || normLbl.includes('actual') || normLbl.includes('reading') || normLbl.includes('实测') || normLbl.includes('指示') || normLbl.includes('indication');
+      const isAct = normLbl.includes('analyzer') || normLbl.includes('actual') || normLbl.includes('reading') || normLbl.includes('实测') || normLbl.includes('指示') || normLbl.includes('indication') || normLbl.includes('output') || normLbl.includes('输出');
       const isStd = !isSeq && !isAct && (normLbl === 'value' || normLbl.includes('value') || normLbl.includes('standard') || normLbl.includes('std') || normLbl.includes('nist') || normLbl.includes('标准'));
 
       let role = 'text';
@@ -1423,44 +1423,77 @@ async function saveMatchedRules(isDraft = false) {
         });
         if (pCand && pCand.suggestedValueLocation) {
           const loc = pCand.suggestedValueLocation;
-          pointColObj = {
-            label: pCand.matchedLabel || '测试点',
-            normLbl: (pCand.matchedLabel || '').toLowerCase(),
-            candidate: pCand,
-            loc,
-            colIdx: loc.colIdx,
-            tableIdx: loc.tableIdx,
-            startRow: loc.startRow,
-            endRow: loc.endRow,
-            role: 'seq',
-            isSeq: true,
-            isStd: false,
-            isAct: false,
-            fullValues: pCand.fullValues || pCand.sampleValues || []
-          };
-          matchedTableCols.unshift(pointColObj);
-          matchedTableCols.sort((a, b) => a.colIdx - b.colIdx);
+          // Check if this column is ALREADY in matchedTableCols to prevent duplicate columns (e.g. gas)
+          const existingCol = matchedTableCols.find(c => c.colIdx === loc.colIdx);
+          if (existingCol) {
+            existingCol.isSeq = true;
+            existingCol.role = 'seq';
+            pointColObj = existingCol;
+          } else {
+            pointColObj = {
+              label: pCand.matchedLabel || '测试点',
+              normLbl: (pCand.matchedLabel || '').toLowerCase(),
+              candidate: pCand,
+              loc,
+              colIdx: loc.colIdx,
+              tableIdx: loc.tableIdx,
+              startRow: loc.startRow,
+              endRow: loc.endRow,
+              role: 'seq',
+              isSeq: true,
+              isStd: false,
+              isAct: false,
+              fullValues: pCand.fullValues || pCand.sampleValues || []
+            };
+            matchedTableCols.unshift(pointColObj);
+          }
         }
       }
 
-      // Unit detection
-      let unit = '';
-      const unitSource = matchedTableCols.map(c => c.label).join(' ');
-      if (unitSource.includes('℃ dp') || unitSource.includes('℃')) unit = '℃ dp';
-      else if (unitSource.includes('ppm')) unit = 'ppm';
-      else if (unitSource.includes('mA') || unitSource.includes('ma')) unit = 'mA';
+      // Deduplicate matchedTableCols by colIdx to guarantee no duplicates
+      const seenColIdxs = new Set();
+      const dedupedCols = [];
+      for (const col of matchedTableCols) {
+        if (!seenColIdxs.has(col.colIdx)) {
+          seenColIdxs.add(col.colIdx);
+          dedupedCols.push(col);
+        }
+      }
+      matchedTableCols.length = 0;
+      matchedTableCols.push(...dedupedCols);
+      matchedTableCols.sort((a, b) => a.colIdx - b.colIdx);
+
+      // Per-column unit detection helper (strict word boundaries to avoid false positives on Remark, Format, etc.)
+      function extractColumnUnit(lbl) {
+        if (!lbl) return '';
+        const s = String(lbl).trim();
+        const lower = s.toLowerCase();
+        if (lower.includes('℃ dp') || lower.includes('℃') || lower.includes('°c')) return '℃ dp';
+        if (lower.includes('ppm')) return 'ppm';
+        if (/\bma\b/i.test(s) || /(?:^|[\s\(\[\{（])ma(?:$|[\s\)\]\}）])/i.test(s)) return 'mA';
+        if (lower.includes('%rh') || lower.includes('rh')) return '%RH';
+        return '';
+      }
+
+      // Standard column unit: only from standard column's own label!
+      const stdColUnit = stdColObj ? extractColumnUnit(stdColObj.label) : '';
+      const unit = stdColUnit; // Global tableConfig.unit represents standard value unit
 
       // Full list of columns in template file order
-      const columns = matchedTableCols.map(col => ({
-        key: `col_${col.colIdx}`,
-        label: col.label,
-        colIdx: col.colIdx,
-        role: col.role,
-        isSeq: col.isSeq,
-        isStd: col.isStd,
-        isAct: col.isAct,
-        defaultValues: col.fullValues || []
-      }));
+      const columns = matchedTableCols.map(col => {
+        const colUnit = extractColumnUnit(col.label);
+        return {
+          key: `col_${col.colIdx}`,
+          label: col.label,
+          colIdx: col.colIdx,
+          role: col.role,
+          isSeq: col.isSeq,
+          isStd: col.isStd,
+          isAct: col.isAct,
+          unit: colUnit,
+          defaultValues: col.fullValues || []
+        };
+      });
 
       testPoints = [];
       for (let i = 0; i < rowCount; i++) {
@@ -1471,7 +1504,11 @@ async function saveMatchedRules(isDraft = false) {
         columns.forEach(col => {
           let val = (col.defaultValues && col.defaultValues[i]) ? col.defaultValues[i] : '';
           if (col.isSeq && !val) val = String(i + 1);
-          if (col.isStd && val && unit && !val.includes(unit)) val = `${val} ${unit}`;
+          // Only append the column's OWN unit, never cross-contaminate across columns!
+          const colUnit = col.unit;
+          if (colUnit && val && !val.toLowerCase().includes(colUnit.toLowerCase())) {
+            val = `${val} ${colUnit}`;
+          }
           rowItem.values[col.key] = val;
           rowItem.values[String(col.colIdx)] = val;
           rowItem.values[col.label] = val;
@@ -1479,7 +1516,7 @@ async function saveMatchedRules(isDraft = false) {
 
         // Backward compatibility properties
         const stdVal = (stdColObj && stdColObj.fullValues && stdColObj.fullValues[i]) ? stdColObj.fullValues[i] : '';
-        rowItem.std = (stdVal && unit && !stdVal.includes(unit)) ? `${stdVal} ${unit}` : stdVal;
+        rowItem.std = (stdVal && stdColUnit && !stdVal.toLowerCase().includes(stdColUnit.toLowerCase())) ? `${stdVal} ${stdColUnit}` : stdVal;
         rowItem.act = (actColObj && actColObj.fullValues && actColObj.fullValues[i]) ? actColObj.fullValues[i] : '';
         rowItem.name = (pointColObj && pointColObj.fullValues && pointColObj.fullValues[i]) ? pointColObj.fullValues[i] : `测试点 ${i + 1}`;
 

@@ -42,7 +42,8 @@ function normalizeText(text) {
   str = str.replace(/([\u4e00-\u9fa5])\s+([\u4e00-\u9fa5])/g, '$1$2');
 
   // Normalize unit spacing e.g. "Analyzer℃ dp" -> "analyzer ℃ dp"
-  str = str.replace(/\s*(℃|°c|%rh|ppm|ma)/gi, ' $1');
+  str = str.replace(/\s*(℃|°c|%rh|ppm)/gi, ' $1');
+  str = str.replace(/\s*(\bma\b)/gi, ' $1');
 
   return str
     .replace(/\s+/g, ' ')
@@ -54,7 +55,11 @@ function extractUnits(text) {
   const norm = normalizeText(text);
   const found = [];
   for (const u of KNOWN_UNITS) {
-    if (norm.includes(u.toLowerCase())) {
+    if (u === 'ma') {
+      if (/\bma\b/i.test(norm) || /(?:^|[\s\(\[\{（])ma(?:$|[\s\)\]\}）])/i.test(norm)) {
+        found.push('ma');
+      }
+    } else if (norm.includes(u.toLowerCase())) {
       found.push(u.toLowerCase());
     }
   }
@@ -348,6 +353,7 @@ function findFieldCandidates(targetLabel, docItems) {
 
 module.exports = {
   normalizeText,
+  extractUnits,
   findFieldCandidates,
   inferFieldType,
   isDateFieldLabel,

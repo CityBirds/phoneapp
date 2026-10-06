@@ -1113,8 +1113,12 @@ function detectCertificateTableHeaders(docItems, model) {
   }
 
   if (bestRow && bestRow.length >= 2) {
-    // Return extracted clean labels in colIdx order!
-    return bestRow.map(c => c.text.replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim()).filter(Boolean);
+    const seen = new Set();
+    return bestRow.filter(c => {
+      if (seen.has(c.colIdx)) return false;
+      seen.add(c.colIdx);
+      return true;
+    }).map(c => c.text.replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim()).filter(Boolean);
   }
   return null;
 }
