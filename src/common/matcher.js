@@ -61,9 +61,20 @@ function extractUnits(text) {
   return found;
 }
 
+function isNumericText(text) {
+  if (!text) return false;
+  const cleaned = String(text).trim().replace(/[℃°c%rhppmma\s]/gi, '');
+  return /^-?\d+(\.\d+)?$/.test(cleaned);
+}
+
 function isTableColumnHeaderLabel(label) {
+  if (!label) return false;
   const norm = normalizeText(label);
-  return norm.includes('test point number') || norm.includes('nist') || norm.includes('analyzer') ||
+  return norm.includes('test point number') || norm.includes('testpointnumber') ||
+         norm.includes('nist') || norm.includes('analyzer') ||
+         norm === 'value' || norm.includes('value') || norm.includes('reading') || norm.includes('actual') ||
+         norm === 'gas' || norm.includes('gas') || norm.includes('output') || norm.includes('standard') ||
+         norm.includes('measured') || norm.includes('point') || norm.includes('nominal') ||
          norm === '序号' || norm === '名称' || norm.includes('规格') || norm === '数量' || norm === '单位' || norm === '标配' || norm === '备注';
 }
 
@@ -71,9 +82,6 @@ function getTableColumnDataCells(item, docItems, targetLabel) {
   if (!item || !docItems || !Array.isArray(docItems)) return [];
 
   const normTarget = normalizeText(targetLabel || item.text);
-  if (!isTableColumnHeaderLabel(targetLabel) && !isTableColumnHeaderLabel(item.text)) {
-    return [];
-  }
 
   const tableIdx = item.tableIdx;
   const rowIdx = item.rowIdx;
@@ -99,7 +107,30 @@ function getTableColumnDataCells(item, docItems, targetLabel) {
     }
   }
 
-  if (gridDataCells.length > 0) {
+  // 1. If explicitly recognized as table column header
+  const isHeaderLabel = isTableColumnHeaderLabel(targetLabel) || isTableColumnHeaderLabel(item.text);
+
+  // 2. Data Column Probing: check if cells below have numeric or homogeneous data characteristics
+  let hasNumericDataBelow = false;
+  if (gridDataCells.length >= 2) {
+    const nonEmptyCells = gridDataCells.filter(c => c.text && c.text.trim());
+    const numericCells = nonEmptyCells.filter(c => isNumericText(c.text));
+    if (nonEmptyCells.length >= 2 && (numericCells.length / nonEmptyCells.length) >= 0.5) {
+      hasNumericDataBelow = true;
+    }
+  }
+
+  // 3. Header Row Detection: check if other cells on the same row are also recognized column headers
+  let isRowHeader = false;
+  const sameRowCells = tableCells.filter(x => x.rowIdx === rowIdx && x.text && x.text.trim());
+  if (sameRowCells.length >= 3) {
+    const headersOnRow = sameRowCells.filter(x => isTableColumnHeaderLabel(x.text));
+    if (headersOnRow.length >= 2) {
+      isRowHeader = true;
+    }
+  }
+
+  if (gridDataCells.length > 0 && (isHeaderLabel || hasNumericDataBelow || isRowHeader)) {
     return gridDataCells;
   }
 
@@ -260,9 +291,13 @@ function findFieldCandidates(targetLabel, docItems) {
         } else {
           const tableCells = docItems.filter(x => x.type === 'cell' && x.tableIdx === tableIdx);
           const rightCell = tableCells.find(x => x.rowIdx === rowIdx && x.colIdx === colIdx + 1);
-          if (rightCell) {
+          // Check if rightCell is also a column header label (prevent header-header leak)
+          if (rightCell && !isTableColumnHeaderLabel(rightCell.text)) {
             candidateValue = rightCell.text ? rightCell.text.trim() : '空';
             valueLocation = { type: 'cell', tableIdx, rowIdx, colIdx: colIdx + 1 };
+          } else if (rightCell && isTableColumnHeaderLabel(rightCell.text)) {
+            candidateValue = '列名标题行(需按列数据绑定)';
+            valueLocation = null;
           } else {
             candidateValue = '未绑定';
           }

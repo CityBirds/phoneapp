@@ -1327,13 +1327,16 @@ async function saveMatchedRules(isDraft = false) {
 
     // Separate certificate measurement table columns
     if (tmpl.type === 'cert' && isTableCol) {
-      if (normLbl.includes('standard') || normLbl.includes('nist') || normLbl.includes('标准')) {
+      if (normLbl === 'value' || normLbl.includes('value') || normLbl.includes('standard') || normLbl.includes('std') || normLbl.includes('nist') || normLbl.includes('标准')) {
         stdCandidate = chosen;
         stdLabel = lbl;
         return; // Exclude from singleFields!
-      } else if (normLbl.includes('analyzer') || normLbl.includes('actual') || normLbl.includes('实测') || normLbl.includes('指示') || normLbl.includes('indication')) {
+      } else if (normLbl.includes('analyzer') || normLbl.includes('actual') || normLbl.includes('reading') || normLbl.includes('实测') || normLbl.includes('指示') || normLbl.includes('indication')) {
         actCandidate = chosen;
         actLabel = lbl;
+        return; // Exclude from singleFields!
+      } else {
+        // Other auxiliary table columns in certificate (such as Gas, mA Output, etc.)
         return; // Exclude from singleFields!
       }
     }
