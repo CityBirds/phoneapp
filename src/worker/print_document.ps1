@@ -71,10 +71,13 @@ try {
     } else {
         try { $app.Visible = $false } catch {}
         try { $app.DisplayAlerts = 0 } catch {}
+        try { $app.ActivePrinter = $PrinterName } catch {}
         $result.stage = 'print'
         $doc = $app.Documents.Open($FilePath, $false, $true)
-        # Background=$false 以便尽量同步拿到队列作业
-        $doc.PrintOut([ref]$false, [ref]$false, [ref]0, [ref]"", [ref]$PrinterName, [ref]$false, [ref]$Copies, [ref]"", [ref]$false, [ref]$false, [ref]0, [ref]$false, [ref]$false, [ref]$false, [ref]$false, [ref]0)
+        # Word COM PrintOut 规范签名：
+        # 1:Background, 2:Append, 3:Range, 4:OutputFileName, 5:From, 6:To, 7:Item, 8:Copies
+        # 显式设置 ActivePrinter，第 5/6 参数为页码区间，第 8 参数为份数 Copies
+        $doc.PrintOut([ref]$false, [ref]$false, [ref]0, [ref]"", [ref]"", [ref]"", [ref]0, [ref]$Copies, [ref]"", [ref]0, [ref]$false, [ref]$true, [ref]"", [ref]$false, [ref]0, [ref]0, [ref]0, [ref]0)
         $result.engine = 'word-com'
         $result.success = $true
     }
@@ -91,7 +94,12 @@ try {
 if (-not $result.success) {
     try {
         $result.stage = 'shell-print'
-        Start-Process -FilePath $FilePath -Verb PrintTo -ArgumentList "`"$PrinterName`"" -PassThru | Out-Null
+        # PrintTo 不直接支持传份数，通过循环调出多份语义
+        $copyCount = [Math]::Max(1, $Copies)
+        for ($c = 0; $c -lt $copyCount; $c++) {
+            Start-Process -FilePath $FilePath -Verb PrintTo -ArgumentList "`"$PrinterName`"" -PassThru | Out-Null
+            if ($c -lt $copyCount - 1) { Start-Sleep -Milliseconds 500 }
+        }
         $result.engine = 'shell-printto'
         $result.success = $true
         $result.error = $null
@@ -117,8 +125,8 @@ for ($i = 0; $i -lt 10; $i++) {
     }
 }
 if ($result.windowsJobIds.Count -eq 0) {
-    # 已有作业可能已快速完成，返回当前队列可见作业供参考
-    $result.windowsJobIds = @($after)
+    # 绝不能拿已存在的旧作业号作为本次入队证据，无法确认时如实返回空数组
+    $result.windowsJobIds = @()
 }
 
 Write-Result $result

@@ -65,14 +65,14 @@ function seedTemplates() {
     endRow: 3,
     rowCount: 3,
     columns: [
-      { key: 'col_1', label: 'Gas', colIdx: 2, role: 'seq', isSeq: true, isStd: false, isAct: false, unit: '' },
-      { key: 'col_2', label: 'Value', colIdx: 3, role: 'standard', isSeq: false, isStd: true, isAct: false, unit: '' },
-      { key: 'col_3', label: 'Actual Reading', colIdx: 4, role: 'actual', isSeq: false, isStd: false, isAct: true, unit: '' },
-      { key: 'col_4', label: 'mA Output(If fitted)', colIdx: 5, role: 'actual', isSeq: false, isStd: false, isAct: true, unit: 'mA' }
+      { key: 'col_1', label: 'Gas', colIdx: 1, role: 'seq', isSeq: true, isStd: false, isAct: false, unit: '' },
+      { key: 'col_2', label: 'Value', colIdx: 2, role: 'standard', isSeq: false, isStd: true, isAct: false, unit: '' },
+      { key: 'col_3', label: 'Actual Reading', colIdx: 3, role: 'actual', isSeq: false, isStd: false, isAct: true, unit: '' },
+      { key: 'col_4', label: 'mA Output(If fitted)', colIdx: 4, role: 'actual', isSeq: false, isStd: false, isAct: true, unit: 'mA' }
     ],
-    pointCol: { label: 'Gas', colIdx: 2 },
-    standardCol: { label: 'Value', colIdx: 3 },
-    actualCol: { label: 'Actual Reading', colIdx: 4 }
+    pointCol: { label: 'Gas', colIdx: 1 },
+    standardCol: { label: 'Value', colIdx: 2 },
+    actualCol: { label: 'Actual Reading', colIdx: 3 }
   };
   const certMappings = Object.assign({ protectedRows: [1] }, certTableConfig, { tableConfig: certTableConfig });
 

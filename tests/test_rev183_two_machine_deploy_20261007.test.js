@@ -13,14 +13,17 @@ const path = require('path');
 const fs = require('fs');
 const vm = require('vm');
 
-const testDbPath = path.resolve(__dirname, '../data/phoneapp_test_rev183_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7) + '.db');
+const testRunDir = path.resolve(__dirname, '../data/test_tmp_rev183_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7));
+fs.mkdirSync(testRunDir, { recursive: true });
+
+const testDbPath = path.join(testRunDir, 'test.db');
 process.env.DB_PATH = testDbPath;
-process.env.PREVIEW_DIR = path.join(path.dirname(testDbPath), 'previews_rev183');
-process.env.RETURNED_DIR = path.join(path.dirname(testDbPath), 'returned_rev183');
+process.env.PREVIEW_DIR = path.join(testRunDir, 'previews');
+process.env.RETURNED_DIR = path.join(testRunDir, 'returned');
 process.env.INTERNAL_PORT = '3091';
 
-// 执行端本机配置隔离：测试不得读写程序根目录的真实配置文件
-const configDir = path.resolve(__dirname, '../data/test_rev183_config_' + Date.now());
+// 执行端本机配置隔离：测试不得读写程序根目录的真实配置文件，统一放入本次测试运行隔离目录
+const configDir = path.join(testRunDir, 'config');
 fs.mkdirSync(configDir, { recursive: true });
 fs.writeFileSync(path.join(configDir, 'worker_config.json'), JSON.stringify({
   _comment: '测试隔离共享配置', autoDetectPrinters: true, allowedPrinters: []
@@ -49,6 +52,9 @@ test.before(async () => {
 test.after(async () => {
   if (server) await new Promise(resolve => server.close(resolve));
   if (internalServer) await new Promise(resolve => internalServer.close(resolve));
+  try {
+    fs.rmSync(testRunDir, { recursive: true, force: true });
+  } catch (e) {}
 });
 
 /** 在沙箱中加载执行端模块，返回沙箱内的 ExecutionWorker 构造器 */
@@ -97,13 +103,13 @@ async function registerWorker(workerId, secret, name) {
  */
 function seedTask({ taskId, workerId, fileType = 'cert', localExists = true, content = 'rev183-content' }) {
   const now = new Date().toISOString();
-  const localDir = path.join(path.dirname(testDbPath), `local_dir_${workerId}`);
+  const localDir = path.join(testRunDir, `local_dir_${workerId}`);
   fs.mkdirSync(localDir, { recursive: true });
   const localPath = path.join(localDir, `task${taskId}_${fileType}.doc`);
   if (fs.existsSync(localPath)) fs.unlinkSync(localPath);
   if (localExists) fs.writeFileSync(localPath, content, 'utf-8');
 
-  const serverDir = path.join(path.dirname(testDbPath), 'server_copies');
+  const serverDir = path.join(testRunDir, 'server_copies');
   fs.mkdirSync(serverDir, { recursive: true });
   const serverCopy = path.join(serverDir, `task${taskId}_${fileType}.doc`);
   fs.writeFileSync(serverCopy, content, 'utf-8');
@@ -288,7 +294,7 @@ test('REV183-10: 本机原件缺失时经协调端受控下载并校验哈希后
   await registerWorker('rev183-dl', 'sec-dl');
 
   const ExecutionWorkerClass = loadWorkerClass();
-  const workDir = path.join(path.dirname(testDbPath), 'worker_dl_dir');
+  const workDir = path.join(testRunDir, 'worker_dl_dir');
   fs.mkdirSync(workDir, { recursive: true });
   const worker = new ExecutionWorkerClass({
     workerId: 'rev183-dl',
@@ -362,7 +368,7 @@ test('REV183-10/14: 两端都没有原件时明确失败，不伪造成功', asy
   await registerWorker('rev183-miss', 'sec-miss');
 
   const ExecutionWorkerClass = loadWorkerClass();
-  const workDir = path.join(path.dirname(testDbPath), 'worker_miss_dir');
+  const workDir = path.join(testRunDir, 'worker_miss_dir');
   fs.mkdirSync(workDir, { recursive: true });
   const worker = new ExecutionWorkerClass({
     workerId: 'rev183-miss', workerSecret: 'sec-miss',
@@ -455,7 +461,7 @@ test('REV183-14: 未启动/凭据错误/非法参数分别给出明确错误，�
 
 test('REV183-05: 路径探测命令下发到目标终端，携带路径与配置版本', async () => {
   await registerWorker('rev183-probe', 'sec-probe');
-  const endpointOnlyDir = path.join(path.dirname(testDbPath), 'endpoint_only_dir');
+  const endpointOnlyDir = path.join(testRunDir, 'endpoint_only_dir');
   fs.mkdirSync(endpointOnlyDir, { recursive: true });
 
   db.prepare(`

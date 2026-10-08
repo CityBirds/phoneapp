@@ -607,7 +607,8 @@ class ExecutionWorker {
       if (res.ok) {
         const data = await res.json();
         if (data && data.workerFilePath) candidates.push(data.workerFilePath);
-        if (data && data.serverFilePath) candidates.push(data.serverFilePath);
+        // 绝不将协调端的盘符路径 (data.serverFilePath) 加入本机候选！
+        // 两台电脑上相同盘符路径代表不同文件；缺失本机原件时必须走受控下载流程。
       }
     } catch (e) {}
     const local = candidates.find(p => p && fs.existsSync(p));
@@ -627,28 +628,51 @@ class ExecutionWorker {
       console.error(`[打印] 打印项 ${item && item.taskFileId ? item.taskFileId : '?'} 缺少 taskId/fileType，无法下载原件副本`);
       return null;
     }
-    const targetDir = path.join(this.workingDir, 'returned_copies');
+
+    // 1. 先进行授权校验（未通过或异常直接终止，严禁在未获授权时创建目录或下载）
+    let auth;
+    try {
+      auth = await this.fetchAuthorizations();
+    } catch (e) {
+      console.error(`[打印] 无法确认执行端有效授权，拒绝下载原件副本: ${e.message}`);
+      return null;
+    }
+    if (!auth || !auth.ok) {
+      console.error(`[打印] 无法确认执行端有效授权（${auth ? auth.reason : '未获取到响应'}），拒绝下载 (WC-20)`);
+      return null;
+    }
+
+    const writeRoots = (auth.allowedPaths || []).filter(ap => ap && ap.allow_write);
+    if (writeRoots.length === 0) {
+      console.error(`[打印] 执行端当前没有任何允许写入的业务路径，拒绝下载原件副本 (WC-20)`);
+      return null;
+    }
+
+    // 2. 确定经批准的本地副本落地目录
+    let baseDir = this.workingDir;
+    const matchingRoot = writeRoots.find(ap => isSubpath(ap.root_path, this.workingDir));
+    if (!matchingRoot) {
+      baseDir = writeRoots[0].root_path;
+    }
+    const targetDir = path.join(baseDir, 'returned_copies');
+
+    if (!writeRoots.some(ap => isSubpath(ap.root_path, targetDir))) {
+      console.error(`[打印] 副本落地目录 [${targetDir}] 不在任何允许写入的授权路径内，拒绝下载 (WC-20)`);
+      return null;
+    }
+
+    // 3. 授权校验完全通过后，方可创建目录
     try {
       fs.mkdirSync(targetDir, { recursive: true });
     } catch (e) {
-      console.error(`[打印] 无法创建本机下载目录 ${targetDir}: ${e.message}`);
+      console.error(`[打印] 无法创建本机下载目录 [${targetDir}]: ${e.message}`);
       return null;
     }
+
     const targetName = item.officialFilename || `task${item.taskId}_${item.fileType}.doc`;
     const targetPath = path.join(targetDir, `${item.taskId}_${item.fileType}_${targetName}`);
 
-    // 下载前确认落地目录在本机被授予的写入范围内（授权由本机主动查询协调端，不依赖反向访问）
-    try {
-      const auth = await this.fetchAuthorizations();
-      if (auth.ok) {
-        const writeRoots = (auth.allowedPaths || []).filter(ap => ap.allow_write);
-        if (writeRoots.length > 0 && !writeRoots.some(ap => isSubpath(ap.root_path, targetDir))) {
-          console.error(`[打印] 下载目录 ${targetDir} 不在本机授权写入范围内，拒绝下载 (WC-20)`);
-          return null;
-        }
-      }
-    } catch (e) {}
-
+    // 4. 执行受控下载
     const url = `${this.serverUrl}/api/worker/tasks/${item.taskId}/files/${item.fileType}/download`;
     try {
       const res = await fetch(url, { headers: this.workerAuthHeaders() });
@@ -658,20 +682,28 @@ class ExecutionWorker {
         console.error(`[打印] 从协调端下载 ${item.fileType} 副本失败：${detail}`);
         return null;
       }
+
+      // 必须具备可信预期哈希校验
       const expectedHash = item.sha256 || res.headers.get('x-file-sha256') || '';
-      const buffer = Buffer.from(await res.arrayBuffer());
-      // 先落临时文件并校验哈希，通过后才改名，避免半截文件被打印
-      const tmpPath = `${targetPath}.downloading`;
-      fs.writeFileSync(tmpPath, buffer);
-      const actualHash = getFileSha256(tmpPath);
-      if (expectedHash && actualHash !== expectedHash) {
-        try { fs.unlinkSync(tmpPath); } catch (e) {}
-        console.error(`[打印] 下载副本哈希不一致（期望 ${String(expectedHash).slice(0, 12)}…，实际 ${String(actualHash).slice(0, 12)}…），拒绝打印`);
+      if (!expectedHash) {
+        console.error(`[打印] 任务 #${item.taskId} ${item.fileType} 缺少可信预期哈希，拒绝下载并使用半成品副本`);
         return null;
       }
+
+      const buffer = Buffer.from(await res.arrayBuffer());
+      const tmpPath = `${targetPath}.downloading`;
+      fs.writeFileSync(tmpPath, buffer);
+
+      const actualHash = getFileSha256(tmpPath);
+      if (actualHash !== expectedHash) {
+        try { fs.unlinkSync(tmpPath); } catch (e) {}
+        console.error(`[打印] 下载副本哈希不一致（预期 ${String(expectedHash).slice(0, 12)}…，实际 ${String(actualHash).slice(0, 12)}…），拒绝判定通过`);
+        return null;
+      }
+
       fs.renameSync(tmpPath, targetPath);
       try { fs.chmodSync(targetPath, 0o666); } catch (e) {}
-      console.log(`[打印] 已从协调端下载 ${item.fileType} 副本到本机: ${targetPath}（哈希校验通过）`);
+      console.log(`[打印] 已从协调端受控下载 ${item.fileType} 副本到授权目录: ${targetPath}（哈希校验通过）`);
       return targetPath;
     } catch (e) {
       console.error(`[打印] 下载 ${item.fileType} 副本异常: ${e.message}`);
@@ -783,12 +815,22 @@ class ExecutionWorker {
       const result = this.invokePrintCommand(filePath, printerName, item.copies || 1);
       if (result.success) {
         const jobId = (result.windowsJobIds && result.windowsJobIds[0]) || null;
-        await this.reportPrintItemStatus(job.id, item, 'SUBMITTED_TO_SPOOLER', {
-          printerName,
-          windowsJobId: jobId,
-          errorMsg: jobId ? null : '已调用打印能力，但未能取得 Windows 队列作业号，无法确认是否已进入队列'
-        });
-        console.log(`[打印] 任务 #${job.id} ${item.fileType} 已提交打印队列 (engine=${result.engine || '-'}, windowsJob=${jobId || '未取得'})`);
+        if (jobId) {
+          await this.reportPrintItemStatus(job.id, item, 'SUBMITTED_TO_SPOOLER', {
+            printerName,
+            windowsJobId: jobId,
+            errorMsg: null
+          });
+          console.log(`[打印] 任务 #${job.id} ${item.fileType} 已提交打印队列 (engine=${result.engine || '-'}, windowsJob=${jobId})`);
+        } else {
+          // 已调用打印能力但未取得 Windows 队列新增作业证据 -> RESULT_UNKNOWN（严禁虚报 SUBMITTED_TO_SPOOLER）
+          await this.reportPrintItemStatus(job.id, item, 'RESULT_UNKNOWN', {
+            printerName,
+            windowsJobId: null,
+            errorMsg: '已调用打印能力，但未能取得 Windows 队列新增作业证据，无法确认是否已进入队列 (RESULT_UNKNOWN)'
+          });
+          console.warn(`[打印] 任务 #${job.id} ${item.fileType} 已调用但无新增队列证据，标记为 RESULT_UNKNOWN (engine=${result.engine || '-'})`);
+        }
       } else {
         // 已调用但结果无法确认 → RESULT_UNKNOWN（不得自动重印）；明确失败 → FAILED
         const status = result.stage === 'command-failed' || result.stage === 'bad-output' ? 'RESULT_UNKNOWN' : 'FAILED';

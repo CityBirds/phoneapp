@@ -3925,53 +3925,57 @@ if (require.main === module) {
   //  - 该端口绝不可发布到公网隧道；远程接入的安全性由执行端身份凭据保证，而不是靠绑定地址。
   const workerBindHost = String(process.env.INTERNAL_BIND || process.env.WORKER_BIND || '0.0.0.0').trim() || '0.0.0.0';
 
-  app.listen(PORT, () => {
-    console.log('====================================================');
-    console.log('协调服务 (Coordination Service) 启动成功！');
-    console.log('====================================================');
-    console.log(`- 对外服务端口: ${PORT}`);
-    if (workerPort) {
-      console.log(`- 执行端接入口: ${workerBindHost}:${workerPort}（隧道请勿发布该端口）`);
-    } else {
-      console.log('- 执行端接入口: 未启用（执行端接口与对外端口共用；公网暴露时建议设置 INTERNAL_PORT）');
-    }
-    console.log(`- 关键 API 路由已就绪:`);
-    console.log(`  * GET  /api/published-bundles (获取已发布型号与文档组合配置)`);
-    console.log(`  * POST /api/tasks/submit       (任务提交与重复校验)`);
-    console.log(`  * GET  /api/workers            (执行终端心跳与状态列表)`);
-    console.log(`  * POST /api/templates/publish  (模板三合一严格校验与动态组合生成)`);
-    console.log(`- 协调管理控制台 (仅限本机直连，隧道访问会被拒绝): http://localhost:${PORT}/admin`);
-    console.log(`- 手机端发货作业地址 (含访问口令): /frontend/index.html?k=<口令>`);
-    console.log(`- 访问口令文件: ${path.join(__dirname, '../../data/access_token.txt')}`);
-    console.log(`- 数据存储目录: ${path.join(__dirname, '../../data')}`);
-    if (workerPort && workerBindHost !== '127.0.0.1' && workerBindHost !== 'localhost') {
-      console.log(`- 远程执行端接入地址（在其它电脑上使用）:`);
-      for (const ip of listLanIPv4()) {
-        console.log(`    node src/worker/worker.js --server http://${ip}:${workerPort}`);
+  const startMainServer = () => {
+    app.listen(PORT, () => {
+      console.log('====================================================');
+      console.log('协调服务 (Coordination Service) 启动成功！');
+      console.log('====================================================');
+      console.log(`- 对外服务端口: ${PORT}`);
+      if (workerPort) {
+        console.log(`- 执行端接入口已绑定: ${workerBindHost}:${workerPort}（隧道请勿发布该端口）`);
+      } else {
+        console.log('- 执行端接入口: 未启用（执行端接口与对外端口共用；公网暴露时建议设置 INTERNAL_PORT）');
       }
-      console.log(`  * 若远程电脑连接超时/被拒，请在协调电脑上**仅按需**放行可信局域网访问 TCP ${workerPort}`);
-      console.log(`    例: New-NetFirewallRule -DisplayName "phoneApp Worker" -Direction Inbound -Protocol TCP -LocalPort ${workerPort} -Action Allow -Profile Private -RemoteAddress LocalSubnet`);
-      console.log(`    （不要关闭整机防火墙，也不要把该端口发布到 Cloudflare 等公网隧道）`);
-    }
-    console.log('====================================================');
-    console.log('等待手机端/前端连接，以及执行端 (worker.js) 上线...');
+      console.log(`- 关键 API 路由已就绪:`);
+      console.log(`  * GET  /api/published-bundles (获取已发布型号与文档组合配置)`);
+      console.log(`  * POST /api/tasks/submit       (任务提交与重复校验)`);
+      console.log(`  * GET  /api/workers            (执行终端心跳与状态列表)`);
+      console.log(`  * POST /api/templates/publish  (模板三合一严格校验与动态组合生成)`);
+      console.log(`- 协调管理控制台 (仅限本机直连，隧道访问会被拒绝): http://localhost:${PORT}/admin`);
+      console.log(`- 手机端发货作业地址 (含访问口令): /frontend/index.html?k=<口令>`);
+      console.log(`- 访问口令文件: ${path.join(__dirname, '../../data/access_token.txt')}`);
+      console.log(`- 数据存储目录: ${path.join(__dirname, '../../data')}`);
+      if (workerPort && workerBindHost !== '127.0.0.1' && workerBindHost !== 'localhost') {
+        console.log(`- 远程执行端接入地址（在其它电脑上使用）:`);
+        for (const ip of listLanIPv4()) {
+          console.log(`    node src/worker/worker.js --server http://${ip}:${workerPort}`);
+        }
+        console.log(`  * 若远程电脑连接超时/被拒，请在协调电脑上**仅按需**放行可信局域网访问 TCP ${workerPort}`);
+        console.log(`    例: New-NetFirewallRule -DisplayName "phoneApp Worker" -Direction Inbound -Protocol TCP -LocalPort ${workerPort} -Action Allow -Profile Private -RemoteAddress LocalSubnet`);
+        console.log(`    （不要关闭整机防火墙，也不要把该端口发布到 Cloudflare 等公网隧道）`);
+      }
+      console.log('====================================================');
+      console.log('等待手机端/前端连接，以及执行端 (worker.js) 上线...');
+    });
+  };
 
-    // 执行端接入口：单独监听一个端口，执行端接口凭 localPort 判定只在此端口放行。
-    if (workerPort && workerPort !== Number(PORT)) {
-      const workerServer = app.listen(workerPort, workerBindHost, () => {
-        console.log(`- 执行端接入口已就绪: http://${workerBindHost}:${workerPort}`);
-      });
-      workerServer.on('error', (err) => {
-        const hint = err.code === 'EADDRINUSE'
-          ? `端口 ${workerPort} 已被占用，请释放该端口或改用其它 INTERNAL_PORT`
-          : (err.code === 'EADDRNOTAVAIL'
-            ? `绑定地址 ${workerBindHost} 在本机不存在，请改用本机实际网卡地址或 0.0.0.0`
-            : err.message);
-        console.error(`[严重] 执行端接入口 ${workerBindHost}:${workerPort} 启动失败: ${hint}`);
-        console.error('       远程执行端将无法接入；请修正后重启协调服务（不要在不确认的情况下继续操作）。');
-      });
-    }
-  });
+  if (workerPort && workerPort !== Number(PORT)) {
+    const workerServer = app.listen(workerPort, workerBindHost, () => {
+      startMainServer();
+    });
+    workerServer.on('error', (err) => {
+      const hint = err.code === 'EADDRINUSE'
+        ? `端口 ${workerPort} 已被占用，请释放该端口或改用其它 INTERNAL_PORT`
+        : (err.code === 'EADDRNOTAVAIL'
+          ? `绑定地址 ${workerBindHost} 在本机不存在，请改用本机实际网卡地址或 0.0.0.0`
+          : err.message);
+      console.error(`[严重] 执行端接入口 ${workerBindHost}:${workerPort} 启动失败: ${hint}`);
+      console.error('       无法开启内部端口，服务已停止启动；请修正后重新启动。');
+      process.exit(1);
+    });
+  } else {
+    startMainServer();
+  }
 }
 
 module.exports = app;

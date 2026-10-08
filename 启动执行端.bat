@@ -1,7 +1,7 @@
 @echo off
 chcp 65001 >nul
 title phoneApp - 执行端 (Worker)
-cd /d %~dp0
+cd /d "%~dp0"
 
 rem ============================================================
 rem  执行端启动脚本（多执行端局域网接入整改 2026-10-07）
@@ -18,11 +18,11 @@ rem        隧道不发布这个端口。
 rem ============================================================
 
 rem 如需固定指定协调电脑地址，取消下一行注释并改成实际地址：
-rem set COORDINATOR=http://192.168.1.10:3001
+rem set "COORDINATOR=http://192.168.1.183:3001"
 
 if defined COORDINATOR (
   echo [执行端] 使用脚本指定地址: %COORDINATOR%
-  node src\worker\worker.js --server %COORDINATOR%
+  node src\worker\worker.js --server "%COORDINATOR%"
 ) else (
   node src\worker\worker.js
 )
