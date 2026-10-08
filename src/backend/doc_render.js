@@ -195,7 +195,7 @@ function convertWordToPdf(wordPath, pdfPath, options = {}) {
     const ps1 = path.join(__dirname, 'word_to_pdf.ps1');
     if (fileExists(ps1)) {
       const res = runPowershell(ps1, ['-WordPath', wordPath, '-PdfPath', pdfPath], timeoutMs);
-      if (fileExists(pdfPath) && fs.statSync(pdfPath).size > 0) {
+      if (res.ok && fileExists(pdfPath) && fs.statSync(pdfPath).size > 0) {
         const pagesMatch = /pages=(\d+)/.exec(res.stdout || '');
         return { pdfPath, engine: 'office-com', pages: pagesMatch ? Number(pagesMatch[1]) : undefined };
       }

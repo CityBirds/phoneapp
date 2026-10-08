@@ -21,70 +21,64 @@ if (Test-Path -LiteralPath $PdfPath) {
     try { Remove-Item -LiteralPath $PdfPath -Force } catch {}
 }
 
-# 优先使用 WPS（KWps.Application），其次 MS Word；两者导出格式常量一致（PDF = 17）
-$app = $null
+# 每个引擎必须完成打开、导出和输出检查，不能仅凭 COM 创建成功就停止回退。
+$failures = @()
 foreach ($progId in @('Word.Application', 'KWps.Application', 'Wps.Application')) {
+    $app = $null
+    $doc = $null
+    $completed = $false
+    $stage = '创建组件'
     try {
-        $candidate = New-Object -ComObject $progId -ErrorAction Stop
-        $app = $candidate
-        $appName = "$progId"
-        try { $appName += " (" + $candidate.Name + ")" } catch {}
-        break
-    } catch {
-        $app = $null
-    }
-}
-
-if ($null -eq $app) {
-    Write-Error "未检测到可用的 Word/WPS COM 组件，无法生成 PDF 预览"
-    exit 3
-}
-
-$doc = $null
-try {
-    try { $app.Visible = $false } catch {}
-    try { $app.DisplayAlerts = 0 } catch {}
-
-    # 只读方式打开源文档（ConfirmConversions=false, ReadOnly=true），确保不改动执行端返回的 Word 原件
-    try {
+        # 上一个引擎留下的空文件或半成品不能被当作本次成功。
+        if (Test-Path -LiteralPath $PdfPath) { Remove-Item -LiteralPath $PdfPath -Force -ErrorAction Stop }
+        $app = New-Object -ComObject $progId -ErrorAction Stop
+        try { $app.Visible = $false } catch {}
+        try { $app.DisplayAlerts = 0 } catch {}
+        $stage = '打开文档'
         $doc = $app.Documents.Open($WordPath, $false, $true)
-    } catch {
-        Write-Error ("打开 Word 文档失败 [" + $appName + "]: " + $_.Exception.Message)
-        exit 4
-    }
-    if ($null -eq $doc) {
-        Write-Error ("无法打开 Word 文档 [" + $appName + "]: $WordPath")
-        exit 4
-    }
-
-    $pages = 0
-    try { $pages = [int]$doc.ComputeStatistics(2) } catch { $pages = 0 }
-
-    # wdExportFormatPDF = 17, wdExportOptimizeForPrint = 0, wdExportAllDocument = 0
-    try {
+        if ($null -eq $doc) { throw '未返回文档对象' }
+        $pages = 0
+        try { $pages = [int]$doc.ComputeStatistics(2) } catch {}
+        $stage = '导出 PDF'
         $doc.ExportAsFixedFormat($PdfPath, 17, $false, 0, 0, 0, 0, 0, $true, $true, 0, 0)
+        $stage = '检查 PDF 输出'
+        if (-not (Test-Path -LiteralPath $PdfPath)) { throw '未生成 PDF 文件' }
+        # 完整解析由后续预览流程执行；这里拒绝空文件与明显非 PDF 半成品。
+        $stream = [IO.File]::OpenRead($PdfPath)
+        try {
+            $header = [byte[]]@(0, 0, 0, 0, 0)
+            $count = $stream.Read($header, 0, 5)
+            if ($count -ne 5 -or [Text.Encoding]::ASCII.GetString($header) -ne '%PDF-') {
+                throw '输出为空或不是 PDF 文件'
+            }
+        } finally { $stream.Dispose() }
+        $completed = $true
     } catch {
-        Write-Error ("导出 PDF 失败 [" + $appName + "]: " + $_.Exception.Message)
-        exit 6
+        $detail = "[$progId][$stage] $($_.Exception.Message)"
+        $failures += $detail
+        # 不用 Write-Error：Stop 策略会提前终止，导致后续 WPS 无法尝试。
+        [Console]::Error.WriteLine("转换引擎失败，继续尝试下一引擎：$detail")
+    } finally {
+        if ($null -ne $doc) {
+            try { $doc.Close([ref]$false) } catch {}
+            try { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($doc) } catch {}
+        }
+        if ($null -ne $app) {
+            try { $app.Quit() } catch {}
+            try { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($app) } catch {}
+        }
+        [GC]::Collect()
+        [GC]::WaitForPendingFinalizers()
     }
-
-    Write-Output ("engine=" + $appName)
-    Write-Output "pages=$pages"
-    if (-not (Test-Path -LiteralPath $PdfPath)) {
-        Write-Error ("导出命令已执行但未生成 PDF 文件 [" + $appName + "]")
-        exit 5
+    if ($completed) {
+        Write-Output "engine=$progId"
+        Write-Output "pages=$pages"
+        exit 0
     }
-} finally {
-    if ($null -ne $doc) {
-        try { $doc.Close([ref]$false) } catch {}
-        try { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($doc) | Out-Null } catch {}
+    if (Test-Path -LiteralPath $PdfPath) {
+        try { Remove-Item -LiteralPath $PdfPath -Force -ErrorAction Stop }
+        catch { [Console]::Error.WriteLine("无法清理失败输出：$($_.Exception.Message)"); exit 7 }
     }
-    if ($null -ne $app) {
-        try { $app.Quit() } catch {}
-        try { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($app) | Out-Null } catch {}
-    }
-    [System.GC]::Collect()
-    [System.GC]::WaitForPendingFinalizers()
 }
-
-exit 0
+[Console]::Error.WriteLine('所有 Word/WPS 转换引擎均失败：' + ($failures -join '；'))
+exit 6
