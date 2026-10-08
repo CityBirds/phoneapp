@@ -53,6 +53,24 @@ test('admin.js prevents gas column duplication and prevents mA cross-contaminati
   const matcherData = {
     template: { id: 'tmpl_transmitter_cert', type: 'cert', model: 'POA3500' },
     targetLabels: ['Inst. SN.', 'Gas', 'Value', 'Output mA'],
+    // 真实测量区域（整改 3.1/3.2）：列必须属于同一区域，且不得把 Gas 推定为 seq
+    tableRegions: [{
+      tableIdx: 0,
+      kind: 'measurement',
+      headerRow: 11,
+      dataStartRow: 12,
+      dataEndRow: 13,
+      rowCount: 2,
+      rowIndices: [12, 13],
+      headerColumns: [
+        { colIdx: 0, label: 'Gas' },
+        { colIdx: 1, label: 'Value' },
+        { colIdx: 2, label: 'Output mA' }
+      ],
+      colStart: 0,
+      colEnd: 2,
+      ambiguous: false
+    }],
     selectedChoices: {
       'Inst. SN.': 0,
       'Gas': 0,

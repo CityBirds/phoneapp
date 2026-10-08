@@ -4,6 +4,9 @@ const fs = require('fs');
 // Set isolated test database path before loading backend (J15, Q04)
 const testDbPath = path.resolve(__dirname, `../data/phoneapp_e2e_test_${Date.now()}.db`);
 process.env.DB_PATH = testDbPath;
+// 测试隔离：预览与回传产物不得写入生产 data/previews、data/returned
+process.env.PREVIEW_DIR = path.join(path.dirname(testDbPath), 'previews_test_isolated');
+process.env.RETURNED_DIR = path.join(path.dirname(testDbPath), 'returned_test_isolated');
 
 const test = require('node:test');
 const assert = require('node:assert');
@@ -165,7 +168,11 @@ test('End-to-End Task Flow, Worker Execution, Preview & History (C01-C14, M01-M1
   assert.ok(certFile);
   assert.strictEqual(certFile.status, 'PREVIEW_READY');
   assert.ok(certFile.preview_images.length > 0);
-  assert.ok(certFile.preview_images[0].endsWith('.svg'));
+  // 整改 3.1（2026-10-07）：主预览改为“真实 Word → PDF → 逐页图片”，手机无需 Office；
+  // 页图必须来自本任务实际生成的 Word，PDF 保留为独立下载入口。
+  assert.ok(/\.png(\?|$)/i.test(certFile.preview_images[0]),
+    `Preview artifact must be a rendered page image of the generated Word, got: ${certFile.preview_images[0]}`);
+  assert.ok(certFile.preview_images.every(u => /\/previews\//.test(u)), '页图必须来自预览目录');
 
   // 7. Verify Official Word Document Download Endpoint
   const downloadRes = await fetch(`${serverUrl}/api/tasks/${taskId}/files/cert/download`);

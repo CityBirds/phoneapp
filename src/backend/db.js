@@ -56,13 +56,45 @@ const schema = [
   'CREATE TABLE IF NOT EXISTS published_bundles (id TEXT PRIMARY KEY, bundle_id TEXT NOT NULL, version TEXT NOT NULL, model_id TEXT NOT NULL, model_display TEXT NOT NULL, option_name TEXT DEFAULT \'通用\', doc_combo TEXT NOT NULL, cert_template_id TEXT, packing_template_id TEXT, status TEXT DEFAULT \'PUBLISHED\', published_at TEXT, config_snapshot TEXT DEFAULT \'{}\');',
   'CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, req_id TEXT UNIQUE NOT NULL, client_id TEXT NOT NULL, client_name TEXT NOT NULL, worker_id TEXT, model TEXT NOT NULL, model_id TEXT, bundle_id TEXT, device_sn TEXT NOT NULL, status TEXT NOT NULL, accepted_at TEXT NOT NULL, completed_at TEXT, form_data TEXT DEFAULT \'{}\', error_msg TEXT, retry_count INTEGER DEFAULT 0, cancelled_by TEXT);',
   'CREATE TABLE IF NOT EXISTS task_files (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL, file_type TEXT NOT NULL, official_filename TEXT NOT NULL, worker_filepath TEXT, server_filepath TEXT, sha256 TEXT, preview_images TEXT DEFAULT \'[]\', status TEXT NOT NULL, error_msg TEXT, target_dir TEXT, root_dir TEXT, subfolder_name TEXT, dir_config_id INTEGER, dir_config_version INTEGER, FOREIGN KEY(task_id) REFERENCES tasks(id));',
-  'CREATE TABLE IF NOT EXISTS print_jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, client_id TEXT NOT NULL, worker_id TEXT NOT NULL, printer_name TEXT NOT NULL, batch_items TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL);',
-  'CREATE TABLE IF NOT EXISTS audit_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, req_id TEXT, client_id TEXT, client_name TEXT, action TEXT NOT NULL, details TEXT, timestamp TEXT NOT NULL);',
+  'CREATE TABLE IF NOT EXISTS print_jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, client_id TEXT NOT NULL, worker_id TEXT NOT NULL, printer_name TEXT NOT NULL, batch_items TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL);',  'CREATE TABLE IF NOT EXISTS audit_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, req_id TEXT, client_id TEXT, client_name TEXT, action TEXT NOT NULL, details TEXT, timestamp TEXT NOT NULL);',
   'CREATE TABLE IF NOT EXISTS worker_allowed_paths (id INTEGER PRIMARY KEY AUTOINCREMENT, worker_id TEXT NOT NULL, root_path TEXT NOT NULL, allow_read INTEGER NOT NULL DEFAULT 1, allow_write INTEGER NOT NULL DEFAULT 1, allow_create INTEGER NOT NULL DEFAULT 0, version INTEGER NOT NULL DEFAULT 1, sync_status TEXT NOT NULL DEFAULT \'SYNCED\', check_status TEXT NOT NULL DEFAULT \'PENDING\', check_message TEXT, checked_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(worker_id, root_path));',
   'CREATE TABLE IF NOT EXISTS worker_save_configs (id INTEGER PRIMARY KEY AUTOINCREMENT, worker_id TEXT NOT NULL, template_id TEXT NOT NULL, doc_type TEXT NOT NULL, root_dir TEXT NOT NULL, save_mode TEXT NOT NULL DEFAULT \'direct\', subfolder_rule TEXT DEFAULT \'deviceSn\', allow_create INTEGER NOT NULL DEFAULT 0, is_enabled INTEGER NOT NULL DEFAULT 0, version INTEGER NOT NULL DEFAULT 1, check_status TEXT NOT NULL DEFAULT \'PENDING\', check_message TEXT, checked_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(worker_id, template_id, doc_type));',
   'CREATE TABLE IF NOT EXISTS worker_directory_checks (id INTEGER PRIMARY KEY AUTOINCREMENT, check_type TEXT NOT NULL DEFAULT \'save_config\', target_id INTEGER, config_id INTEGER, worker_id TEXT NOT NULL, version INTEGER NOT NULL, root_dir TEXT NOT NULL, allow_create INTEGER NOT NULL DEFAULT 0, allow_read INTEGER NOT NULL DEFAULT 1, allow_write INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL DEFAULT \'PENDING\', created_at TEXT NOT NULL);',
+  'CREATE TABLE IF NOT EXISTS worker_auth_state (worker_id TEXT PRIMARY KEY, state TEXT NOT NULL DEFAULT \'UNCONFIRMED\', updated_at TEXT, note TEXT);',
   'CREATE TABLE IF NOT EXISTS sales_persons (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL);',
-  'CREATE TABLE IF NOT EXISTS sensor_configs (id INTEGER PRIMARY KEY AUTOINCREMENT, model TEXT UNIQUE NOT NULL, sensor_options TEXT NOT NULL, default_value TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);'
+  'CREATE TABLE IF NOT EXISTS sensor_configs (id INTEGER PRIMARY KEY AUTOINCREMENT, model TEXT UNIQUE NOT NULL, sensor_options TEXT NOT NULL, default_value TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);',
+  `CREATE TABLE IF NOT EXISTS worker_access_auth (
+    worker_id TEXT PRIMARY KEY,
+    secret_hash TEXT NOT NULL,
+    secret_hint TEXT,
+    registered_at TEXT NOT NULL,
+    last_seen_at TEXT,
+    last_seen_ip TEXT,
+    last_seen_ua TEXT,
+    name_source TEXT DEFAULT 'report',
+    conflict_flag INTEGER DEFAULT 0,
+    conflict_note TEXT
+  );`,
+  `CREATE TABLE IF NOT EXISTS print_job_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    print_job_id INTEGER NOT NULL,
+    task_id INTEGER NOT NULL,
+    task_file_id INTEGER,
+    file_type TEXT NOT NULL,
+    official_filename TEXT,
+    snapshot_path TEXT,
+    sha256 TEXT,
+    copies INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL DEFAULT 'QUEUED',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    windows_job_id TEXT,
+    printer_name TEXT,
+    error_msg TEXT,
+    dispatched_at TEXT,
+    updated_at TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(print_job_id) REFERENCES print_jobs(id)
+  );`
 ].join('\n');
 
 db.exec(schema);
@@ -112,6 +144,18 @@ try { db.exec("ALTER TABLE worker_directory_checks ADD COLUMN check_type TEXT NO
 try { db.exec('ALTER TABLE worker_directory_checks ADD COLUMN target_id INTEGER;'); } catch (e) {}
 try { db.exec('ALTER TABLE worker_directory_checks ADD COLUMN allow_read INTEGER NOT NULL DEFAULT 1;'); } catch (e) {}
 try { db.exec('ALTER TABLE worker_directory_checks ADD COLUMN allow_write INTEGER NOT NULL DEFAULT 1;'); } catch (e) {}
+
+/**
+ * 打印整改（2026-10-07）：打印任务必须关联真实文件与内容版本，
+ * 并区分“已受理 / 已下发 / 已进入Windows队列 / 结果不明”，不能把 CLI 退出当作出纸成功。
+ */
+try { db.exec("ALTER TABLE print_jobs ADD COLUMN task_id INTEGER;"); } catch (e) {}
+try { db.exec("ALTER TABLE print_jobs ADD COLUMN request_id TEXT;"); } catch (e) {}
+try { db.exec("ALTER TABLE print_jobs ADD COLUMN claimed_by TEXT;"); } catch (e) {}
+try { db.exec("ALTER TABLE print_jobs ADD COLUMN claimed_at TEXT;"); } catch (e) {}
+try { db.exec("ALTER TABLE print_jobs ADD COLUMN error_msg TEXT;"); } catch (e) {}
+try { db.exec("ALTER TABLE print_jobs ADD COLUMN updated_at TEXT;"); } catch (e) {}
+try { db.exec("ALTER TABLE task_files ADD COLUMN print_job_id INTEGER;"); } catch (e) {}
 
 // Migration for worker_directory_checks: Ensure config_id is NULLABLE (for allowed_path checks)
 try {
@@ -171,6 +215,48 @@ try {
   }
 } catch (migErr) {
   console.error('[DB Migration Error]', migErr.message);
+}
+
+/**
+ * 授权范围确认状态迁移 (任务书 1 / 4.2 / 7.2)
+ *
+ * 历史上执行端可能没有任何“允许访问的业务路径”记录，执行逻辑会退化为“不限制”。
+ * 迁移不为这些终端默认放开：没有显式授权的终端标记为 UNCONFIRMED（待确认），
+ * 管理端必须为其配置业务路径后才会进入 EXPLICIT（已确认严格校验）状态。
+ * 已显式配置过业务路径的终端迁移为 EXPLICIT，保持原有行为。
+ */
+try {
+  const authStateCols = db.prepare('PRAGMA table_info(worker_auth_state)').all();
+  if (authStateCols.length > 0) {
+    const workersWithPaths = db.prepare('SELECT DISTINCT worker_id FROM worker_allowed_paths').all();
+    const workersWithConfigs = db.prepare('SELECT DISTINCT worker_id FROM worker_save_configs').all();
+    const knownWorkers = new Set([
+      ...workersWithPaths.map(r => r.worker_id),
+      ...workersWithConfigs.map(r => r.worker_id),
+      ...db.prepare('SELECT id FROM workers').all().map(r => r.id)
+    ]);
+
+    const nowIso = new Date().toISOString();
+    const explicitSet = new Set(workersWithPaths.map(r => r.worker_id));
+
+    for (const workerId of knownWorkers) {
+      if (!workerId) continue;
+      const existing = db.prepare('SELECT * FROM worker_auth_state WHERE worker_id = ?').get(workerId);
+      if (existing) continue;
+      const isExplicit = explicitSet.has(workerId);
+      db.prepare(`
+        INSERT INTO worker_auth_state (worker_id, state, updated_at, note)
+        VALUES (?, ?, ?, ?)
+      `).run(
+        workerId,
+        isExplicit ? 'EXPLICIT' : 'UNCONFIRMED',
+        nowIso,
+        isExplicit ? '迁移：已显式配置业务路径' : '迁移：尚无显式业务路径授权，待管理员确认 (4.2/7.2)'
+      );
+    }
+  }
+} catch (authMigErr) {
+  console.warn('[DB Migration Warning] worker_auth_state:', authMigErr.message);
 }
 
 // Recover orphan CHECKING records without active tasks (FIX-09)

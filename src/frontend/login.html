@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>发货证书与清单系统 - 访问口令</title>
+  <link rel="stylesheet" href="styles.css">
+  <style>
+    .login-wrap { max-width: 420px; margin: 0 auto; padding: 32px 20px 48px; }
+    .login-card { background: #fff; border-radius: 12px; padding: 24px 20px; box-shadow: 0 6px 20px rgba(15,23,42,.08); }
+    .login-title { font-size: 20px; font-weight: 800; color: #0f172a; margin: 0 0 6px; }
+    .login-sub { font-size: 13px; color: #64748b; margin: 0 0 20px; line-height: 1.7; }
+    .login-label { display: block; font-size: 13px; font-weight: 700; color: #334155; margin-bottom: 8px; }
+    .login-input { width: 100%; padding: 14px 12px; font-size: 18px; letter-spacing: 2px; font-family: ui-monospace, Consolas, monospace;
+                   border: 2px solid #cbd5e1; border-radius: 8px; box-sizing: border-box; text-transform: uppercase; }
+    .login-input:focus { outline: none; border-color: #0284c7; }
+    .login-btn { width: 100%; margin-top: 18px; padding: 15px; font-size: 17px; font-weight: 700; color: #fff;
+                 background: #0284c7; border: none; border-radius: 8px; cursor: pointer; }
+    .login-btn:disabled { background: #94a3b8; cursor: not-allowed; }
+    .login-msg { margin-top: 14px; font-size: 14px; line-height: 1.7; display: none; padding: 10px 12px; border-radius: 8px; }
+    .login-msg.error { display: block; background: #fef2f2; border: 1px solid #fecaca; color: #b91c1c; }
+    .login-msg.ok { display: block; background: #f0fdf4; border: 1px solid #bbf7d0; color: #15803d; }
+    .login-hint { margin-top: 22px; font-size: 12px; color: #94a3b8; line-height: 1.8; }
+  </style>
+</head>
+<body>
+  <header class="header">
+    <div class="header-left">
+      <h1>发货证书与清单系统</h1>
+      <div class="active-worker-pill"><span class="status-dot"></span><span>访问口令验证</span></div>
+    </div>
+  </header>
+
+  <div class="container">
+    <div class="login-wrap">
+      <div class="login-card">
+        <h2 class="login-title">请输入访问口令</h2>
+        <p class="login-sub">本系统通过公网访问，需要管理员提供的访问口令。<br>口令只需输入一次，之后手机会自动记住。</p>
+
+        <form id="login-form" autocomplete="off">
+          <label class="login-label" for="token-input">访问口令</label>
+          <input class="login-input" id="token-input" type="text" inputmode="text"
+                 autocapitalize="characters" autocomplete="off" spellcheck="false"
+                 placeholder="例如 FRU9NAVAXTKA2RT9H8LXV9TT" required>
+          <button class="login-btn" id="login-btn" type="submit">进入系统</button>
+        </form>
+
+        <div class="login-msg" id="login-msg"></div>
+
+        <div class="login-hint">
+          忘记口令？请在协调服务电脑上打开 <b>http://localhost:3000/admin</b>，页面顶部会显示当前口令。
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      var input = document.getElementById('token-input');
+      var btn = document.getElementById('login-btn');
+      var msg = document.getElementById('login-msg');
+      var form = document.getElementById('login-form');
+
+      function show(kind, text) {
+        msg.className = 'login-msg ' + kind;
+        msg.innerHTML = text;
+      }
+
+      function normalize(v) {
+        return String(v || '').replace(/\s+/g, '').toUpperCase();
+      }
+
+      // 支持从 ?k= 直接带入口令（点击管理员给的链接时自动登录）
+      try {
+        var params = new URLSearchParams(window.location.search);
+        var k = params.get('k') || params.get('token');
+        if (k) {
+          localStorage.setItem('phoneapp_access_token', k.trim());
+          location.replace('/frontend/index.html');
+          return;
+        }
+      } catch (e) {}
+
+      form.addEventListener('submit', async function (ev) {
+        ev.preventDefault();
+        var token = normalize(input.value);
+        if (!token) { show('error', '请输入访问口令'); return; }
+
+        btn.disabled = true;
+        btn.textContent = '正在验证...';
+        try {
+          var res = await fetch('/api/access/verify?k=' + encodeURIComponent(token), { cache: 'no-store' });
+          var data = {};
+          try { data = await res.json(); } catch (e) {}
+          if (res.ok && data.ok) {
+            localStorage.setItem('phoneapp_access_token', token);
+            // 同时写入 Cookie，兼容不支持 localStorage 的内嵌浏览器
+            document.cookie = 'phoneapp_token=' + encodeURIComponent(token) + ';path=/;max-age=' + (60 * 60 * 24 * 180) + ';samesite=lax';
+            show('ok', '验证通过，正在进入系统...');
+            setTimeout(function () { location.replace('/frontend/index.html'); }, 350);
+          } else {
+            show('error', '口令不正确，请核对后重试。<br>（口令为 24 位大写字母与数字）');
+            btn.disabled = false;
+            btn.textContent = '进入系统';
+          }
+        } catch (e) {
+          show('error', '网络异常，请确认手机能正常上网后重试：' + (e.message || ''));
+          btn.disabled = false;
+          btn.textContent = '进入系统';
+        }
+      });
+    })();
+  </script>
+</body>
+</html>

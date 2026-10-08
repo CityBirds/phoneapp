@@ -100,7 +100,65 @@ test('Packing List Protected Row Enforcement (E06, T06)', () => {
     }
   };
 
+  // 整改 B.3：模板要求的主设备保护行缺失时仍必须拒绝
+  // （未配置 protectedRows 的历史模板走最小安全底线，错误信息为主设备保护行缺失）
   assert.throws(() => {
     generateWordDocument(templatePath, outputPath, invalidTaskData);
-  }, /Missing protected main device or sensor row/);
+  }, /Missing protected main device|模板要求的保护行缺失/);
+});
+
+test('POA3500 清单保护行由模板决定，不因型号含 POA 而要求传感器行 (整改 B.1/B.2)', () => {
+  const { validateProtectedRows } = require('../src/worker/word_engine');
+
+  // POA3500 清单模板：只有主设备是保护行，没有传感器行
+  const poa3500Mappings = {
+    protectedRows: [1],
+    packingItems: [{ index: 1, name: '主设备', spec: 'POA3500', isProtected: true }]
+  };
+  const poa3500Items = [
+    { index: 1, name: '主设备', spec: 'POA3500', count: 1, unit: '台', standard: '是', remark: 'SN: AP80260617', isProtected: true },
+    { index: 2, name: '包装箱', spec: 'ABS', count: 1, unit: '个', standard: '是', remark: '空' },
+    { index: 3, name: '用户手册', spec: '中英文', count: 1, unit: '本', standard: '是' },
+    { index: 4, name: '校准证书', spec: '英文', count: 1, unit: '份', standard: '是' },
+    { index: 5, name: '电源线', spec: '902B', count: 1, unit: '根', standard: '是' },
+    { index: 6, name: '过滤器', spec: 'F46', count: 1, unit: '个', standard: '是' },
+    { index: 7, name: '洗气瓶', spec: '玻璃', count: 1, unit: '个', standard: '是' },
+    { index: 8, name: '针阀', spec: 'SS316', count: 1, unit: '个', standard: '是' },
+    { index: 9, name: '流量计', spec: '2SCFH', count: 1, unit: '个', standard: '是' }
+  ];
+  assert.doesNotThrow(() => {
+    validateProtectedRows(poa3500Items, poa3500Mappings);
+  }, 'POA3500 清单缺少传感器行时不得被拒绝');
+
+  // 主设备行缺失仍必须拒绝（保护规则不因 3500 而全局取消）
+  const withoutMain = poa3500Items.slice(1);
+  assert.throws(() => {
+    validateProtectedRows(withoutMain, poa3500Mappings);
+  }, /模板要求的保护行缺失/);
+
+  // POA200 模板要求主设备 + 传感器两行保护，缺少传感器仍必须拒绝
+  const poa200Mappings = {
+    protectedRows: [1, 2],
+    packingItems: [
+      { index: 1, name: '主设备', isProtected: true },
+      { index: 2, name: '传感器', isProtectedSensor: true }
+    ]
+  };
+  const poa200WithoutSensor = [
+    { index: 1, name: '主设备', spec: 'POA200', count: 1, unit: '台', standard: '是', remark: 'SN: A1', isProtected: true },
+    { index: 2, name: '包装箱', spec: 'ABS', count: 1, unit: '个', standard: '是' }
+  ];
+  assert.throws(() => {
+    validateProtectedRows(poa200WithoutSensor, poa200Mappings);
+  }, /模板要求的保护行缺失/);
+
+  // 新增普通物料导致序号变化时，不得因序号变化误判（按身份匹配）
+  const poa200WithExtraItem = [
+    { index: 1, name: '主设备', spec: 'POA200', count: 1, unit: '台', standard: '是', remark: 'SN: A1', isProtected: true },
+    { index: 2, name: '包装箱', spec: 'ABS', count: 1, unit: '个', standard: '是' },
+    { index: 3, name: '传感器', spec: 'PMT210SEN', count: 1, unit: '只', standard: '是', isProtectedSensor: true }
+  ];
+  assert.doesNotThrow(() => {
+    validateProtectedRows(poa200WithExtraItem, poa200Mappings);
+  }, '保护行按身份匹配，序号变化不应误判');
 });

@@ -115,13 +115,15 @@ window.addEventListener('DOMContentLoaded', () => {
   function handleHashRoute() {
     const hash = window.location.hash || '#clients';
     if (hash === '#directories' || hash.startsWith('#directories')) {
+      // WC-02/E01: 旧地址改为明确引导到终端列表，不再保留空白入口
       switchTab('directories');
     } else if (hash.startsWith('#worker-detail')) {
       const match = hash.match(/workerId=([^&]+)/);
       if (match) {
         showWorkerDetail(decodeURIComponent(match[1]));
       } else {
-        switchTab('workers');
+        // 直接打开 / 刷新 #worker-detail（缺少 workerId）也必须显示引导，不能空白 (WC-02)
+        switchTab('worker-detail');
       }
     } else if (hash.startsWith('#workers')) {
       switchTab('workers');
@@ -143,6 +145,8 @@ window.addEventListener('DOMContentLoaded', () => {
 // Tab Navigation
 let currentDetailWorkerId = null;
 let currentWorkerAllowedPaths = [];
+let currentWorkerAuthState = 'UNCONFIRMED';
+let currentWorkerAuthNote = null;
 let currentWorkerTemplateConfigs = [];
 
 // Tab Navigation
@@ -155,7 +159,8 @@ async function switchTab(tabId) {
     const side = document.getElementById(`side-${t}`);
     if (sec) sec.style.display = t === effectiveTab ? 'block' : 'none';
     if (side) {
-      if (t === effectiveTab || ((effectiveTab === 'sales-persons' || effectiveTab === 'sensor-configs') && t === 'templates')) side.classList.add('active');
+      if (isDirectories && t === 'workers') side.classList.add('active');
+      else if (t === effectiveTab || ((effectiveTab === 'sales-persons' || effectiveTab === 'sensor-configs') && t === 'templates')) side.classList.add('active');
       else side.classList.remove('active');
     }
   });
@@ -165,6 +170,11 @@ async function switchTab(tabId) {
     banner.style.display = isDirectories ? 'block' : 'none';
   }
 
+  // 终端详情：有 workerId 时显示配置，没有时显示明确引导页（E01, WC-02）
+  if (effectiveTab === 'worker-detail') {
+    renderWorkerDetailGuidance(currentDetailWorkerId);
+  }
+
   if (effectiveTab === 'clients') await loadClients();
   if (effectiveTab === 'workers') await loadWorkers();
   if (effectiveTab === 'templates') await loadTemplates();
@@ -172,6 +182,54 @@ async function switchTab(tabId) {
   if (effectiveTab === 'sensor-configs') await loadSensorConfigs();
   if (effectiveTab === 'matcher') await populateMatcherSelect(null, true);
   if (effectiveTab === 'audit') await loadAuditLogs();
+}
+
+/**
+ * 终端详情页引导：未选择终端（例如直接访问 /admin#worker-detail）时展示可选终端卡片，
+ * 保证任何入口都不会出现空白内容区 (E01, WC-02)
+ */
+async function renderWorkerDetailGuidance(workerId) {
+  const guidance = document.getElementById('worker-detail-guidance');
+  const body = document.getElementById('worker-detail-body');
+  if (!guidance || !body) return;
+
+  if (workerId) {
+    guidance.style.display = 'none';
+    body.style.display = 'block';
+    return;
+  }
+
+  guidance.style.display = 'block';
+  body.style.display = 'none';
+
+  const listEl = document.getElementById('worker-detail-guidance-list');
+  if (!listEl) return;
+  listEl.innerHTML = '<div style="padding: 10px; color: #64748b;">正在加载执行终端列表...</div>';
+
+  try {
+    const workers = await safeFetchJson(`${API_BASE}/api/workers?all=true`);
+    const list = Array.isArray(workers) ? workers : [];
+    if (list.length === 0) {
+      listEl.innerHTML = '<div style="padding: 10px; color: #64748b;">当前没有已登记的执行终端。请先在执行端电脑上启动执行端程序（启动执行端.bat）。</div>';
+      return;
+    }
+    listEl.innerHTML = list.map(w => `
+      <div class="worker-stat-card" style="cursor: pointer;" onclick="showWorkerDetail('${escapeHtml(w.id)}')">
+        <div class="worker-stat-card-header">
+          <div>
+            <b>💻 ${escapeHtml(w.name)}</b>
+            <div style="font-size: 12px; color: #64748b;">终端 ID: ${escapeHtml(w.id)}</div>
+          </div>
+          <span class="badge ${w.status === 'ONLINE' ? 'badge-success' : 'badge-danger'}">${w.status === 'ONLINE' ? '🟢 在线' : '🔴 离线'}</span>
+        </div>
+        <div style="margin-top: 10px;">
+          <button type="button" class="btn btn-primary btn-sm">⚙️ 进入该终端配置</button>
+        </div>
+      </div>
+    `).join('');
+  } catch (err) {
+    listEl.innerHTML = `<div style="padding: 10px; color: #ef4444;">加载执行终端失败: ${escapeHtml(err.message)}</div>`;
+  }
 }
 
 async function loadWorkers() {
@@ -233,7 +291,13 @@ async function loadWorkers() {
 
 // ==================== WORKER DETAIL & SAVE CONFIGURATION (E01-E04) ====================
 async function showWorkerDetail(workerId) {
-  if (!workerId) return;
+  if (!workerId) {
+    currentDetailWorkerId = null;
+    window.location.hash = '#worker-detail';
+    await switchTab('worker-detail');
+    return;
+  }
+
   currentDetailWorkerId = workerId;
   window.location.hash = `#worker-detail?workerId=${encodeURIComponent(workerId)}`;
 
@@ -246,26 +310,34 @@ async function showWorkerDetail(workerId) {
 
   const secDetail = document.getElementById('sec-worker-detail');
   if (secDetail) secDetail.style.display = 'block';
+  await renderWorkerDetailGuidance(workerId);
 
-  // Load Worker Info
+  // Load Worker Info（离线终端也允许编辑配置，但状态必须如实显示）(4.1, WC-06)
   try {
-    const res = await fetch(`${API_BASE}/api/workers?all=true`);
-    const workers = await res.json();
-    const worker = workers.find(w => w.id === workerId) || { id: workerId, name: workerId, status: 'OFFLINE' };
+    const workers = await safeFetchJson(`${API_BASE}/api/workers?all=true`);
+    const worker = (Array.isArray(workers) ? workers : []).find(w => w.id === workerId) || { id: workerId, name: workerId, status: 'OFFLINE' };
+
+    let printersText = '无';
+    try {
+      const printers = Array.isArray(worker.printers) ? worker.printers : JSON.parse(worker.printers || '[]');
+      printersText = printers.map(p => (typeof p === 'string' ? p : p.name)).filter(Boolean).join('、') || '无';
+    } catch (e) {}
 
     document.getElementById('detail-worker-title').innerText = `🖥️ 执行终端配置: ${worker.name}`;
     document.getElementById('detail-worker-status-badge').innerHTML = `
       <span class="badge ${worker.status === 'ONLINE' ? 'badge-success' : 'badge-danger'}" style="font-size: 14px; padding: 6px 12px;">
-        ${worker.status === 'ONLINE' ? '🟢 在线就绪' : '🔴 离线'}
+        ${worker.status === 'ONLINE' ? '🟢 在线就绪' : '🔴 离线（可编辑配置，远端检查保持待检查）'}
       </span>
     `;
 
     document.getElementById('detail-worker-info-content').innerHTML = `
-      <div><b>终端名称:</b> ${worker.name}</div>
-      <div><b>固定 Worker ID:</b> <code>${worker.id}</code></div>
-      <div><b>IP 地址:</b> ${worker.ip || '127.0.0.1'}</div>
-      <div><b>程序工作目录:</b> <code>${worker.working_dir || '未上报'}</code> <span style="font-size: 11px; color: #94a3b8;">(程序运行工作目录，不作为业务保存目录)</span></div>
-      <div><b>关联打印机:</b> ${(worker.printers && JSON.parse(worker.printers || '[]').join(', ')) || '无'}</div>
+      <div><b>终端名称:</b> ${escapeHtml(worker.name)}</div>
+      <div><b>固定 Worker ID:</b> <code>${escapeHtml(worker.id)}</code></div>
+      <div><b>在线状态:</b> ${worker.status === 'ONLINE' ? '🟢 在线' : '🔴 离线'}</div>
+      <div><b>IP 地址:</b> ${escapeHtml(worker.ip || '127.0.0.1')}</div>
+      <div><b>程序工作目录:</b> <code>${escapeHtml(worker.working_dir || '未上报')}</code><br><span style="font-size: 11px; color: #94a3b8;">程序运行工作目录，仅作运行信息展示，不构成业务文件访问授权</span></div>
+      <div><b>最后心跳:</b> ${worker.last_heartbeat ? new Date(worker.last_heartbeat).toLocaleString('zh-CN') : '无'}</div>
+      <div><b>关联打印机:</b> ${escapeHtml(printersText)}</div>
     `;
   } catch (e) {
     console.error('Load worker summary error:', e);
@@ -280,6 +352,27 @@ function backToWorkersList() {
   switchTab('workers');
 }
 
+function renderAuthStateBanner() {
+  const banner = document.getElementById('auth-state-banner');
+  if (!banner) return;
+
+  if (currentWorkerAuthState === 'EXPLICIT') {
+    banner.style.display = 'none';
+    banner.innerHTML = '';
+    return;
+  }
+
+  banner.style.display = 'block';
+  banner.style.background = '#fef3c7';
+  banner.style.border = '1px solid #fbbf24';
+  banner.style.color = '#92400e';
+  banner.innerHTML = `
+    ⚠️ <b>该执行端授权范围尚待确认（迁移状态）</b>：本终端此前没有配置任何“允许访问的业务路径”，
+    系统不会默认放开全部目录。请在此页面配置业务路径（可读/可写）后，模板保存目录才能通过校验并执行。
+    ${currentWorkerAuthNote ? `<div style="font-size: 12px; margin-top: 4px;">说明：${escapeHtml(currentWorkerAuthNote)}</div>` : ''}
+  `;
+}
+
 // --- 1. Allowed Paths Management ---
 async function loadWorkerAllowedPaths(workerId) {
   const tbody = document.getElementById('allowed-paths-tbody');
@@ -287,8 +380,18 @@ async function loadWorkerAllowedPaths(workerId) {
   tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; padding: 14px; color: #64748b;">正在加载允许访问的业务路径...</td></tr>';
 
   try {
-    const paths = await safeFetchJson(`${API_BASE}/api/admin/workers/${encodeURIComponent(workerId)}/allowed-paths`);
-    currentWorkerAllowedPaths = Array.isArray(paths) ? paths : [];
+    const data = await safeFetchJson(`${API_BASE}/api/admin/workers/${encodeURIComponent(workerId)}/allowed-paths`);
+    // 兼容两种返回结构：{ allowedPaths, authState } 或直接的数组
+    if (Array.isArray(data)) {
+      currentWorkerAllowedPaths = data;
+      currentWorkerAuthState = 'UNCONFIRMED';
+      currentWorkerAuthNote = null;
+    } else {
+      currentWorkerAllowedPaths = Array.isArray(data.allowedPaths) ? data.allowedPaths : [];
+      currentWorkerAuthState = data.authState || 'UNCONFIRMED';
+      currentWorkerAuthNote = data.authStateNote || null;
+    }
+    renderAuthStateBanner();
 
     if (currentWorkerAllowedPaths.length === 0) {
       tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; padding: 18px; color: #94a3b8;">当前执行端尚未配置任何授权业务路径，请点击上方按钮添加。</td></tr>';
@@ -309,15 +412,22 @@ async function loadWorkerAllowedPaths(workerId) {
         statusText = '检查中';
       }
 
+      const isSynced = p.sync_status === 'SYNCED';
+      const syncHtml = isSynced
+        ? '<span style="font-size: 12px; color: #16a34a;">✅ 已同步</span>'
+        : '<span style="font-size: 12px; color: #d97706;">⏳ 待同步<br><span style="font-size: 11px;">执行端尚未确认</span></span>';
+
       return `
         <tr style="border-bottom: 1px solid #f1f5f9;">
-          <td style="padding: 10px; font-family: monospace; font-weight: 600;">${p.root_path}</td>
+          <td style="padding: 10px; font-family: monospace; font-weight: 600;">${escapeHtml(p.root_path)}</td>
+          <td style="padding: 10px; text-align: center; font-size: 12px; color: #64748b;">v${p.version || 1}</td>
           <td style="padding: 10px; text-align: center;">${p.allow_read ? '✅ 允许' : '❌ 禁止'}</td>
           <td style="padding: 10px; text-align: center;">${p.allow_write ? '✅ 允许' : '❌ 禁止'}</td>
-          <td style="padding: 10px; text-align: center;"><span style="font-size: 12px; color: #64748b;">${p.sync_status === 'SYNCED' ? '已同步' : '待同步'}</span></td>
+          <td style="padding: 10px; text-align: center;">${syncHtml}</td>
           <td style="padding: 10px; text-align: center;"><span class="badge ${badgeClass}">${statusText}</span></td>
-          <td style="padding: 10px; font-size: 12px; color: #64748b;">${p.check_message || '-'}</td>
+          <td style="padding: 10px; font-size: 12px; color: #64748b;">${escapeHtml(p.check_message || '-')}</td>
           <td style="padding: 10px; text-align: center;">
+            <button type="button" class="btn btn-secondary btn-sm" onclick="openEditAllowedPathModal(${p.id})">✏️ 修改</button>
             <button type="button" class="btn btn-secondary btn-sm" onclick="checkAllowedPath(${p.id})">🔍 立即探测</button>
             <button type="button" class="btn btn-danger btn-sm" onclick="deleteAllowedPath(${p.id})">🗑️ 删除</button>
           </td>
@@ -419,26 +529,29 @@ async function deleteAllowedPath(id) {
 async function loadWorkerTemplateConfigs(workerId) {
   const tbody = document.getElementById('worker-templates-tbody');
   if (!tbody) return;
-  tbody.innerHTML = '<tr><td colspan="9" style="text-align: center; padding: 14px; color: #64748b;">正在加载本终端模板配置...</td></tr>';
+  tbody.innerHTML = '<tr><td colspan="10" style="text-align: center; padding: 14px; color: #64748b;">正在加载本终端模板配置...</td></tr>';
 
   try {
     const tmpls = await safeFetchJson(`${API_BASE}/api/admin/workers/${encodeURIComponent(workerId)}/template-configs`);
     currentWorkerTemplateConfigs = Array.isArray(tmpls) ? tmpls : [];
 
     if (currentWorkerTemplateConfigs.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="9" style="text-align: center; padding: 18px; color: #94a3b8;">模板库暂无已上传模板</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="10" style="text-align: center; padding: 18px; color: #94a3b8;">模板库暂无已上传模板</td></tr>';
       return;
     }
 
     tbody.innerHTML = currentWorkerTemplateConfigs.map(t => {
       let badgeClass = 'badge-secondary';
-      let statusText = '未配置';
-      if (t.check_status === 'PASSED') {
+      let statusText = t.is_orphaned ? '模板缺失' : '未配置';
+      if (t.check_status === 'PASSED' && !t.is_orphaned) {
         badgeClass = 'badge-success';
         statusText = '通过';
       } else if (t.check_status === 'FAILED') {
         badgeClass = 'badge-danger';
         statusText = '失败';
+      } else if (t.is_orphaned) {
+        badgeClass = 'badge-danger';
+        statusText = '模板缺失';
       } else if (t.check_status === 'CHECKING') {
         badgeClass = 'badge-warning';
         statusText = '检查中';
@@ -448,12 +561,21 @@ async function loadWorkerTemplateConfigs(workerId) {
 
       const isEnabled = Boolean(t.is_enabled);
       const docLabel = t.doc_type === 'cert' ? '📜 发货证书' : '📦 装箱清单';
+      const syncTextMap = {
+        SYNCED: '<span style="font-size: 12px; color: #16a34a;">✅ 已同步</span>',
+        PENDING: '<span style="font-size: 12px; color: #d97706;">⏳ 待执行端确认</span>',
+        DISABLED: '<span style="font-size: 12px; color: #94a3b8;">— 未启用</span>',
+        NOT_CONFIGURED: '<span style="font-size: 12px; color: #94a3b8;">— 未配置</span>',
+        ORPHANED: '<span style="font-size: 12px; color: #dc2626;">⚠️ 需处理</span>'
+      };
+      const syncHtml = syncTextMap[t.sync_status] || syncTextMap.NOT_CONFIGURED;
 
       return `
         <tr style="border-bottom: 1px solid #f1f5f9; ${!isEnabled ? 'opacity: 0.75;' : ''}">
           <td style="padding: 10px;">
-            <b>${t.model}</b>
-            <div style="font-size: 11px; color: #64748b;">${t.filename}</div>
+            <b>${escapeHtml(t.model)}</b>
+            <div style="font-size: 11px; color: #64748b;">${escapeHtml(t.filename)}</div>
+            ${t.is_orphaned ? '<div style="font-size: 11px; color: #dc2626;">该配置对应的模板已不存在，请删除以免遗留授权</div>' : ''}
           </td>
           <td style="padding: 10px; text-align: center;">${docLabel}</td>
           <td style="padding: 10px; text-align: center;">
@@ -461,23 +583,45 @@ async function loadWorkerTemplateConfigs(workerId) {
               ${isEnabled ? '✅ 已启用' : '⚪ 未启用'}
             </span>
           </td>
-          <td style="padding: 10px; font-family: monospace; font-size: 12px;">${t.root_dir || '<span style="color:#94a3b8;">未配置</span>'}</td>
-          <td style="padding: 10px; text-align: center; font-size: 12px;">${t.save_mode === 'subfolder' ? '📂 按序列号归档' : '📁 根目录直接保存'}</td>
+          <td style="padding: 10px; font-family: monospace; font-size: 12px;">${t.root_dir ? escapeHtml(t.root_dir) : '<span style="color:#94a3b8;">未配置</span>'}</td>
+          <td style="padding: 10px; text-align: center; font-size: 12px;">${t.save_mode === 'subfolder' ? `📂 按字段(${escapeHtml(t.subfolder_rule || 'deviceSn')})归档` : '📁 根目录直接保存'}</td>
           <td style="padding: 10px; text-align: center;">${t.allow_create ? '是' : '否'}</td>
+          <td style="padding: 10px; text-align: center;">${syncHtml}<div style="font-size: 11px; color: #64748b;">v${t.version || 1}</div></td>
           <td style="padding: 10px; text-align: center;"><span class="badge ${badgeClass}">${statusText}</span></td>
-          <td style="padding: 10px; font-size: 12px; color: #64748b;">${t.check_message || '-'}</td>
+          <td style="padding: 10px; font-size: 12px; color: #64748b;">${escapeHtml(t.check_message || '-')}</td>
           <td style="padding: 10px; text-align: center;">
             <button type="button" class="btn btn-secondary btn-sm" onclick="openWorkerTemplateModal('${t.template_id}', '${t.doc_type}')">⚙️ 配置</button>
             ${t.config_id ? `<button type="button" class="btn btn-primary btn-sm" onclick="checkWorkerTemplate(${t.config_id})">🔍 探测</button>` : ''}
+            ${t.config_id ? `<button type="button" class="btn btn-danger btn-sm" onclick="deleteWorkerTemplateConfig(${t.config_id})">🗑️ 删除</button>` : ''}
           </td>
         </tr>
       `;
     }).join('');
   } catch (err) {
-    tbody.innerHTML = `<tr><td colspan="9" style="color: #ef4444; text-align: center; padding: 16px;">
+    tbody.innerHTML = `<tr><td colspan="10" style="color: #ef4444; text-align: center; padding: 16px;">
       加载本终端模板配置失败: ${escapeHtml(err.message)}
       <button type="button" class="btn btn-secondary btn-sm" onclick="loadWorkerTemplateConfigs('${escapeHtml(workerId)}')" style="margin-left: 10px;">🔄 重试</button>
     </td></tr>`;
+  }
+}
+
+/**
+ * 删除某终端某模板的保存配置（含失效的残留配置），避免遗留授权 (4.3)
+ */
+async function deleteWorkerTemplateConfig(configId) {
+  if (!currentDetailWorkerId) return;
+  if (!confirm('确定要删除该终端在此模板上的保存目录配置吗？删除后该模板在此终端不可提交。')) return;
+  try {
+    const res = await fetch(`${API_BASE}/api/admin/workers/${encodeURIComponent(currentDetailWorkerId)}/template-configs/${configId}`, {
+      method: 'DELETE'
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || `HTTP ${res.status}`);
+    }
+    await loadWorkerTemplateConfigs(currentDetailWorkerId);
+  } catch (err) {
+    alert('删除配置失败: ' + err.message);
   }
 }
 
@@ -1071,6 +1215,9 @@ async function runTemplateAnalyze() {
 
     currentMatcherData = data;
     currentMatcherData.selectedChoices = {};
+    // 区域识别结果与结构可靠性作为发布校验依据（整改 3.1/3.2）
+    currentMatcherData.tableRegions = Array.isArray(data.tableRegions) ? data.tableRegions : [];
+    currentMatcherData.structureReliability = data.structureReliability || { reliable: true, reason: '' };
 
     const saved = data.template.field_mappings || {};
 
@@ -1083,7 +1230,12 @@ async function runTemplateAnalyze() {
             const mRes = await fetch(`${API_BASE}/api/templates/match-candidates`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ targetLabel: lbl, docItems: data.docItems || [] })
+              body: JSON.stringify({
+                targetLabel: lbl,
+                docItems: data.docItems || [],
+                type: data.template.type,
+                regions: currentMatcherData.tableRegions
+              })
             });
             if (currentAnalyzeToken !== token) return; // Exit early if stale
             currentMatcherData.matchResults[lbl] = await mRes.json();
@@ -1142,6 +1294,12 @@ async function runTemplateAnalyze() {
     if (saved.testPoints) currentMatcherData.testPoints = saved.testPoints;
     if (saved.packingItems) currentMatcherData.packingItems = saved.packingItems;
 
+    // 3. 旧配置校验：污染配置必须被标记并要求重新分析发布，不得静默继续使用（整改 3.3, M11）
+    currentMatcherData.configWarnings = validateLoadedTemplateConfig(data, saved);
+
+    // 4. 清单/证书：以检测到的真实表头补齐默认选择（模板真实列优先）
+    autoBindRegionColumns(data);
+
     document.getElementById('matcher-doc-title').innerText = `模板字段位置匹配清单: ${data.template.filename}`;
     document.getElementById('matcher-doc-meta').innerText = `型号: ${data.template.model} | 提取文本结构项: ${data.docItemsCount} 项`;
 
@@ -1152,12 +1310,120 @@ async function runTemplateAnalyze() {
       if (sensorCard) sensorCard.style.display = 'none';
     }
 
+    renderMatcherWarnings();
     renderMatcherTable();
   } catch (err) {
     if (currentAnalyzeToken === token) {
       tbody.innerHTML = `<tr><td colspan="8">分析失败: ${err.message}</td></tr>`;
     }
   }
+}
+
+/** 展示结构可靠性与旧配置校验结果 */
+function renderMatcherWarnings() {
+  const box = document.getElementById('matcher-warnings');
+  if (!box) return;
+  const warnings = [];
+  const reliability = currentMatcherData.structureReliability;
+  if (reliability && reliability.reliable === false) {
+    warnings.push(`⛔ 文档结构不可靠：${reliability.reason}。已禁止正式发布，请安装办公组件后重新分析。`);
+  }
+  const ambiguous = (currentMatcherData.tableRegions || []).filter(r => r.ambiguous);
+  if (ambiguous.length > 0) {
+    warnings.push(`⚠️ 表格区域 [${ambiguous.map(r => `表${r.tableIdx + 1}`).join(', ')}] 缺少明确的测量/物料表头特征，请人工确认区域后再发布。`);
+  }
+  (currentMatcherData.configWarnings || []).forEach(w => warnings.push(`⚠️ 已保存配置问题：${w}`));
+
+  if (warnings.length === 0) {
+    box.style.display = 'none';
+    box.innerHTML = '';
+    return;
+  }
+  box.style.display = 'block';
+  box.innerHTML = warnings.map(w => `<div style="margin-bottom:4px;">${w}</div>`).join('');
+}
+
+/**
+ * 旧配置校验：行数、列归属、单值字段与测量列冲突、默认值截断。
+ * 发现问题的旧配置必须重新分析/重新绑定，不能静默继续使用。
+ */
+function validateLoadedTemplateConfig(data, saved) {
+  const warnings = [];
+  if (!saved || !saved.tableConfig) return warnings;
+  const tc = saved.tableConfig;
+  const tmplType = data.template.type;
+  const regions = (data.tableRegions || []).filter(r => (tmplType === 'packing' ? r.kind === 'packing' : r.kind === 'measurement'));
+  const region = regions[0];
+
+  const savedRows = Array.isArray(saved.testPoints) ? saved.testPoints.length : 0;
+  if (region && typeof tc.rowCount === 'number' && tc.rowCount !== region.rowCount) {
+    warnings.push(`已保存测量行数 (${tc.rowCount}) 与模板真实数据区行数 (${region.rowCount}) 不一致，必须重新分析并重新发布。`);
+  }
+  if (region && typeof tc.tableIdx === 'number' && tc.tableIdx !== region.tableIdx) {
+    warnings.push(`已保存测量表格编号 (${tc.tableIdx}) 与模板真实区域 (${region.tableIdx}) 不一致。`);
+  }
+  if (region && typeof tc.rowCount === 'number' && savedRows > 0 && savedRows !== tc.rowCount) {
+    warnings.push(`已保存测量点数据行数 (${savedRows}) 与配置行数 (${tc.rowCount}) 不一致，默认值可能被截断。`);
+  }
+  if (Array.isArray(tc.columns)) {
+    const tableIdxs = new Set(tc.columns.map(c => (c.tableIdx === undefined ? tc.tableIdx : c.tableIdx)));
+    if (tableIdxs.size > 1) warnings.push('已保存测量列跨多个表格区域，数据区边界不可靠。');
+    tc.columns.forEach(col => {
+      if (col.label && isSingleValueLikeLabel(col.label)) {
+        warnings.push(`单值字段 [${col.label}] 被保存成了测量列，必须重新绑定。`);
+      }
+    });
+  }
+  (saved.singleFields || []).forEach(sf => {
+    if (sf && sf.valueLocation && sf.valueLocation.type === 'table_column') {
+      warnings.push(`单值字段 [${sf.label}] 被保存成整列绑定，必须重新绑定。`);
+    }
+  });
+  return warnings;
+}
+
+function isSingleValueLikeLabel(label) {
+  const s = String(label || '').trim().toLowerCase();
+  if (!s) return false;
+  if (/date|日期|inst\.?\s*sn|serial\s*no|customer|客户|instrument$|仪器$|ambient|humidity|温度|湿度|destination|目的地|sales/.test(s)) return true;
+  return false;
+}
+
+/**
+ * 依据模板检测到的表头/数据区，自动补齐默认候选选择。
+ * 只在管理员尚未显式选择（selectedChoices 无记录）时生效。
+ */
+function autoBindRegionColumns(data) {
+  const regions = data.tableRegions || [];
+  const isPacking = data.template.type === 'packing';
+  const region = regions.find(r => (isPacking ? r.kind === 'packing' : r.kind === 'measurement'));
+  if (!region) return;
+
+  const choices = currentMatcherData.selectedChoices || {};
+  const labels = (data.targetLabels || []).slice();
+
+  region.headerColumns.forEach(hc => {
+    const matchLabel = labels.find(l => normalizeLabelForCompare(l) === normalizeLabelForCompare(hc.label));
+    if (!matchLabel) return;
+    const match = (currentMatcherData.matchResults || {})[matchLabel];
+    if (!match || !match.candidates || match.candidates.length === 0) return;
+    const idx = match.candidates.findIndex(c =>
+      c.suggestedValueLocation && c.suggestedValueLocation.type === 'table_column' &&
+      c.suggestedValueLocation.colIdx === hc.colIdx
+    );
+    if (idx >= 0 && choices[matchLabel] === undefined) choices[matchLabel] = idx;
+  });
+
+  currentMatcherData.selectedChoices = choices;
+}
+
+function normalizeLabelForCompare(label) {
+  return String(label || '')
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/[:：]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
 }
 
 function renderMatcherTable() {
@@ -1296,6 +1562,113 @@ function updateCandidateChoice(key, choiceVal) {
   renderMatcherTable();
 }
 
+/** 按字段名解析清单表头对应的业务键（与后端一致，仅使用真实表头） */
+function mapPackingHeaderToField(label) {
+  const norm = normalizeLabelForCompare(label);
+  if (!norm) return null;
+  if (/^序号$/.test(norm) || /^序号/.test(norm) || /^no\.?$/.test(norm) || /^item$/.test(norm)) return 'index';
+  if (/名称|品名|物料名称|description/.test(norm)) return 'name';
+  if (/规格|型号|spec/.test(norm)) return 'spec';
+  if (/数量|count|qty|quantity/.test(norm)) return 'count';
+  if (/单位|unit/.test(norm)) return 'unit';
+  if (/标配|标准配置|standard/.test(norm)) return 'standard';
+  if (/备注|说明|remark|note/.test(norm)) return 'remark';
+  return null;
+}
+
+function snFromText(text) {
+  const m = String(text || '').match(/SN[:：]?\s*([A-Za-z0-9_\-]+)/i);
+  return m ? m[1] : null;
+}
+
+/**
+ * 依据模板真实表头与行角色生成清单物料行（整改 B02/B03, 3.4）。
+ * - 只使用模板真实存在的列，不虚构“单位/标配”；
+ * - “主设备/传感器”作为行角色，不加入列字段；
+ * - 单位、标配、备注逐行取模板原值，无依据时不补“件”“是”；
+ * - 主设备与真实存在的传感器行标记为保护行，且记录 SN 所在列。
+ */
+function buildPackingItemsFromTemplate(matchResults, choices, packingRegion) {
+  const fields = {};
+  (packingRegion ? packingRegion.headerColumns : []).forEach(hc => {
+    const field = mapPackingHeaderToField(hc.label);
+    if (field && !fields[field]) fields[field] = hc;
+  });
+
+  const chosenFullValues = (fieldKey) => {
+    if (!fieldKey) return null;
+    const col = fields[fieldKey];
+    let label = col ? col.label : Object.keys(matchResults).find(l => mapPackingHeaderToField(l) === fieldKey);
+    if (!label) return null;
+    const match = matchResults[label];
+    if (!match || !match.candidates || match.candidates.length === 0) return null;
+    const chosenIdx = choices[label] !== undefined ? choices[label] : 0;
+    const cand = match.candidates[chosenIdx] || match.candidates[0];
+    if (!cand || !cand.suggestedValueLocation || cand.suggestedValueLocation.type !== 'table_column') return null;
+    const vals = (cand.fullValues && cand.fullValues.length > 0) ? cand.fullValues : (cand.sampleValues || []);
+    return { label, values: vals, colIdx: cand.suggestedValueLocation.colIdx };
+  };
+
+  const byField = {};
+  ['index', 'name', 'spec', 'count', 'unit', 'standard', 'remark'].forEach(f => {
+    byField[f] = chosenFullValues(f);
+  });
+
+  if (!byField.name || !byField.name.values || byField.name.values.length === 0) return [];
+
+  const items = byField.name.values.map((name, idx) => {
+    const pick = (f) => {
+      const src = byField[f];
+      if (!src || !src.values) return '';
+      const v = src.values[idx];
+      return v === undefined || v === null ? '' : String(v);
+    };
+    const countRaw = pick('count');
+    const parsedCount = parseInt(countRaw, 10);
+    return {
+      index: idx + 1,
+      name: String(name || '').trim(),
+      spec: pick('spec'),
+      count: Number.isFinite(parsedCount) ? parsedCount : (countRaw || ''),
+      // 保留模板原始单位/标配，缺失就是空，不补“件”“是”
+      unit: pick('unit'),
+      standard: pick('standard'),
+      remark: pick('remark'),
+      isProtected: false,
+      role: 'material',
+      sn: null,
+      snCol: null
+    };
+  });
+
+  // 行角色识别：主设备/传感器/参考仪器来自模板真实行内容
+  const headerCols = (packingRegion ? packingRegion.headerColumns : []).slice().sort((a, b) => a.colIdx - b.colIdx);
+  const remarkCol = fields.remark ? fields.remark.colIdx : null;
+  items.forEach(item => {
+    const label = String(item.name || '');
+    if (/主设备|主机/.test(label)) item.role = 'mainDevice';
+    else if (/传感器|探头/.test(label)) item.role = 'sensor';
+    else if (/参考仪器|标准器/.test(label)) item.role = 'reference';
+  });
+
+  // 若模板没有显式“主设备”行名，用第一个带 SN 的行作为主设备行（仍保留其原名称）
+  if (!items.some(it => it.role === 'mainDevice')) {
+    const idx = items.findIndex(it => it.remark && /SN[:：]/i.test(it.remark));
+    if (idx >= 0) items[idx].role = 'mainDevice';
+  }
+
+  items.forEach(item => {
+    if (remarkCol !== null) item.snCol = remarkCol;
+    const sn = snFromText(item.remark);
+    if (sn) item.sn = sn;
+    if (item.role === 'mainDevice' || item.role === 'sensor' || item.role === 'reference') {
+      item.isProtected = true;
+    }
+  });
+
+  return items;
+}
+
 async function saveMatchedRules(isDraft = false) {
   if (!currentMatcherData) return alert('当前没有可保存的匹配结果');
 
@@ -1315,7 +1688,7 @@ async function saveMatchedRules(isDraft = false) {
   const singleFields = [];
   let tableConfig = currentMatcherData.tableConfig || null;
   let testPoints = currentMatcherData.testPoints || [];
-  let packingItems = currentMatcherData.packingItems || [];
+  let packingItems = [];
 
   let stdCandidate = null;
   let stdLabel = '';
@@ -1324,6 +1697,10 @@ async function saveMatchedRules(isDraft = false) {
   let pointCandidate = null;
   let pointLabel = '';
   const matchedTableCols = [];
+
+  const regions = currentMatcherData.tableRegions || [];
+  const measurementRegion = regions.find(r => r.kind === 'measurement');
+  const packingRegion = regions.find(r => r.kind === 'packing');
 
   currentMatcherData.targetLabels.forEach(lbl => {
     const isNamingOnly = lbl === 'sensorModel' || lbl === '传感器型号';
@@ -1337,20 +1714,38 @@ async function saveMatchedRules(isDraft = false) {
     }
 
     const isTableCol = chosen && chosen.suggestedValueLocation && chosen.suggestedValueLocation.type === 'table_column';
-    const normLbl = (lbl || '').toLowerCase();
+    const normLbl = normalizeLabelForCompare(lbl);
 
-    // Separate certificate measurement table columns
+    // Separate certificate measurement table columns（只接受真实测量区域内、且语义上确实是列头的字段）
     if (tmpl.type === 'cert' && isTableCol) {
       const loc = chosen.suggestedValueLocation;
-      const isSeq = normLbl.includes('test point number') || normLbl.includes('testpoint') || normLbl.includes('point') || normLbl.includes('step') || normLbl.includes('序号') || normLbl.includes('测试点');
-      const isAct = normLbl.includes('analyzer') || normLbl.includes('actual') || normLbl.includes('reading') || normLbl.includes('实测') || normLbl.includes('指示') || normLbl.includes('indication') || normLbl.includes('output') || normLbl.includes('输出');
-      const isStd = !isSeq && !isAct && (normLbl === 'value' || normLbl.includes('value') || normLbl.includes('standard') || normLbl.includes('std') || normLbl.includes('nist') || normLbl.includes('标准'));
+      const inMeasurementRegion = !measurementRegion
+        ? !isSingleValueLikeLabel(lbl)
+        : (measurementRegion.tableIdx === loc.tableIdx &&
+           loc.colIdx >= measurementRegion.colStart && loc.colIdx <= measurementRegion.colEnd);
+
+      if (!inMeasurementRegion) {
+        // 单值字段即便被误判成列，也不得进入测量表；退回单值绑定（整改 3.1）
+        singleFields.push({
+          label: lbl,
+          status: 'unbound',
+          location: chosen.location || null,
+          valueLocation: null,
+          candidateValue: chosen.candidateValue || null
+        });
+        unboundFields.push(`${lbl}(原被误判为测量列，需按单值字段重新绑定)`);
+        return;
+      }
+
+      const isSeq = /test\s*point|testpoint|测试点|^序号$|^序\s*号$|\bstep\b/.test(normLbl);
+      const isAct = /analyzer|actual|reading|实测|指示|indication|output|输出/.test(normLbl);
+      const isStd = !isSeq && !isAct && /nist|standard|\bstd\b|\bvalue\b|标准值?/.test(normLbl);
 
       let role = 'text';
       if (isSeq) role = 'seq';
       else if (isStd) role = 'standard';
       else if (isAct) role = 'actual';
-      else if (normLbl.includes('gas') || normLbl.includes('介质')) role = 'gas';
+      else if (/gas|介质/.test(normLbl)) role = 'gas';
 
       const fullVals = (chosen.fullValues && chosen.fullValues.length > 0)
         ? chosen.fullValues
@@ -1405,50 +1800,20 @@ async function saveMatchedRules(isDraft = false) {
       // Sort in ascending order of colIdx ("以在模板文件的顺序为准")
       matchedTableCols.sort((a, b) => a.colIdx - b.colIdx);
 
-      const firstCol = matchedTableCols[0];
-      const tableIdx = firstCol.tableIdx;
-      const startRow = Math.min(...matchedTableCols.map(c => c.startRow));
-      const endRow = Math.max(...matchedTableCols.map(c => c.endRow));
+      // 行数与表格编号以模板真实数据区为准，不再用各列 startRow/endRow 的最大最小拼接（整改 3.2）
+      const tableIdx = measurementRegion ? measurementRegion.tableIdx : matchedTableCols[0].tableIdx;
+      const startRow = measurementRegion ? measurementRegion.dataStartRow : Math.min(...matchedTableCols.map(c => c.startRow));
+      const endRow = measurementRegion ? measurementRegion.dataEndRow : Math.max(...matchedTableCols.map(c => c.endRow));
       const rowCount = Math.max(1, endRow - startRow + 1);
+      const regionRowIndices = (measurementRegion && Array.isArray(measurementRegion.rowIndices))
+        ? measurementRegion.rowIndices
+        : Array.from({ length: rowCount }, (_, i) => startRow + i);
 
       // Identify standard and actual column candidates for backward compatibility
       let stdColObj = matchedTableCols.find(c => c.isStd) || matchedTableCols.find(c => c.role === 'standard');
       let actColObj = matchedTableCols.find(c => c.isAct) || matchedTableCols.find(c => c.role === 'actual');
-      let pointColObj = matchedTableCols.find(c => c.isSeq) || matchedTableCols.find(c => c.role === 'seq');
-
-      // If pointColObj is not present, search left adjacent column in match candidates
-      if (!pointColObj && stdColObj) {
-        const pCand = Object.values(currentMatcherData.matchResults || {}).flatMap(m => m.candidates || []).find(c => {
-          return c.suggestedValueLocation && c.suggestedValueLocation.tableIdx === tableIdx && c.suggestedValueLocation.colIdx === stdColObj.colIdx - 1;
-        });
-        if (pCand && pCand.suggestedValueLocation) {
-          const loc = pCand.suggestedValueLocation;
-          // Check if this column is ALREADY in matchedTableCols to prevent duplicate columns (e.g. gas)
-          const existingCol = matchedTableCols.find(c => c.colIdx === loc.colIdx);
-          if (existingCol) {
-            existingCol.isSeq = true;
-            existingCol.role = 'seq';
-            pointColObj = existingCol;
-          } else {
-            pointColObj = {
-              label: pCand.matchedLabel || '测试点',
-              normLbl: (pCand.matchedLabel || '').toLowerCase(),
-              candidate: pCand,
-              loc,
-              colIdx: loc.colIdx,
-              tableIdx: loc.tableIdx,
-              startRow: loc.startRow,
-              endRow: loc.endRow,
-              role: 'seq',
-              isSeq: true,
-              isStd: false,
-              isAct: false,
-              fullValues: pCand.fullValues || pCand.sampleValues || []
-            };
-            matchedTableCols.unshift(pointColObj);
-          }
-        }
-      }
+      // 序号列只按语义识别；不得用“标准列左侧相邻”推定序号（整改 3.1，Gas 列不得被改成 seq）
+      let pointColObj = matchedTableCols.find(c => c.isSeq) || matchedTableCols.find(c => c.role === 'seq') || null;
 
       // Deduplicate matchedTableCols by colIdx to guarantee no duplicates
       const seenColIdxs = new Set();
@@ -1491,7 +1856,7 @@ async function saveMatchedRules(isDraft = false) {
           isStd: col.isStd,
           isAct: col.isAct,
           unit: colUnit,
-          defaultValues: col.fullValues || []
+          defaultValues: regionRowIndices.map((_, i) => (col.fullValues && col.fullValues[i] !== undefined) ? col.fullValues[i] : '')
         };
       });
 
@@ -1502,12 +1867,11 @@ async function saveMatchedRules(isDraft = false) {
           values: {}
         };
         columns.forEach(col => {
-          let val = (col.defaultValues && col.defaultValues[i]) ? col.defaultValues[i] : '';
+          let val = (col.defaultValues && col.defaultValues[i] !== undefined) ? col.defaultValues[i] : '';
           if (col.isSeq && !val) val = String(i + 1);
-          // Only append the column's OWN unit, never cross-contaminate across columns!
-          const colUnit = col.unit;
-          if (colUnit && val && !val.toLowerCase().includes(colUnit.toLowerCase())) {
-            val = `${val} ${colUnit}`;
+          // 保留模板原始值与真实空格；只有模板原值本身带单位时才保留单位，不补造单位（整改 3.3）
+          if (col.unit && val && !String(val).toLowerCase().includes(col.unit.toLowerCase())) {
+            val = `${val} ${col.unit}`;
           }
           rowItem.values[col.key] = val;
           rowItem.values[String(col.colIdx)] = val;
@@ -1515,29 +1879,32 @@ async function saveMatchedRules(isDraft = false) {
         });
 
         // Backward compatibility properties
-        const stdVal = (stdColObj && stdColObj.fullValues && stdColObj.fullValues[i]) ? stdColObj.fullValues[i] : '';
-        rowItem.std = (stdVal && stdColUnit && !stdVal.toLowerCase().includes(stdColUnit.toLowerCase())) ? `${stdVal} ${stdColUnit}` : stdVal;
-        rowItem.act = (actColObj && actColObj.fullValues && actColObj.fullValues[i]) ? actColObj.fullValues[i] : '';
-        rowItem.name = (pointColObj && pointColObj.fullValues && pointColObj.fullValues[i]) ? pointColObj.fullValues[i] : `测试点 ${i + 1}`;
+        const stdVal = (stdColObj && stdColObj.fullValues && stdColObj.fullValues[i] !== undefined) ? stdColObj.fullValues[i] : '';
+        rowItem.std = (stdVal && stdColUnit && !String(stdVal).toLowerCase().includes(stdColUnit.toLowerCase())) ? `${stdVal} ${stdColUnit}` : stdVal;
+        rowItem.act = (actColObj && actColObj.fullValues && actColObj.fullValues[i] !== undefined) ? actColObj.fullValues[i] : '';
+        rowItem.name = (pointColObj && pointColObj.fullValues && pointColObj.fullValues[i] !== undefined) ? pointColObj.fullValues[i] : (pointColObj ? String(i + 1) : `测试点 ${i + 1}`);
 
         testPoints.push(rowItem);
       }
 
       tableConfig = {
         tableIdx,
-        headerRow: startRow > 0 ? startRow - 1 : 0,
+        headerRow: measurementRegion ? measurementRegion.headerRow : (startRow > 0 ? startRow - 1 : 0),
         headers: {
-          point: pointColObj ? pointColObj.label : (matchedTableCols[0] ? matchedTableCols[0].label : '测试点'),
-          standard: stdColObj ? stdColObj.label : '标准值',
-          actual: actColObj ? actColObj.label : '实测值'
+          point: pointColObj ? pointColObj.label : null,
+          standard: stdColObj ? stdColObj.label : null,
+          actual: actColObj ? actColObj.label : null
         },
         columns,
         startRow,
         endRow,
         rowCount,
+        rowStrategy: 'fixed',
+        regionId: measurementRegion ? `region_${measurementRegion.tableIdx}_measurement` : null,
+        regionAmbiguous: measurementRegion ? !!measurementRegion.ambiguous : true,
         unit,
         defaultValues: stdColObj ? testPoints.map(p => p.std) : [],
-        pointNames: pointColObj ? pointColObj.fullValues : (columns[0]?.defaultValues || []),
+        pointNames: pointColObj ? pointColObj.fullValues : [],
         pointCol: pointColObj ? { label: pointColObj.label, colIdx: pointColObj.colIdx } : null,
         standardCol: stdColObj ? { label: stdColObj.label, colIdx: stdColObj.colIdx } : null,
         actualCol: actColObj ? { label: actColObj.label, colIdx: actColObj.colIdx } : null
@@ -1547,25 +1914,7 @@ async function saveMatchedRules(isDraft = false) {
       testPoints = currentMatcherData.testPoints || [];
     }
   } else if (tmpl.type === 'packing') {
-    const nameMatch = matchResults['名称'];
-    const nameCand = nameMatch && nameMatch.candidates && nameMatch.candidates[0];
-    if (nameCand && nameCand.fullValues && nameCand.fullValues.length > 0) {
-      const specCand = matchResults['规格']?.candidates?.[0];
-      const countCand = matchResults['数量']?.candidates?.[0];
-      const unitCand = matchResults['单位']?.candidates?.[0];
-      const remarkCand = matchResults['备注']?.candidates?.[0];
-
-      packingItems = nameCand.fullValues.map((name, idx) => ({
-        index: idx + 1,
-        name,
-        spec: specCand?.fullValues?.[idx] || '',
-        count: parseInt(countCand?.fullValues?.[idx] || '1', 10) || 1,
-        unit: unitCand?.fullValues?.[idx] || '件',
-        standard: '是',
-        remark: remarkCand?.fullValues?.[idx] || '',
-        isProtected: idx === 0
-      }));
-    }
+    packingItems = buildPackingItemsFromTemplate(matchResults, choices, packingRegion);
   }
 
   // Publication validations
@@ -1573,10 +1922,33 @@ async function saveMatchedRules(isDraft = false) {
     if (unboundFields.length > 0) {
       return alert(`存在未绑定且需写回 Word 的字段 (${unboundFields.join(', ')})！\n严禁正式发布未绑定的模板逻辑。请先完成字段绑定或保存为草稿。`);
     }
-    if (tmpl.type === 'cert' && (!tableConfig || !tableConfig.standardCol || !tableConfig.actualCol || tableConfig.rowCount <= 0 || testPoints.length <= 0)) {
-      return alert('发货证书必须完成测量表格区（有效标准值列、实测值列及数据行范围）绑定后方可正式发布！');
+    if (currentMatcherData.structureReliability && currentMatcherData.structureReliability.reliable === false) {
+      return alert(`文档结构不可靠：${currentMatcherData.structureReliability.reason}\n禁止据此正式发布，请安装办公组件后重新分析（可先保存草稿）。`);
+    }
+    if (tmpl.type === 'cert') {
+      if (!tableConfig || !tableConfig.standardCol || !tableConfig.actualCol || tableConfig.rowCount <= 0 || testPoints.length <= 0) {
+        return alert('发货证书必须完成测量表格区（有效标准值列、实测值列及数据行范围）绑定后方可正式发布！');
+      }
+      if (testPoints.length !== tableConfig.rowCount) {
+        return alert(`证书测量表固定行数校验失败：数据行 (${testPoints.length}) 与模板数据区行数 (${tableConfig.rowCount}) 不一致，请重新分析。`);
+      }
+      if (tableConfig.regionAmbiguous) {
+        return alert('未能可靠定位测量表区域（缺少明确的测量表头特征），请人工确认区域后再发布，或先保存为草稿。');
+      }
+    }
+    if (tmpl.type === 'packing' && packingItems.length === 0) {
+      return alert('装箱清单未能从模板识别出物料行，请检查模板表头后重新分析，或先保存为草稿。');
     }
   }
+
+  const packingRowRoles = (packingItems || []).map((it, idx) => ({
+    rowIdx: idx,
+    role: it.role || (it.isProtected ? 'mainDevice' : 'material'),
+    name: it.name || '',
+    sn: it.sn || null,
+    snCol: (it.snCol === undefined ? null : it.snCol),
+    isProtected: !!it.isProtected
+  }));
 
   try {
     const res = await fetch(`${API_BASE}/api/templates/publish`, {
@@ -1598,7 +1970,10 @@ async function saveMatchedRules(isDraft = false) {
           tableConfig,
           testPoints,
           packingItems,
-          protectedRows: [1],
+          packingRowRoles,
+          tableRegions: currentMatcherData.tableRegions || [],
+          structureReliability: currentMatcherData.structureReliability || null,
+          protectedRows: (packingItems || []).map((it, idx) => (it.isProtected ? idx + 1 : null)).filter(v => v !== null),
           sensorModelConfig: {
             options: sensorOptions,
             defaultValue: sensorDefault

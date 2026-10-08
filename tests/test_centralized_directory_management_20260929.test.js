@@ -1,10 +1,13 @@
-const test = require('node:test');
+﻿const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('path');
 const fs = require('fs');
 
 const testDbPath = path.resolve(__dirname, `../data/phoneapp_dir_test_${Date.now()}.db`);
 process.env.DB_PATH = testDbPath;
+// 测试隔离：预览与回传产物不得写入生产 data/previews、data/returned
+process.env.PREVIEW_DIR = path.join(path.dirname(testDbPath), 'previews_test_isolated');
+process.env.RETURNED_DIR = path.join(path.dirname(testDbPath), 'returned_test_isolated');
 
 const app = require('../src/backend/server');
 const db = require('../src/backend/db');
@@ -46,6 +49,14 @@ test('DIR-01, DIR-08, DIR-09, DIR-10, DIR-14: 目录集中配置、离线标记�
 
   const tmpl = db.prepare("SELECT * FROM templates WHERE model = 'POA200' AND type = 'cert'").get();
   assert.ok(tmpl, 'POA200 cert template must exist');
+
+  // 整改 4.2：未确认授权范围的终端不再默认放开，需先由管理员配置“允许访问的业务路径”
+  const bootstrapAuthRes = await fetch(`${serverUrl}/api/admin/workers/worker-dir-01/allowed-paths`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-admin-token': 'phoneapp-admin-secret' },
+    body: JSON.stringify({ rootPath: testBaseDir, allowRead: true, allowWrite: true, allowCreate: true })
+  });
+  assert.equal(bootstrapAuthRes.status, 200, 'Authorized business path must be configurable (4.2)');
 
   // DIR-09: 根目录不存在，选择不允许创建 -> 检查失败，目录不被创建
   const nonExistentDir = path.join(testBaseDir, 'non_existent_folder_09');
@@ -154,6 +165,12 @@ test('DIR-01, DIR-08, DIR-09, DIR-10, DIR-14: 目录集中配置、离线标记�
     VALUES (?, '离线机', '127.0.0.1', 'OFFLINE', 'D:\\docs', '[]', ?)
   `).run(offlineWorkerId, expiredHeartbeat);
 
+  // 整改 4.2：离线终端同样必须先获得业务路径授权，否则不允许配置保存目录
+  db.prepare(`
+    INSERT INTO worker_allowed_paths (worker_id, root_path, allow_read, allow_write, allow_create, sync_status, check_status, created_at, updated_at)
+    VALUES (?, ?, 1, 1, 1, 'SYNCED', 'PASSED', datetime('now'), datetime('now'))
+  `).run(offlineWorkerId, testBaseDir);
+
   const offRes = await fetch(`${serverUrl}/api/admin/worker-directories`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-admin-token': 'phoneapp-admin-secret' },
@@ -212,7 +229,11 @@ test('DIR-06, DIR-07: 缺少目录配置或未通过检查时阻止提交，无�
   });
   assert.equal(subRes1.status, 400);
   const subData1 = await subRes1.json();
-  assert.ok(subData1.error.includes('缺少执行端') && subData1.error.includes('保存目录配置'), 'Must reject when directory config is missing (DIR-06)');
+  // 整改后错误信息精确指出缺少哪份文档的保存目录配置（原断言要求包含“缺少执行端”字样）
+  assert.ok(
+    subData1.error.includes('保存目录配置') && (subData1.error.includes('证书') || subData1.error.includes('装箱清单')),
+    'Must reject when directory config is missing (DIR-06)'
+  );
 
   // Validate directories API also reports missing
   const valRes1 = await fetch(`${serverUrl}/api/tasks/validate-directories`, {
@@ -228,7 +249,8 @@ test('DIR-06, DIR-07: 缺少目录配置或未通过检查时阻止提交，无�
   assert.equal(valData1.valid, false);
   assert.ok(valData1.errors.some(e => e.includes('缺少证书模板')), 'Must report missing cert config');
 
-  // DIR-07: 模板组合只有证书目录配置，清单未配置 -> 阻止整组提交，明确指出清单缺少配置
+  // DIR-07: 终端只配置了证书目录、清单未配置 -> 请求“证书+清单”必须整组拒绝并明确指出清单缺少配置
+  // （整改 5：手机端只显示已启用组合；此处显式请求未启用/未配置的清单组合，服务端必须拒绝，不得静默降级）
   const certTmpl = db.prepare("SELECT * FROM templates WHERE model = 'POA200' AND type = 'cert'").get();
   const certDir = path.join(testBaseDir, 'cert_dir_07');
   fs.mkdirSync(certDir, { recursive: true });
@@ -252,12 +274,31 @@ test('DIR-06, DIR-07: 缺少目录配置或未通过检查时阻止提交，无�
       clientName: '操作员小周',
       workerId: 'worker-dir-06',
       model: 'POA200',
+      docCombo: 'cert_and_packing',
       deviceSn: '00001234'
     })
   });
   assert.equal(subRes2.status, 400);
   const subData2 = await subRes2.json();
-  assert.ok(subData2.error.includes('装箱清单模板') && subData2.error.includes('保存目录配置'), 'Must specifically reject missing packing list config (DIR-07)');
+  assert.ok(subData2.error.includes('装箱清单') && subData2.error.includes('保存目录配置'), 'Must specifically reject missing packing list config (DIR-07): ' + subData2.error);
+
+  // 未指定组合时按终端实际启用集合推导：仅证书启用则只生成证书，不再强制要求清单配置 (5, WC-12)
+  const subRes3 = await fetch(`${serverUrl}/api/tasks/submit`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      reqId: 'req_dir07_cert_only_' + Date.now(),
+      clientId,
+      clientName: '操作员小周',
+      workerId: 'worker-dir-06',
+      model: 'POA200',
+      deviceSn: '00001234'
+    })
+  });
+  assert.equal(subRes3.status, 200, 'Certificate-only enabled set must submit as cert_only (5)');
+  const subData3 = await subRes3.json();
+  assert.equal(subData3.task.files.length, 1);
+  assert.equal(subData3.task.files[0].file_type, 'cert');
 });
 
 test('DIR-02, DIR-04, DIR-05, DIR-12, DIR-24: 多执行端独立目录、证书清单同目录/分立目录、子文件夹及历史核对', async () => {

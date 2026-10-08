@@ -30,8 +30,8 @@ test('Template measurement table column detection and template order preservatio
   const funcMatch = serverCode.match(/function detectCertificateTableHeaders[\s\S]*?\n\}/);
   assert.ok(funcMatch, 'detectCertificateTableHeaders found in server.js');
 
-  const { normalizeText } = require('../src/common/matcher');
-  const sandbox = { normalizeText };
+  const { normalizeText, detectTableRegions } = require('../src/common/matcher');
+  const sandbox = { normalizeText, detectTableRegions };
   vm.createContext(sandbox);
   vm.runInContext(funcMatch[0], sandbox);
 
@@ -69,6 +69,25 @@ test('admin.js saves tableConfig.columns in template file colIdx order and prese
   const matcherData = {
     template: { id: 'tmpl_poa3500_cert', type: 'cert', model: 'POA3500' },
     targetLabels: ['Inst. SN.', 'Step', 'Test Gas', 'Nominal Value ppm', 'Analyzer Reading ppm'],
+    // 区域识别结果（整改 3.1/3.2）：发布必须依据真实测量区域，不能跨区域拼接
+    tableRegions: [{
+      tableIdx: 0,
+      kind: 'measurement',
+      headerRow: 11,
+      dataStartRow: 12,
+      dataEndRow: 13,
+      rowCount: 2,
+      rowIndices: [12, 13],
+      headerColumns: [
+        { colIdx: 0, label: 'Step' },
+        { colIdx: 1, label: 'Test Gas' },
+        { colIdx: 2, label: 'Nominal Value ppm' },
+        { colIdx: 3, label: 'Analyzer Reading ppm' }
+      ],
+      colStart: 0,
+      colEnd: 3,
+      ambiguous: false
+    }],
     selectedChoices: {
       'Inst. SN.': 0,
       'Step': 0,
@@ -166,6 +185,7 @@ test('app.js dynamically generates exact template table headers and columns in t
     },
     localStorage: { getItem: () => null, setItem: () => {} },
     console,
+    alert: () => {},
     escapeHtml: (str) => String(str || '').replace(/</g, '&lt;').replace(/>/g, '&gt;')
   };
 
@@ -203,7 +223,9 @@ test('app.js dynamically generates exact template table headers and columns in t
   assert.ok(renderedTheadHtml.includes('Gas Name'), 'Header Gas Name rendered');
   assert.ok(renderedTheadHtml.includes('Standard Conc. (ppm)'), 'Header Standard Conc. rendered');
   assert.ok(renderedTheadHtml.includes('Analyzer Value (ppm)'), 'Header Analyzer Value rendered');
-  assert.ok(renderedTheadHtml.includes('操作'), 'Operation column rendered');
+  // 证书测量表固定行数：不得出现增删操作列（整改 3.3, M07）
+  assert.equal(renderedTheadHtml.includes('操作'), false, 'Certificate table must not render an operation column');
+  assert.equal(renderedTheadHtml.includes('删除'), false, 'Certificate table must not render delete buttons');
 
   // Verify columns are in exact order: Step, Gas Name, Standard Conc. (ppm), Analyzer Value (ppm)
   const stepIdx = renderedTheadHtml.indexOf('Step');
@@ -212,13 +234,66 @@ test('app.js dynamically generates exact template table headers and columns in t
   const actIdx = renderedTheadHtml.indexOf('Analyzer Value (ppm)');
   assert.ok(stepIdx < gasIdx && gasIdx < stdIdx && stdIdx < actIdx, 'Headers are in exact template colIdx order');
 
-  // Test adding a row
+  // 证书固定行数：新增/删除入口必须被拒绝，行数保持与模板一致（整改 3.3）
   vm.runInContext('addTestPointRow();', sandbox);
-  assert.equal(vm.runInContext('state.testPoints.length', sandbox), 3, 'New row added');
-  assert.equal(vm.runInContext('state.testPoints[2].point', sandbox), 3, 'New row point is 3');
-
-  // Test deleting a row
+  assert.equal(vm.runInContext('state.testPoints.length', sandbox), 2, 'Add row must be rejected for certificates');
   vm.runInContext('deleteTestPointRow(0);', sandbox);
-  assert.equal(vm.runInContext('state.testPoints.length', sandbox), 2, 'Row deleted');
-  assert.equal(vm.runInContext('state.testPoints[0].point', sandbox), 1, 'First row re-indexed to 1');
+  assert.equal(vm.runInContext('state.testPoints.length', sandbox), 2, 'Delete row must be rejected for certificates');
+  assert.equal(vm.runInContext('state.testPoints[0].values.col_0', sandbox), '1', 'Row 0 seq default preserved');
+  assert.equal(vm.runInContext('state.testPoints[1].values.col_0', sandbox), '2', 'Row 1 seq default preserved');
+});
+
+test('app.js rebuilds fixed measurement rows from the template when saved rows are polluted', async () => {
+  const appCode = fs.readFileSync(path.join(__dirname, '../src/frontend/app.js'), 'utf-8');
+
+  let renderedTbodyHtml = '';
+  const sandbox = {
+    window: { location: { origin: 'http://localhost:3000' }, addEventListener: () => {} },
+    document: {
+      getElementById: (id) => {
+        if (id === 'test-points-body') return { set innerHTML(val) { renderedTbodyHtml = val; } };
+        return { style: {}, innerHTML: '', innerText: '', value: '' };
+      },
+      querySelectorAll: () => [],
+      addEventListener: () => {}
+    },
+    localStorage: { getItem: () => null, setItem: () => {} },
+    console,
+    alert: () => {},
+    escapeHtml: (str) => String(str || '')
+  };
+
+  vm.createContext(sandbox);
+  vm.runInContext(appCode, sandbox);
+
+  // 污染配置：模板数据区只有 1 行，却保存了 3 行
+  sandbox.testBundle = {
+    model_display: 'POA200',
+    certTemplate: {
+      field_mappings: {
+        tableConfig: {
+          tableIdx: 0, startRow: 12, endRow: 12, rowCount: 1,
+          columns: [
+            { key: 'col_1', colIdx: 1, label: 'Test Point Number', isSeq: true, role: 'seq', defaultValues: ['1'] },
+            { key: 'col_2', colIdx: 2, label: 'NIST Traceable Standard gas ppm', isStd: true, role: 'standard', defaultValues: ['9.96'] },
+            { key: 'col_3', colIdx: 3, label: 'Analyzer pv ppm', isAct: true, role: 'actual', defaultValues: [''] }
+          ]
+        },
+        testPoints: [
+          { point: 1, values: { col_2: '9.96' } },
+          { point: 2, values: { col_2: '伪造行' } },
+          { point: 3, values: { col_2: '伪造行' } }
+        ]
+      }
+    }
+  };
+
+  vm.runInContext('state.activeBundle = testBundle; state.testPoints = [];', sandbox);
+  vm.runInContext('initTestPointsForModel();', sandbox);
+
+  const testPoints = vm.runInContext('state.testPoints', sandbox);
+  assert.equal(testPoints.length, 1, 'Polluted rows must be rebuilt to the template row count (M11)');
+  assert.equal(testPoints[0].values.col_2, '9.96', 'Template default value must be preserved');
+  assert.equal(testPoints[0].values.col_1, '1', 'Sequence column keeps read-only default');
+  assert.ok(renderedTbodyHtml.includes('9.96'), 'Cell default rendered on the phone form');
 });

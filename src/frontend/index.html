@@ -115,9 +115,9 @@
       <!-- Test Point Data Table Card -->
       <div class="card" id="test-points-card">
         <div class="card-title">
-          <span>发货证书测量点数据</span>
-          <button type="button" class="btn btn-sm" onclick="addTestPointRow()">+ 添加测量点</button>
+          <span>发货证书测量点数据 (行数与列由模板固定)</span>
         </div>
+        <div id="test-points-warning" class="status-tip warning" style="display: none; margin-bottom: 8px;"></div>
         <div class="table-scroll-hint">⇄ 可横向左右滑动</div>
         <div class="table-responsive">
           <table id="test-points-table" class="scroll-table">
@@ -126,7 +126,6 @@
                 <th class="col-point" id="th-point-name">测试点 / 介质</th>
                 <th class="col-test-val">标准值</th>
                 <th class="col-test-val">实测值 (待填)</th>
-                <th style="width: 70px;">操作</th>
               </tr>
             </thead>
             <tbody id="test-points-body">
@@ -139,7 +138,7 @@
       <!-- Packing List Table Card -->
       <div class="card" id="packing-section" style="display: none;">
         <div class="card-title">
-          <span>装箱清单明细管理 (7列)</span>
+          <span>装箱清单明细管理 (按模板列)</span>
           <button type="button" class="btn btn-sm" onclick="addPackingRow()">+ 添加物料</button>
         </div>
         <div class="table-scroll-hint">⇄ 可横向左右滑动</div>

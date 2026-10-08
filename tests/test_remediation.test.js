@@ -1,8 +1,11 @@
-const path = require('path');
+﻿const path = require('path');
 const fs = require('fs');
 
 const testDbPath = path.resolve(__dirname, `../data/phoneapp_remediation_test_${Date.now()}.db`);
 process.env.DB_PATH = testDbPath;
+// 测试隔离：预览与回传产物不得写入生产 data/previews、data/returned
+process.env.PREVIEW_DIR = path.join(path.dirname(testDbPath), 'previews_test_isolated');
+process.env.RETURNED_DIR = path.join(path.dirname(testDbPath), 'returned_test_isolated');
 
 const test = require('node:test');
 const assert = require('node:assert');
@@ -202,8 +205,9 @@ test('J12 / Q33: Preview Non-Word File Interception', () => {
   fs.writeFileSync(tempTxtFile, 'Non word file content', 'utf-8');
 
   assert.throws(() => {
-    generateDocumentPreview(tempTxtFile, tempPreviewDir, 'txt_file_1');
-  }, /Non-Word file rejected/);
+    // 整改 A：预览改为真实 Word → PDF 转换，非 Word 文件必须被明确拒绝
+    generateDocumentPreview({ sourcePath: tempTxtFile, previewDir: tempPreviewDir, taskId: 'txt_file_1', fileType: 'cert' });
+  }, /仅支持 \.doc\/\.docx 预览/);
 });
 
 test('J15 / Q41: Remote Admin Access Security Enforcement', () => {

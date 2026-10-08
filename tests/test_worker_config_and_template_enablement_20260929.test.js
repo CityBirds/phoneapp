@@ -1,4 +1,4 @@
-const test = require('node:test');
+﻿const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('path');
 const fs = require('fs');
@@ -8,6 +8,9 @@ const http = require('http');
 const testBaseDir = path.resolve(__dirname, '../data/test_wc_20260929');
 const testDbPath = path.join(testBaseDir, 'test_wc.db');
 process.env.DB_PATH = testDbPath;
+// 测试隔离：预览与回传产物不得写入生产 data/previews、data/returned
+process.env.PREVIEW_DIR = path.join(path.dirname(testDbPath), 'previews_test_isolated');
+process.env.RETURNED_DIR = path.join(path.dirname(testDbPath), 'returned_test_isolated');
 process.env.PORT = '3040';
 process.env.NODE_ENV = 'test';
 
@@ -372,7 +375,8 @@ test('WC-19, WC-20, WC-21, WC-24: 停用不影响旧任务快照、撤销写权�
   assert.equal(fs.existsSync(task19After.files[0].worker_filepath), true);
 
   // WC-20: 已受理任务之后撤销对应路径权限 -> 执行端拒绝写入，不改存其他位置
-  // Re-enable template for submission
+  // Re-enable template for submission（注意：整改 5 后未指定组合时按终端已启用集合推导，
+  // 此处两种文档均已启用，因此必须显式声明 cert_only 才能只出证书）
   db.prepare("UPDATE worker_save_configs SET is_enabled = 1 WHERE worker_id = 'worker-wc-19'").run();
   const subRes20 = await fetch(`${serverUrl}/api/tasks/submit`, {
     method: 'POST',

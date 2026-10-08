@@ -1,7 +1,13 @@
 {
-  "workerId": "worker-local",
-  "name": "Execution Worker (PC-01)",
-  "serverUrl": "http://localhost:3000",
+  "_comment": [
+    "执行端共享配置（可随程序分发）。刻意不预设 serverUrl 与 workerId：",
+    "  - 连接地址与接入凭据属于本机设置，保存在 worker_config.local.json，禁止随安装包分发；",
+    "  - 首次接入请运行 配置执行端接入.bat 并填写【协调电脑】的局域网地址（例如 192.168.1.183），",
+    "    保存后重启自动沿用；不要在共享配置里写死某台电脑的地址，否则会覆盖本机已保存的配置。",
+    "执行端是纯客户端：它不监听任何端口，因此执行电脑无需开放入站端口。",
+    "协调端的执行端接入口是否对局域网开放，由协调端自己的 INTERNAL_BIND 决定。",
+    "本文件只应包含与业务无关的本地运行参数；业务规则（模板启用、授权路径、保存目录）一律由协调服务集中维护。"
+  ],
   "autoDetectPrinters": true,
   "allowedPrinters": []
 }

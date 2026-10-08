@@ -35,6 +35,10 @@
           <span class="nav-icon">🖥️</span>
           <span>执行终端与打印机</span>
         </a>
+        <a href="#directories" id="side-directories" class="nav-item" onclick="switchTab('directories')">
+          <span class="nav-icon">📂</span>
+          <span>执行端保存目录</span>
+        </a>
 
         <a href="#templates" id="side-templates" class="nav-item" onclick="switchTab('templates')">
           <span class="nav-icon">📑</span>
@@ -124,69 +128,86 @@
           <div id="detail-worker-status-badge"></div>
         </div>
 
-        <!-- Worker Info Summary Card -->
-        <div class="card" style="margin-bottom: 20px;">
-          <div id="detail-worker-info-content" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; font-size: 13px;">
-            <!-- Populated dynamically -->
-          </div>
+        <!-- WC-02: 未选择终端时的明确引导，绝不显示空白页 -->
+        <div id="worker-detail-guidance" class="card" style="margin-bottom: 20px; display: none;">
+          <h3 style="margin: 0 0 8px 0; font-size: 16px;">请先选择一个执行终端</h3>
+          <p id="worker-detail-guidance-text" style="font-size: 13px; color: #334155; margin: 0 0 12px 0;">
+            终端详情配置以“执行终端 (workerId)”为单位。请在执行终端列表中选择需要配置的电脑终端。
+          </p>
+          <div id="worker-detail-guidance-list" class="workers-grid" style="margin-bottom: 12px;"></div>
+          <button type="button" class="btn btn-primary btn-sm" onclick="backToWorkersList()">← 返回执行终端列表并选择终端</button>
         </div>
 
-        <!-- Panel 1: Authorized Business Paths -->
-        <div class="card" style="margin-bottom: 20px;">
-          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
-            <div>
-              <h3 style="margin: 0; font-size: 16px;">📂 允许访问的业务路径 (Authorized Business Paths)</h3>
-              <p style="font-size: 13px; color: #64748b; margin: 4px 0 0 0;">约束执行端可访问与写入的业务根路径范围。模板保存根目录必须属于允许写入的路径之一 (E02, E04)。</p>
+        <div id="worker-detail-body">
+          <!-- Worker Info Summary Card -->
+          <div class="card" style="margin-bottom: 20px;">
+            <div id="detail-worker-info-content" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; font-size: 13px;">
+              <!-- Populated dynamically -->
             </div>
-            <button type="button" class="btn btn-primary btn-sm" onclick="openAddAllowedPathModal()">➕ 添加允许访问路径</button>
           </div>
-          <div class="table-responsive">
-            <table class="table admin-table" style="width: 100%; border-collapse: collapse;">
-              <thead>
-                <tr style="background: #f8fafc; border-bottom: 1px solid #e2e8f0;">
-                  <th style="padding: 10px; text-align: left;">授权根路径</th>
-                  <th style="padding: 10px; text-align: center; width: 90px;">读取权限</th>
-                  <th style="padding: 10px; text-align: center; width: 90px;">写入权限</th>
-                  <th style="padding: 10px; text-align: center; width: 100px;">同步状态</th>
-                  <th style="padding: 10px; text-align: center; width: 100px;">探测状态</th>
-                  <th style="padding: 10px; text-align: left;">探测详情</th>
-                  <th style="padding: 10px; text-align: center; width: 150px;">操作</th>
-                </tr>
-              </thead>
-              <tbody id="allowed-paths-tbody">
-                <tr><td colspan="7" style="text-align: center; padding: 16px; color: #94a3b8;">暂无配置授权业务路径</td></tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
 
-        <!-- Panel 2: Templates & Save Directories -->
-        <div class="card" style="margin-bottom: 20px;">
-          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
-            <div>
-              <h3 style="margin: 0; font-size: 16px;">📑 本终端模板启用与保存目录 (Templates & Save Directories)</h3>
-              <p style="font-size: 13px; color: #64748b; margin: 4px 0 0 0;">管理发货证书与装箱清单在该终端的启用状态、结果保存根目录与归档规则。手机端仅显示当前终端已启用的模板 (E03, 4.3)。</p>
+          <!-- 授权范围确认状态 (4.2 / 7.2)：迁移后的旧终端处于“待确认”，不默认放开 -->
+          <div id="auth-state-banner" style="display: none; margin-bottom: 16px; padding: 12px 16px; border-radius: 8px; font-size: 13px;"></div>
+
+          <!-- Panel 1: Authorized Business Paths -->
+          <div class="card" style="margin-bottom: 20px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+              <div>
+                <h3 style="margin: 0; font-size: 16px;">📂 允许访问的业务路径 (Authorized Business Paths)</h3>
+                <p style="font-size: 13px; color: #64748b; margin: 4px 0 0 0;">约束执行端可访问与写入的业务根路径范围。模板保存根目录必须属于允许写入的路径之一 (E02, E04)。</p>
+              </div>
+              <button type="button" class="btn btn-primary btn-sm" onclick="openAddAllowedPathModal()">➕ 添加允许访问路径</button>
+            </div>
+            <div class="table-responsive">
+              <table class="table admin-table" style="width: 100%; border-collapse: collapse;">
+                <thead>
+                  <tr style="background: #f8fafc; border-bottom: 1px solid #e2e8f0;">
+                    <th style="padding: 10px; text-align: left;">授权根路径</th>
+                    <th style="padding: 10px; text-align: center; width: 80px;">版本</th>
+                    <th style="padding: 10px; text-align: center; width: 90px;">读取权限</th>
+                    <th style="padding: 10px; text-align: center; width: 90px;">写入权限</th>
+                    <th style="padding: 10px; text-align: center; width: 100px;">同步状态</th>
+                    <th style="padding: 10px; text-align: center; width: 100px;">探测状态</th>
+                    <th style="padding: 10px; text-align: left;">探测详情</th>
+                    <th style="padding: 10px; text-align: center; width: 190px;">操作</th>
+                  </tr>
+                </thead>
+                <tbody id="allowed-paths-tbody">
+                  <tr><td colspan="8" style="text-align: center; padding: 16px; color: #94a3b8;">暂无配置授权业务路径</td></tr>
+                </tbody>
+              </table>
             </div>
           </div>
-          <div class="table-responsive">
-            <table class="table admin-table" style="width: 100%; border-collapse: collapse;">
-              <thead>
-                <tr style="background: #f8fafc; border-bottom: 1px solid #e2e8f0;">
-                  <th style="padding: 10px; text-align: left;">型号 / 模板文件名</th>
-                  <th style="padding: 10px; text-align: center; width: 90px;">文档类型</th>
-                  <th style="padding: 10px; text-align: center; width: 100px;">是否启用</th>
-                  <th style="padding: 10px; text-align: left;">保存根目录</th>
-                  <th style="padding: 10px; text-align: center; width: 130px;">保存方式</th>
-                  <th style="padding: 10px; text-align: center; width: 90px;">允许创建</th>
-                  <th style="padding: 10px; text-align: center; width: 100px;">探测状态</th>
-                  <th style="padding: 10px; text-align: left;">探测详情</th>
-                  <th style="padding: 10px; text-align: center; width: 150px;">操作</th>
-                </tr>
-              </thead>
-              <tbody id="worker-templates-tbody">
-                <tr><td colspan="9" style="text-align: center; padding: 16px; color: #94a3b8;">正在加载模板配置...</td></tr>
-              </tbody>
-            </table>
+
+          <!-- Panel 2: Templates & Save Directories -->
+          <div class="card" style="margin-bottom: 20px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+              <div>
+                <h3 style="margin: 0; font-size: 16px;">📑 本终端模板启用与保存目录 (Templates & Save Directories)</h3>
+                <p style="font-size: 13px; color: #64748b; margin: 4px 0 0 0;">管理发货证书与装箱清单在该终端的启用状态、结果保存根目录与归档规则。手机端仅显示当前终端已启用的模板 (E03, 4.3)。</p>
+              </div>
+            </div>
+            <div class="table-responsive">
+              <table class="table admin-table" style="width: 100%; border-collapse: collapse;">
+                <thead>
+                  <tr style="background: #f8fafc; border-bottom: 1px solid #e2e8f0;">
+                    <th style="padding: 10px; text-align: left;">型号 / 模板文件名</th>
+                    <th style="padding: 10px; text-align: center; width: 90px;">文档类型</th>
+                    <th style="padding: 10px; text-align: center; width: 100px;">是否启用</th>
+                    <th style="padding: 10px; text-align: left;">保存根目录</th>
+                    <th style="padding: 10px; text-align: center; width: 130px;">保存方式</th>
+                    <th style="padding: 10px; text-align: center; width: 90px;">允许创建</th>
+                    <th style="padding: 10px; text-align: center; width: 100px;">同步状态</th>
+                    <th style="padding: 10px; text-align: center; width: 100px;">探测状态</th>
+                    <th style="padding: 10px; text-align: left;">探测详情</th>
+                    <th style="padding: 10px; text-align: center; width: 150px;">操作</th>
+                  </tr>
+                </thead>
+                <tbody id="worker-templates-tbody">
+                  <tr><td colspan="10" style="text-align: center; padding: 16px; color: #94a3b8;">正在加载模板配置...</td></tr>
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
       </section>
@@ -420,6 +441,7 @@
               </button>
             </div>
           </div>
+          <div id="matcher-warnings" style="display: none; margin-bottom: 14px; padding: 10px 12px; border-radius: 6px; background: #fef3c7; border: 1px solid #f59e0b; color: #92400e; font-size: 13px;"></div>
           <div class="table-responsive">
             <table class="admin-table">
               <thead>

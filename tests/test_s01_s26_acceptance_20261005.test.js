@@ -1,10 +1,13 @@
-const test = require('node:test');
+﻿const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('path');
 const fs = require('fs');
 
 const testDbPath = path.resolve(__dirname, `../data/test_s01_s26_${Date.now()}.db`);
 process.env.DB_PATH = testDbPath;
+// 测试隔离：预览与回传产物不得写入生产 data/previews、data/returned
+process.env.PREVIEW_DIR = path.join(path.dirname(testDbPath), 'previews_test_isolated');
+process.env.RETURNED_DIR = path.join(path.dirname(testDbPath), 'returned_test_isolated');
 process.env.PORT = '3055';
 process.env.NODE_ENV = 'test';
 

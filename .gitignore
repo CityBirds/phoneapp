@@ -1,4 +1,5 @@
 *.zip
+*.exe
 node_modules/
 __pycache__/
 *.pyc
@@ -22,3 +23,27 @@ data/e2e_worker_*/
 data/test_*
 data/test_*/**
 data/*.txt
+
+# 执行端本机身份与接入凭据（多执行端整改 §4：禁止随安装包分发或提交到仓库）
+worker_config.local.json
+
+# 运行时临时目录、备份及测试残留
+data/backup_*
+data/template_recovery_*
+data/local_dir*
+data/worker_dir_*
+data/worker_dl_dir*
+data/server_copies*
+data/previews_*
+data/returned_*
+data/pages-render/
+data/pdf-check/
+data/logs/
+data/*_profile/
+data/*_fixture_xml/
+data/*.log
+data/*.url
+data/*.doc
+data/*.docx
+!data/fixtures/*.doc
+!data/fixtures/*.docx

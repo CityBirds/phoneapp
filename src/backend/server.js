@@ -3,12 +3,27 @@ const cors = require('cors');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const db = require('./db');
 const { generateCertFilename, generatePackingListFilename } = require('../common/naming');
-const { findFieldCandidates, inferFieldType, normalizeText } = require('../common/matcher');
+const {
+  findFieldCandidates, inferFieldType, normalizeText,
+  detectTableRegions, resolvePackingHeaderFields, assignPackingRowRoles
+} = require('../common/matcher');
 const { extractDocumentStructure } = require('../common/doc_structure');
 const { getBeijingCalendarRange, generateUUID, getFileSha256 } = require('../common/utils');
-const { generateDocumentPreview } = require('./preview');
+const { generateDocumentPreview, getPreviewPdfPath, getPreviewPageDir, isValidPdf, getConversionCapabilities } = require('./preview');
+const accessControl = require('./access_control');
+const {
+  getAccessToken,
+  accessTokenMiddleware,
+  isTokenValid,
+  isWorkerPath,
+  internalPort,
+  shouldBlockWorkerPathOnPublicPort,
+  isDirectLocalRequest,
+  usesTunnelHeader
+} = accessControl;
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -18,19 +33,74 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // Storage directories
-const uploadDir = path.join(__dirname, '../../uploads/templates');
-const previewDir = path.join(__dirname, '../../data/previews');
-const returnedDir = path.join(__dirname, '../../data/returned');
+// 说明：支持通过环境变量覆盖，便于测试使用隔离目录，避免测试产物写入生产预览/回传目录
+const uploadDir = process.env.UPLOAD_DIR
+  ? path.resolve(process.env.UPLOAD_DIR)
+  : path.join(__dirname, '../../uploads/templates');
+const previewDir = process.env.PREVIEW_DIR
+  ? path.resolve(process.env.PREVIEW_DIR)
+  : path.join(__dirname, '../../data/previews');
+const returnedDir = process.env.RETURNED_DIR
+  ? path.resolve(process.env.RETURNED_DIR)
+  : path.join(__dirname, '../../data/returned');
 
 [uploadDir, previewDir, returnedDir].forEach(dir => {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 });
 
-app.use('/previews', express.static(previewDir));
+app.use('/previews', express.static(previewDir, {
+  // 预览按“内容版本”命名（?v=修改时间），因此必须允许缓存但禁止用旧内容顶替新产物 (整改 A.5)
+  // 页图放在 task_<id>_<type>_pages/ 子目录下（PV06：同名不同内容不串页）
+  etag: true,
+  lastModified: true,
+  setHeaders: (res, filePath) => {
+    if (/\.pdf$/i.test(filePath)) {
+      res.setHeader('Content-Type', 'application/pdf');
+      // 允许手机端内嵌 PDF 查看器直接展示
+      res.setHeader('Content-Disposition', 'inline');
+      res.setHeader('Cache-Control', 'private, max-age=0, must-revalidate');
+    } else if (/\.png$/i.test(filePath)) {
+      res.setHeader('Content-Type', 'image/png');
+      res.setHeader('Cache-Control', 'private, max-age=0, must-revalidate');
+    }
+  }
+}));
+
+// 访问口令：若 URL 携带 ?k=口令，则写入 Cookie，方便后续请求与刷新（须在路由/静态之前）
+app.use((req, res, next) => {
+  const k = req.query && (req.query.k || req.query.token);
+  if (k && String(k).trim()) {
+    res.cookie('phoneapp_token', String(k).trim(), {
+      httpOnly: false,
+      sameSite: 'lax',
+      maxAge: 1000 * 60 * 60 * 24 * 180
+    });
+  }
+  next();
+});
+
+app.get('/', (req, res) => res.redirect('/frontend/index.html'));
+
+// 口令登录页（无需口令即可访问）
+app.get(['/login', '/login.html'], (req, res) => {
+  res.sendFile(path.join(__dirname, '../frontend/login.html'));
+});
+
+// 手机端页面（须在静态中间件之前声明，否则会被静态目录抢先处理而无法设置 Cookie）
+app.get(['/frontend', '/frontend/', '/frontend/index.html'], (req, res) => {
+  res.sendFile(path.join(__dirname, '../frontend/index.html'));
+});
+
+// 管理页：注入运行期访问信息（隧道告警），并说明口令；管理接口本身另有限制
+app.get('/admin', (req, res) => {
+  let html = fs.readFileSync(path.join(__dirname, '../frontend/admin.html'), 'utf-8');
+  html = html.replace('</head>', `${adminRuntimeNoticeScript()}</head>`);
+  res.type('html').send(html);
+});
+
+// 其余静态资源（styles.css / app.js / admin.js 等）
 app.use('/frontend', express.static(path.join(__dirname, '../frontend')));
 app.use(express.static(path.join(__dirname, '../frontend')));
-app.get('/', (req, res) => res.redirect('/frontend/index.html'));
-app.get('/admin', (req, res) => res.sendFile(path.join(__dirname, '../frontend/admin.html')));
 
 const upload = multer({ dest: uploadDir });
 
@@ -47,20 +117,59 @@ function fixMulterFilename(filename) {
   return filename;
 }
 
-// Security Middleware: Restrict coordinator management operations strictly to localhost IP
+// Security Middleware: 协调管理功能仅限本机直连。
+// 注意：隧道客户端（cloudflared/ngrok 等）运行在本机，转发请求的源地址是 127.0.0.1，
+// 若只看源地址，公网访客会被误判为本机管理员，导致管理后台公开可写。
+// 因此这里额外排除携带 Cloudflare 隧源头（cf-connecting-ip）的转发请求。
 function isLocalhostRequest(req) {
-  const remoteIp = req.socket?.remoteAddress || req.connection?.remoteAddress || req.ip || '';
-  const isLoopback = remoteIp === '127.0.0.1' || remoteIp === '::1' || remoteIp === '::ffff:127.0.0.1';
-  return isLoopback;
+  return isDirectLocalRequest(req);
 }
 
 function requireAdminAccess(req, res, next) {
   if (!isLocalhostRequest(req)) {
     return res.status(403).json({
-      error: '权限受限：该管理功能（修改手机端名字、上传模板、发布配置等）仅限在协调服务电脑本机操作 (C01, C03)'
+      error: '权限受限：该管理功能（修改手机端名字、上传模板、发布配置等）仅限在协调服务电脑本机操作 (C01, C03)。' +
+        (usesTunnelHeader(req) ? '检测到请求来自外部隧道，已拒绝。请在协调服务电脑上直接打开 http://localhost:3000/admin 操作。' : '')
     });
   }
   next();
+}
+
+/** 管理页运行期提示脚本：说明隧道状态与访问口令，避免把管理入口暴露给公网 */
+function adminRuntimeNoticeScript() {
+  const payload = {
+    token: getAccessToken(),
+    port: process.env.PORT || 3000
+  };
+  return `<script id="dsh-runtime-notice">
+  window.__PHONEAPP_RUNTIME__ = ${JSON.stringify(payload)};
+  (function () {
+    var t = window.__PHONEAPP_RUNTIME__.token || '';
+    var isTunnel = !!document.referrer || window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1';
+    function banner(kind, text) {
+      var box = document.createElement('div');
+      box.style.cssText = 'padding:12px 16px;margin:12px 16px;border-radius:8px;font-size:13px;line-height:1.7;' +
+        (kind === 'warn'
+          ? 'background:#fef3c7;border:1px solid #fbbf24;color:#92400e;'
+          : 'background:#e0f2fe;border:1px solid #7dd3fc;color:#075985;');
+      box.innerHTML = text;
+      document.body.insertBefore(box, document.body.firstChild);
+    }
+    try {
+      if (isTunnel) {
+        banner('warn', '⚠️ <b>你正在通过非本机地址打开管理控制台</b>：本页面的管理接口已被服务端限制为“仅协调服务电脑本机可写”，' +
+          '因此这里的修改操作会被拒绝（403）。请在协调服务电脑上直接打开 <code>http://localhost:' +
+          window.__PHONEAPP_RUNTIME__.port + '/admin</code> 进行配置。');
+      } else if (t) {
+        banner('info', '🔑 <b>车间手机访问方式</b><br>' +
+          '① 网址：<code>/frontend/login.html</code>（公网地址请用隧道地址，例如 https://xxx.trycloudflare.com/frontend/login.html）<br>' +
+          '② 访问口令：<code style="font-size:15px;font-weight:700;">' + t + '</code><br>' +
+          '车间手机打开网址后输入口令即可，只需输入一次。也可直接打开带口令的链接：' +
+          '<code>/frontend/index.html?k=' + t + '</code>');
+      }
+    } catch (e) {}
+  })();
+  </script>`;
 }
 
 // Audit Logger Helper
@@ -433,6 +542,16 @@ function cleanupAndDeduplicateTemplates() {
 
 // Seed Default Models and Templates dynamically
 function seedDefaultTemplates() {
+  // 允许跳过内置种子：正式环境想“清空后自己重新上传模板”时，
+  // 若不禁用本函数，每次启动都会从 samples/ 重新种入 5 条内置模板，导致清空失效。
+  // 设置 SKIP_SEED_TEMPLATES=1 可跳过（启动脚本已默认带上该开关）。
+  // 注意：批处理里 `set VAR=1 && ...` 会把 "&&" 前的空格并入变量值（得到 "1 "），
+  // 因此这里先 trim 再判断，不能用严格相等。
+  const seedFlag = String(process.env.SKIP_SEED_TEMPLATES || '').trim().toLowerCase();
+  if (seedFlag && seedFlag !== '0' && seedFlag !== 'false' && seedFlag !== 'no') {
+    console.log(`[Seed] 已跳过内置模板种子（SKIP_SEED_TEMPLATES="${String(process.env.SKIP_SEED_TEMPLATES)}"），模板库保持数据库现状`);
+    return;
+  }
   cleanupAndDeduplicateTemplates();
   const now = new Date().toISOString();
 
@@ -612,6 +731,33 @@ function parseCommaSeparatedOptions(str) {
   });
   return options;
 }
+
+// ==================== 访问控制（共享口令） ====================
+// 手机端作业接口需携带共享访问口令；静态资源、页面、执行端接口与登录相关接口除外。
+app.get('/api/access/verify', (req, res) => {
+  res.json({ ok: isTokenValid(req), source: usesTunnelHeader(req) ? 'tunnel' : 'local' });
+});
+
+app.get('/api/access/config', (req, res) => {
+  // 只回传最小信息用于前端提示，不回传口令本身
+  res.json({
+    authRequired: true,
+    source: usesTunnelHeader(req) ? 'tunnel' : 'local',
+    workerPort: internalPort() || null
+  });
+});
+
+// 执行端接口只允许从内部端口访问，避免隧道把“注册假执行端/接收任务”暴露到公网
+app.use((req, res, next) => {
+  if (shouldBlockWorkerPathOnPublicPort(req)) {
+    return res.status(403).json({
+      error: `执行端接口 [${req.path}] 不允许从对外端口访问，请使用内部端口 ${internalPort()}（INTERNAL_PORT）(E02, 4.2)`
+    });
+  }
+  next();
+});
+
+app.use(accessTokenMiddleware);
 
 // ==================== SENSOR CONFIGS MANAGEMENT ====================
 app.get('/api/sensor-configs', (req, res) => {
@@ -796,28 +942,237 @@ app.put('/api/clients/:id', requireAdminAccess, (req, res) => {
   }
 });
 
+// ==================== WORKER IDENTITY & ACCESS AUTH (多执行端整改 §3.2/§4/§5) ====================
+/** 列出本机可供远程执行端接入的局域网 IPv4 地址（用于启动日志打印实际接入地址 §3.1） */
+function listLanIPv4() {
+  const out = [];
+  try {
+    const nets = require('os').networkInterfaces();
+    for (const name of Object.keys(nets)) {
+      for (const net of nets[name] || []) {
+        const family = typeof net.family === 'string' ? net.family : (net.family === 4 ? 'IPv4' : '');
+        if (family !== 'IPv4' || net.internal) continue;
+        out.push(net.address);
+      }
+    }
+  } catch (e) {}
+  return out;
+}
+
+const WORKER_REGISTRATION_MODE = String(process.env.WORKER_REGISTRATION || 'first-time').toLowerCase();
+const WORKER_IDENTITY_CONFLICT_WINDOW_MS = Number(process.env.WORKER_CONFLICT_WINDOW_MS) > 0
+  ? Number(process.env.WORKER_CONFLICT_WINDOW_MS) : 120000;
+
+function hashWorkerSecret(secret) {
+  return crypto.createHash('sha256').update(String(secret || '')).digest('hex');
+}
+
+function timingSafeEqualHex(a, b) {
+  const bufA = Buffer.from(String(a || ''), 'utf8');
+  const bufB = Buffer.from(String(b || ''), 'utf8');
+  if (bufA.length !== bufB.length) return false;
+  try { return crypto.timingSafeEqual(bufA, bufB); } catch (e) { return false; }
+}
+
+/** 规范化来源地址显示：IPv4-mapped IPv6 还原为 IPv4，回环统一可辨 (MW18) */
+function normalizeClientIp(raw) {
+  let ip = String(raw || '').trim();
+  if (!ip) return '';
+  if (ip.startsWith('::ffff:')) ip = ip.slice(7);
+  if (ip === '::1') return '127.0.0.1 (IPv6回环)';
+  return ip;
+}
+
+/** 取直连来源地址：只认 socket，不信任任何转发头（MW18） */
+function getDirectClientIp(req) {
+  return normalizeClientIp((req.socket && req.socket.remoteAddress) || (req.connection && req.connection.remoteAddress) || '');
+}
+
+/**
+ * 执行端接入凭据校验。
+ * 规则（§3.2）：身份绑定 workerId，不能只信任请求体里的 workerId，也不能只凭“来自 3001 端口”。
+ *  - 首次登记：worker_id 不存在时按注册模式决定是否放行（默认允许首次登记，可配置为关闭）；
+ *  - 已登记：必须提供匹配的 x-worker-token；
+ *  - W2 冒用 W1 的 workerId：凭据不匹配 → 401，且不覆盖 W1 的记录。
+ */
+function authenticateWorker(req, workerId, secret) {
+  const id = String(workerId || '').trim();
+  if (!id) return { ok: false, status: 400, error: '缺少 workerId' };
+  const provided = String(secret || '').trim();
+  const record = db.prepare('SELECT * FROM worker_access_auth WHERE worker_id = ?').get(id);
+
+  if (!record) {
+    if (WORKER_REGISTRATION_MODE === 'closed') {
+      return { ok: false, status: 403, error: '协调服务已关闭自动登记，请由管理员先在管理端登记该终端' };
+    }
+    if (!provided) {
+      return { ok: false, status: 401, error: '首次登记必须提供接入凭据（x-worker-token）' };
+    }
+    return { ok: true, firstTime: true, workerId: id };
+  }
+
+  if (!provided) {
+    return { ok: false, status: 401, error: '缺少接入凭据（x-worker-token），已拒绝', code: 'WORKER_TOKEN_REQUIRED' };
+  }
+  if (!timingSafeEqualHex(hashWorkerSecret(provided), record.secret_hash)) {
+    return {
+      ok: false,
+      status: 401,
+      error: `接入凭据与终端 [${id}] 已登记凭据不匹配，已拒绝（如为本机身份文件被复制，请删除 worker_config.local.json 后以新终端注册）`,
+      code: 'WORKER_TOKEN_MISMATCH'
+    };
+  }
+  return { ok: true, firstTime: false, workerId: id, record };
+}
+
+/** 首次登记写入凭据（只存哈希，不落明文，日志与手机返回值都不含凭据 §3.2） */
+function registerWorkerSecret(workerId, secret, name) {
+  const now = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO worker_access_auth (worker_id, secret_hash, secret_hint, registered_at, name_source)
+    VALUES (?, ?, ?, ?, 'report')
+    ON CONFLICT(worker_id) DO NOTHING
+  `).run(workerId, hashWorkerSecret(secret), String(secret).slice(-4), now);
+}
+
+/**
+ * 执行端接口统一鉴权中间件：把认证身份绑定到 workerId。
+ * 请求体/查询参数里的 workerId 必须与凭据所属身份一致，否则 403（防 W2 冒用 W1）。
+ *
+ * 落地策略（协调机本机回环豁免）：
+ *  - 直连来源为回环地址（协调服务本机执行端）时豁免凭据：此时物理边界已在协调机内部，
+ *    本机执行端无需额外配置，也让既有 worker-local 实例平滑迁移；
+ *  - 非回环（远程电脑）一律强制凭据：缺失 → 401，冒用他人 workerId → 401/403。
+ *    因此「请求来自 3001 端口」本身不再构成放行依据，远程接入必须持有该身份的凭据。
+ */
+function requireWorkerAuth(req, res, next) {
+  const headerId = String(req.headers['x-worker-id'] || '').trim();
+  const headerToken = String(req.headers['x-worker-token'] || '').trim();
+  const claimedId = String((req.body && req.body.workerId) || req.query.workerId || '').trim();
+  const workerId = headerId || claimedId;
+  const directIp = getDirectClientIp(req);
+  const isLoopback = directIp === '127.0.0.1' || directIp === '127.0.0.1 (IPv6回环)' || !directIp;
+
+  if (isLoopback) {
+    req.workerIdentity = { workerId, firstTime: false, ip: directIp, loopbackExempt: true };
+    return next();
+  }
+
+  const auth = authenticateWorker(req, workerId, headerToken);
+  if (!auth.ok) {
+    return res.status(auth.status).json({ success: false, error: auth.error, code: auth.code || 'WORKER_AUTH_FAILED' });
+  }
+  if (claimedId && headerId && claimedId !== headerId) {
+    return res.status(403).json({
+      success: false,
+      error: `请求声明的 workerId (${claimedId}) 与认证身份 (${headerId}) 不一致，已拒绝`,
+      code: 'WORKER_IDENTITY_MISMATCH'
+    });
+  }
+  req.workerIdentity = { workerId: auth.workerId, firstTime: auth.firstTime, ip: directIp };
+  next();
+}
+
 // ==================== WORKER & PRINTER MONITORING ====================
 app.post('/api/workers/heartbeat', (req, res) => {
-  const { workerId, name, ip, workingDir, printers, status = 'ONLINE' } = req.body;
+  const { workerId, name, ip, workingDir, printers, status = 'ONLINE', selfReportedIp } = req.body || {};
   if (!workerId) return res.status(400).json({ error: 'workerId required' });
 
+  const secret = String(req.headers['x-worker-token'] || '').trim();
+  const directIpForAuth = getDirectClientIp(req);
+  const isLoopbackHeartbeat = directIpForAuth === '127.0.0.1' || directIpForAuth === '127.0.0.1 (IPv6回环)' || !directIpForAuth;
+  // 回环豁免与 requireWorkerAuth 保持一致：协调机本机执行端不需要额外配置凭据，
+  // 远程电脑接入必须携带该身份的凭据（§3.2）。这样本机既有实例升级后无需重新配置。
+  const auth = isLoopbackHeartbeat
+    ? { ok: true, firstTime: false, workerId }
+    : authenticateWorker(req, workerId, secret);
+  if (!auth.ok) {
+    logAudit(null, 'WORKER', 'WorkerService', 'WORKER_AUTH_REJECTED', {
+      workerId: String(workerId).slice(0, 64), ip: directIpForAuth, reason: auth.code || auth.error
+    });
+    return res.status(auth.status).json({ success: false, error: auth.error, code: auth.code || 'WORKER_AUTH_FAILED' });
+  }
+  if (auth.firstTime) {
+    registerWorkerSecret(workerId, secret, name);
+  }
+
   const now = new Date().toISOString();
+  const directIp = getDirectClientIp(req);
+  const reportedIp = normalizeClientIp(ip) || normalizeClientIp(selfReportedIp) || '';
   const printersJson = JSON.stringify(printers || []);
   const existing = db.prepare('SELECT * FROM workers WHERE id = ?').get(workerId);
+
+  // 身份冲突检测（§4）：同一 workerId 短时间内从不同来源地址出现，
+  // 说明身份文件被复制到另一台电脑，必须明确提示而不是静默轮流覆盖。
+  const authRec = db.prepare('SELECT * FROM worker_access_auth WHERE worker_id = ?').get(workerId);
+  let conflict = null;
+  if (authRec && authRec.last_seen_ip && directIp && authRec.last_seen_ip !== directIp) {
+    const lastSeenMs = authRec.last_seen_at ? new Date(authRec.last_seen_at).getTime() : 0;
+    if (Date.now() - lastSeenMs < WORKER_IDENTITY_CONFLICT_WINDOW_MS) {
+      conflict = {
+        identityConflict: true,
+        workerId,
+        previousIp: authRec.last_seen_ip,
+        currentIp: directIp,
+        error: `终端身份冲突：ID [${workerId}] 在 ${Math.round((Date.now() - lastSeenMs) / 1000)} 秒内先后从 ${authRec.last_seen_ip} 与 ${directIp} 上报。`
+          + '该身份文件可能被复制到了另一台电脑。请在其中一台删除 worker_config.local.json 后重启，以“注册为新终端”的方式获得独立身份。'
+      };
+      db.prepare('UPDATE worker_access_auth SET conflict_flag = 1, conflict_note = ? WHERE worker_id = ?')
+        .run(conflict.error, workerId);
+    }
+  }
+
+  // 名称保留：管理员在协调端改过的名字，不能被心跳里的旧默认名覆盖（§4 / MW04）
+  let nextName = existing ? existing.name : (name || 'Execution Worker');
+  if (authRec && authRec.name_source === 'admin') {
+    nextName = existing ? existing.name : nextName;
+  } else if (name) {
+    nextName = name;
+  }
 
   if (existing) {
     db.prepare(`
       UPDATE workers SET name = ?, ip = ?, status = ?, working_dir = ?, printers = ?, last_heartbeat = ?
       WHERE id = ?
-    `).run(name || existing.name, ip || existing.ip, status, workingDir || existing.working_dir, printersJson, now, workerId);
+    `).run(nextName, directIp || reportedIp || existing.ip, status, workingDir || existing.working_dir, printersJson, now, workerId);
   } else {
     db.prepare(`
       INSERT INTO workers (id, name, ip, status, working_dir, printers, last_heartbeat)
       VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(workerId, name || 'Execution Worker', ip || '127.0.0.1', status, workingDir || 'D:\\docs', printersJson, now);
+    `).run(workerId, nextName, directIp || reportedIp || '', status, workingDir || '', printersJson, now);
   }
 
-  res.json({ success: true, workerId, timestamp: now });
+  db.prepare(`
+    UPDATE worker_access_auth
+    SET last_seen_at = ?, last_seen_ip = ?, last_seen_ua = ?, conflict_flag = CASE WHEN ? IS NULL THEN conflict_flag ELSE 1 END
+    WHERE worker_id = ?
+  `).run(now, directIp, String(req.headers['user-agent'] || '').slice(0, 200), conflict ? 1 : null, workerId);
+
+  if (conflict) {
+    logAudit(null, 'WORKER', 'WorkerService', 'WORKER_IDENTITY_CONFLICT', {
+      workerId, previousIp: conflict.previousIp, currentIp: conflict.currentIp
+    });
+    return res.status(409).json({
+      success: false,
+      identityConflict: true,
+      workerId,
+      previousIp: conflict.previousIp,
+      currentIp: conflict.currentIp,
+      error: conflict.error
+    });
+  }
+
+  res.json({
+    success: true,
+    workerId,
+    registered: !!auth.firstTime,
+    // 实际直连来源与终端自报地址分列，不默认填 127.0.0.1（§5 / MW-B05 / MW18）
+    sourceIp: directIp,
+    selfReportedIp: reportedIp || null,
+    name: nextName,
+    nameSource: authRec && authRec.name_source === 'admin' ? 'admin' : 'report',
+    timestamp: now
+  });
 });
 
 app.get('/api/workers', (req, res) => {
@@ -857,6 +1212,16 @@ app.get('/api/workers', (req, res) => {
     return {
       ...w,
       status: isOnline ? (w.status && w.status !== 'ONLINE' ? w.status : 'ONLINE') : 'OFFLINE',
+      // 直连来源地址（规范化显示）与终端自报地址分列，便于区分「显示成本机」与「真的连不上」(MW-B05/MW18)
+      sourceIp: w.ip || '',
+      nameSource: (() => {
+        const rec = db.prepare('SELECT name_source, conflict_flag, conflict_note, registered_at FROM worker_access_auth WHERE worker_id = ?').get(w.id);
+        return rec ? rec.name_source : 'report';
+      })(),
+      identityConflict: (() => {
+        const rec = db.prepare('SELECT conflict_flag, conflict_note FROM worker_access_auth WHERE worker_id = ?').get(w.id);
+        return rec && rec.conflict_flag ? { flagged: true, note: rec.conflict_note } : null;
+      })(),
       printers: printersList,
       printerDetails
     };
@@ -869,36 +1234,104 @@ app.get('/api/workers', (req, res) => {
   res.json(workers);
 });
 
+/**
+ * 管理员修改执行端显示名称（§4：协调端改名后，心跳里的旧默认名不得覆盖）。
+ * 改名后把 name_source 标记为 admin，心跳据此保留管理员名称（MW04）。
+ */
+app.post('/api/workers/:id/name', requireAdminAccess, (req, res) => {
+  const workerId = req.params.id;
+  const cleanName = String((req.body && req.body.name) || '').trim();
+  if (!cleanName) return res.status(400).json({ error: '名称不能为空' });
+  if (cleanName.length > 64) return res.status(400).json({ error: '名称过长（最多 64 字符）' });
+
+  const existing = db.prepare('SELECT * FROM workers WHERE id = ?').get(workerId);
+  if (!existing) return res.status(404).json({ error: `未找到已登记终端 ${workerId}` });
+
+  db.prepare('UPDATE workers SET name = ? WHERE id = ?').run(cleanName, workerId);
+  db.prepare(`
+    INSERT INTO worker_access_auth (worker_id, secret_hash, registered_at, name_source)
+    VALUES (?, '', ?, 'admin')
+    ON CONFLICT(worker_id) DO UPDATE SET name_source = 'admin'
+  `).run(workerId, new Date().toISOString());
+
+  logAudit(null, 'ADMIN', 'Admin', 'RENAME_WORKER', { workerId, name: cleanName });
+  res.json({ success: true, workerId, name: cleanName, nameSource: 'admin' });
+});
+
+/** 管理员清除身份冲突标记（在另一台电脑完成「注册为新终端」后使用，§4 / MW12） */
+app.post('/api/workers/:id/clear-conflict', requireAdminAccess, (req, res) => {
+  const workerId = req.params.id;
+  const info = db.prepare(`
+    UPDATE worker_access_auth SET conflict_flag = 0, conflict_note = NULL WHERE worker_id = ?
+  `).run(workerId);
+  if (info.changes === 0) return res.status(404).json({ error: `未找到终端接入记录 ${workerId}` });
+  logAudit(null, 'ADMIN', 'Admin', 'CLEAR_WORKER_CONFLICT', { workerId });
+  res.json({ success: true, workerId, identityConflict: null });
+});
+
 // ==================== PUBLISHED BUNDLES & MODELS ====================
-// Helper: Check path containment strictly without prefix bug (DIR-13, WC-08)
-function isSubpath(parent, child) {
-  if (!parent || !child) return false;
-  const normParent = path.resolve(parent);
-  const normChild = path.resolve(child);
-  const pLower = process.platform === 'win32' ? normParent.toLowerCase() : normParent;
-  const cLower = process.platform === 'win32' ? normChild.toLowerCase() : normChild;
-  if (pLower === cLower) return true;
-  const rel = path.relative(normParent, normChild);
-  return !rel.startsWith('..') && !path.isAbsolute(rel);
+// Helper: 目录边界按真实路径 + 相对路径判断，避免前缀误判与联接越界 (DIR-13, WC-08, 6.7)
+const { isSubpath, safeRealPath, isSafePathSegment } = require('../worker/security');
+
+// Helper: 读取执行端授权范围确认状态 (4.2 / 7.2)
+// - EXPLICIT   : 管理员已显式配置业务路径，执行端必须严格校验，不得回退
+// - UNCONFIRMED: 迁移自旧版本且从未配置业务路径，处于“待确认”，不默认放开
+function getWorkerAuthState(workerId) {
+  const row = db.prepare('SELECT * FROM worker_auth_state WHERE worker_id = ?').get(workerId);
+  return row ? row.state : 'UNCONFIRMED';
 }
 
-// Helper: Check whether targetPath is within worker's authorized paths (E04, WC-07, WC-08)
-function isPathInWorkerAllowedPaths(workerId, targetPath, requireWrite = true, strict = false) {
-  const allowed = db.prepare('SELECT * FROM worker_allowed_paths WHERE worker_id = ?').all(workerId);
-  if (allowed.length === 0) {
-    if (strict) {
-      return { allowed: false, reason: `执行端尚未配置任何允许访问的业务路径 (E04)` };
-    }
-    return { allowed: true, isLegacy: true };
-  }
-  for (const ap of allowed) {
-    if (requireWrite && !ap.allow_write) continue;
-    if (isSubpath(ap.root_path, targetPath)) {
-      return { allowed: true, allowedPath: ap.root_path };
-    }
-  }
-  return { allowed: false, reason: `保存根目录 [${targetPath}] 未包含在执行端允许${requireWrite ? '写入' : '访问'}的业务路径范围内 (E04, WC-08)` };
+function markWorkerAuthState(workerId, state, note) {
+  const now = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO worker_auth_state (worker_id, state, updated_at, note)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(worker_id) DO UPDATE SET state = excluded.state, updated_at = excluded.updated_at, note = excluded.note
+  `).run(workerId, state, now, note || null);
 }
+
+// Helper: 管理员配置业务路径后即进入严格校验状态（授权范围得到确认）
+function confirmWorkerAuthScope(workerId, note) {
+  markWorkerAuthState(workerId, 'EXPLICIT', note || '管理员已配置业务路径授权');
+}
+
+// Helper: 校验业务根路径是否位于某执行端当前授权范围（严格模式不做 legacy 回退）
+function isPathInWorkerAllowedPathsDetailed(workerId, targetPath, opts = {}) {
+  const requireWrite = opts.requireWrite !== false;
+  const authState = getWorkerAuthState(workerId);
+
+  const allowed = db.prepare('SELECT * FROM worker_allowed_paths WHERE worker_id = ? ORDER BY id ASC').all(workerId);
+  if (allowed.length === 0) {
+    if (authState !== 'EXPLICIT') {
+      return {
+        allowed: false,
+        isLegacy: true,
+        authState,
+        reason: `执行端 [${workerId}] 尚未确认“允许访问的业务路径”授权范围，已按待确认状态暂停写入。请在终端详情页配置业务路径 (E04, 4.2, WC-04)`
+      };
+    }
+    return {
+      allowed: false,
+      authState,
+      reason: `执行端 [${workerId}] 已确认授权范围但当前没有任何“允许访问的业务路径”，拒绝写入 (E04, WC-08)`
+    };
+  }
+
+  const writable = requireWrite ? allowed.filter(ap => ap.allow_write) : allowed;
+  for (const ap of writable) {
+    if (isSubpath(ap.root_path, targetPath)) {
+      return { allowed: true, allowedPath: ap, authState };
+    }
+  }
+  return {
+    allowed: false,
+    authState,
+    reason: `保存根目录 [${targetPath}] 未包含在执行端允许${requireWrite ? '写入' : '访问'}的业务路径范围内 (E04, WC-08)`
+  };
+}
+
+// 说明：所有调用点一律使用 isPathInWorkerAllowedPathsDetailed（严格模式，无 legacy 回退），
+// 不再提供“无业务路径配置即视为放行”的兼容出口 (E04, 4.2, 7.2)。
 
 app.get('/api/published-bundles', (req, res) => {
   const { workerId } = req.query;
@@ -946,26 +1379,9 @@ app.get('/api/published-bundles', (req, res) => {
 
     // When workerId is specified, filter by worker enablement and determine effective docCombo (Section 5, WC-11, WC-12)
     if (workerId) {
+      // 严格按模板稳定逻辑标识匹配配置：不得按型号模糊回退，避免跨终端/跨版本串配置 (4.3, WC-15, WC-16)
       let certCfg = certTmpl ? db.prepare('SELECT * FROM worker_save_configs WHERE worker_id = ? AND template_id = ? AND doc_type = ?').get(workerId, certTmpl.id, 'cert') : null;
       let packCfg = packTmpl ? db.prepare('SELECT * FROM worker_save_configs WHERE worker_id = ? AND template_id = ? AND doc_type = ?').get(workerId, packTmpl.id, 'packing') : null;
-
-      // Model-level fallback: if exact template_id was not matched (e.g. template re-uploaded or version updated), match by model
-      if (!certCfg && certTmpl) {
-        certCfg = db.prepare(`
-          SELECT wsc.* FROM worker_save_configs wsc
-          JOIN templates t ON wsc.template_id = t.id
-          WHERE wsc.worker_id = ? AND (t.model = ? OR t.model = ?) AND wsc.doc_type = 'cert'
-          ORDER BY wsc.updated_at DESC
-        `).get(workerId, certTmpl.model, b.model_display);
-      }
-      if (!packCfg && packTmpl) {
-        packCfg = db.prepare(`
-          SELECT wsc.* FROM worker_save_configs wsc
-          JOIN templates t ON wsc.template_id = t.id
-          WHERE wsc.worker_id = ? AND (t.model = ? OR t.model = ?) AND wsc.doc_type = 'packing'
-          ORDER BY wsc.updated_at DESC
-        `).get(workerId, packTmpl.model, b.model_display);
-      }
 
       const certEnabled = certCfg && Boolean(certCfg.is_enabled);
       const packEnabled = packCfg && Boolean(packCfg.is_enabled);
@@ -991,10 +1407,10 @@ app.get('/api/published-bundles', (req, res) => {
           isReady = false;
           unreadyReasons.push(`证书保存目录检查未通过(${certCfg.check_status}: ${certCfg.check_message || '待检查'})`);
         } else {
-          const authCheck = isPathInWorkerAllowedPaths(workerId, certCfg.root_dir, true);
+          const authCheck = isPathInWorkerAllowedPathsDetailed(workerId, certCfg.root_dir, { requireWrite: true });
           if (!authCheck.allowed) {
             isReady = false;
-            unreadyReasons.push(authCheck.reason);
+            unreadyReasons.push(`证书保存根目录未获写入授权：${authCheck.reason}`);
           }
         }
       }
@@ -1007,11 +1423,23 @@ app.get('/api/published-bundles', (req, res) => {
           isReady = false;
           unreadyReasons.push(`清单保存目录检查未通过(${packCfg.check_status}: ${packCfg.check_message || '待检查'})`);
         } else {
-          const authCheck = isPathInWorkerAllowedPaths(workerId, packCfg.root_dir, true);
+          const authCheck = isPathInWorkerAllowedPathsDetailed(workerId, packCfg.root_dir, { requireWrite: true });
           if (!authCheck.allowed) {
             isReady = false;
-            unreadyReasons.push(authCheck.reason);
+            unreadyReasons.push(`装箱清单保存根目录未获写入授权：${authCheck.reason}`);
           }
+        }
+      }
+
+      // 授权变更后执行端尚未确认收到（旧授权仍可能生效）时，不得向手机宣称可用 (4.2, WC-18)
+      if (isReady) {
+        const pendingSync = db.prepare(`
+          SELECT root_path, version, sync_status FROM worker_allowed_paths
+          WHERE worker_id = ? AND sync_status != 'SYNCED'
+        `).all(workerId);
+        if (pendingSync.length > 0) {
+          isReady = false;
+          unreadyReasons.push(`业务路径授权变更尚未被执行端确认（待同步: ${pendingSync.map(p => p.root_path).join(', ')}），请等待执行端同步后再提交 (WC-18)`);
         }
       }
 
@@ -1108,12 +1536,44 @@ app.post('/api/templates/upload', requireAdminAccess, upload.single('templateFil
   }
 });
 
-app.get('/api/templates/:id/download', (req, res) => {
+app.get('/api/templates/:id/download', requireWorkerAuth, (req, res) => {
   const tmpl = db.prepare('SELECT * FROM templates WHERE id = ?').get(req.params.id);
   if (!tmpl || !fs.existsSync(tmpl.filepath)) {
     return res.status(404).json({ error: 'Template file not found' });
   }
   res.download(tmpl.filepath, tmpl.filename);
+});
+
+/**
+ * 执行端下载本任务已回传原件的受控副本（REV183-10 / §6）。
+ *
+ * 用途：本机原件缺失或被清理时，允许从协调端下载副本到本机授权位置，
+ * 并在打印前校验哈希；执行端不得直接打开协调端的盘符路径。
+ * 归属校验：只有该任务的目标终端能下载（防串端）。
+ */
+app.get('/api/worker/tasks/:id/files/:fileType/download', requireWorkerAuth, (req, res) => {
+  const { id, fileType } = req.params;
+  const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(id);
+  if (!task) return res.status(404).json({ error: `未找到任务 ${id}` });
+
+  const identity = req.workerIdentity;
+  if (identity && identity.workerId && task.worker_id && identity.workerId !== task.worker_id) {
+    return res.status(403).json({
+      success: false,
+      error: `任务 ${id} 归属终端 [${task.worker_id}]，当前身份 [${identity.workerId}] 无权下载原件`,
+      code: 'TASK_OWNERSHIP_MISMATCH'
+    });
+  }
+
+  const fileRec = db.prepare('SELECT * FROM task_files WHERE task_id = ? AND file_type = ?').get(id, fileType);
+  if (!fileRec || !fileRec.server_filepath || !fs.existsSync(fileRec.server_filepath)) {
+    return res.status(404).json({ error: `任务 ${id} 的 ${fileType} 副本不存在，无法下载`, code: 'SERVER_COPY_MISSING' });
+  }
+
+  // 明确告知执行端期望哈希，便于下载后校验；不返回凭据
+  res.setHeader('x-file-sha256', fileRec.sha256 || '');
+  res.setHeader('x-file-version', String(Math.round(fs.statSync(fileRec.server_filepath).mtimeMs)));
+  res.download(fileRec.server_filepath, fileRec.official_filename);
 });
 
 app.delete('/api/templates/:id', requireAdminAccess, (req, res) => {
@@ -1132,47 +1592,64 @@ app.delete('/api/templates/:id', requireAdminAccess, (req, res) => {
 });
 
 
+/**
+ * 证书测量表头检测：统一走“先识别区域，再匹配字段”（整改 3.1）。
+ * 返回真实测量表头列名；解析产物无法保留坐标时返回 null，由调用方提示结构不可靠。
+ */
 function detectCertificateTableHeaders(docItems, model) {
+  const regions = detectTableRegions(docItems, { type: 'cert' });
+  const measurement = regions.find(r => r.kind === 'measurement');
+  if (!measurement) return null;
+  const labels = measurement.headerColumns
+    .map(c => String(c.label).replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+  return labels.length >= 2 ? labels : null;
+}
+
+/**
+ * 清单表头自动发现：从模板真实表头得到业务字段（含“单位”），
+ * 不再使用固定列表，也不把“主设备/传感器”当成列字段（整改 B02/B03）。
+ */
+function detectPackingHeaderLabels(docItems) {
+  const regions = detectTableRegions(docItems, { type: 'packing' });
+  const packing = regions.find(r => r.kind === 'packing');
+  if (!packing) return null;
+  const labels = [];
+  for (const col of packing.headerColumns) {
+    const label = String(col.label).replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!label) continue;
+    if (labels.includes(label)) continue;
+    labels.push(label);
+  }
+  return labels.length >= 2 ? labels : null;
+}
+
+/**
+ * 结构可靠性检查：二进制/回退解析若不能保留真实表格坐标，
+ * 必须提示“结构不可靠”，阻止据此正式发布（整改 3.1）。
+ */
+function assessStructureReliability(docItems, regions) {
   const cells = (docItems || []).filter(x => x.type === 'cell');
-  if (cells.length === 0) return null;
-
-  const tables = [...new Set(cells.map(x => x.tableIdx))];
-  let bestRow = null;
-  let maxScore = -1;
-
-  for (const t of tables) {
-    const tCells = cells.filter(x => x.tableIdx === t);
-    const rows = [...new Set(tCells.map(x => x.rowIdx))].sort((a,b) => a - b);
-    for (const r of rows) {
-      const rCells = tCells.filter(x => x.rowIdx === r && x.text && x.text.trim()).sort((a,b) => a.colIdx - b.colIdx);
-      if (rCells.length < 2) continue;
-
-      let score = 0;
-      for (const c of rCells) {
-        const norm = normalizeText(c.text);
-        if (norm.includes('test point number') || norm.includes('testpoint') || norm.includes('point') || norm.includes('step') || norm.includes('序号') || norm.includes('测试点')) score += 3;
-        if (norm.includes('standard') || norm.includes('nist') || norm.includes('value') || norm.includes('标准')) score += 3;
-        if (norm.includes('analyzer') || norm.includes('actual') || norm.includes('reading') || norm.includes('实测') || norm.includes('指示') || norm.includes('indication')) score += 3;
-        if (norm.includes('gas') || norm.includes('介质') || norm.includes('output')) score += 2;
-        if (norm.includes('ppm') || norm.includes('℃') || norm.includes('ma') || norm.includes('dp')) score += 1;
-      }
-
-      if (score > maxScore && score >= 4) {
-        maxScore = score;
-        bestRow = rCells;
-      }
+  if (cells.length === 0) {
+    return { reliable: false, reason: '未能从文档中提取任何表格单元格，可能缺少办公组件或文件格式不受支持' };
+  }
+  const tableCount = new Set(cells.map(c => c.tableIdx)).size;
+  const hasNegativeOrMissing = cells.some(c => typeof c.tableIdx !== 'number' || typeof c.rowIdx !== 'number' || typeof c.colIdx !== 'number');
+  if (hasNegativeOrMissing) {
+    return { reliable: false, reason: '解析产物缺少真实的表格编号/行列坐标，无法可靠绑定发布' };
+  }
+  // 回退解析的特征：每个表格只有列号递增、行号不递增（坐标被扁平化）
+  for (let t = 0; t < tableCount; t++) {
+    const tCells = cells.filter(c => c.tableIdx === t);
+    const rows = new Set(tCells.map(c => c.rowIdx));
+    if (tCells.length >= 6 && rows.size <= 1) {
+      return { reliable: false, reason: '表格坐标被扁平化为单一数据行，无法可靠区分表头与数据区' };
     }
   }
-
-  if (bestRow && bestRow.length >= 2) {
-    const seen = new Set();
-    return bestRow.filter(c => {
-      if (seen.has(c.colIdx)) return false;
-      seen.add(c.colIdx);
-      return true;
-    }).map(c => c.text.replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim()).filter(Boolean);
+  if (!regions || regions.length === 0) {
+    return { reliable: false, reason: '未能定位到可用的表格区域（表头/数据区）' };
   }
-  return null;
+  return { reliable: true, reason: '' };
 }
 
 app.get('/api/templates/:id/analyze', (req, res) => {
@@ -1188,6 +1665,9 @@ app.get('/api/templates/:id/analyze', (req, res) => {
     }
   }
 
+  const regions = detectTableRegions(docItems, { type: tmpl.type === 'packing' ? 'packing' : 'cert' });
+  const reliability = assessStructureReliability(docItems, regions);
+
   let targetLabels = [];
   if (tmpl.type === 'cert') {
     const baseCertLabels = ['Inst. SN.', 'Instrument', 'Date:', 'Ambient Temperature:', 'Relative Humidity'];
@@ -1202,12 +1682,15 @@ app.get('/api/templates/:id/analyze', (req, res) => {
       targetLabels = [...baseCertLabels, 'Analyzer pv ppm'];
     }
   } else {
-    targetLabels = ['主设备', '传感器', '名称', '规格', '数量', '备注'];
+    const packingLabels = detectPackingHeaderLabels(docItems);
+    targetLabels = packingLabels && packingLabels.length >= 2
+      ? packingLabels
+      : ['名称', '规格', '数量', '单位', '标配', '备注'];
   }
 
   const matchResults = {};
   targetLabels.forEach(lbl => {
-    matchResults[lbl] = findFieldCandidates(lbl, docItems);
+    matchResults[lbl] = findFieldCandidates(lbl, docItems, { type: tmpl.type === 'packing' ? 'packing' : 'cert', regions });
   });
 
   res.json({
@@ -1219,15 +1702,17 @@ app.get('/api/templates/:id/analyze', (req, res) => {
     docItemsCount: docItems.length,
     targetLabels,
     matchResults,
+    tableRegions: regions,
+    structureReliability: reliability,
     docItems
   });
 });
 
 app.post('/api/templates/match-candidates', (req, res) => {
-  const { targetLabel, docItems = [] } = req.body;
+  const { targetLabel, docItems = [], type = 'cert', regions } = req.body;
   if (!targetLabel) return res.status(400).json({ error: 'targetLabel required' });
 
-  const result = findFieldCandidates(targetLabel, docItems);
+  const result = findFieldCandidates(targetLabel, docItems, { type, regions });
   res.json(result);
 });
 
@@ -1306,6 +1791,42 @@ app.post('/api/templates/publish', requireAdminAccess, (req, res) => {
         error: '无法发布：证书模板缺少有效测量点表格区（标准值列、实测值列或数据行范围），请完成表格绑定或保存为草稿。'
       });
     }
+
+    // 区域一致性 / 固定行数 / 默认值完整性校验（整改 3.2, M11）
+    // 仅当本次发布实际提交了测量表格区配置时校验，避免把历史模板的发布请求一律拒绝。
+    const submittedTableConfig = (fieldMappings || {}).tableConfig;
+    const submittedTestPoints = (fieldMappings || {}).testPoints;
+    if (submittedTableConfig || Array.isArray(submittedTestPoints)) {
+      let publishDocItems = [];
+      if (fs.existsSync(filePath)) {
+        try { publishDocItems = extractDocumentStructure(filePath); } catch (e) { publishDocItems = []; }
+      }
+      const tableErrors = validateCertificateTableConfig(mergedMappings, publishDocItems);
+      if (tableErrors.length > 0) {
+        return res.status(400).json({
+          error: `无法发布：测量表格区配置不一致（${tableErrors.join('；')}）。请重新分析并绑定后再发布。`,
+          errorCode: 'TABLE_CONFIG_INVALID'
+        });
+      }
+    }
+  }
+
+  if (type === 'packing') {
+    const packingItems = Array.isArray(mergedMappings.packingItems) ? mergedMappings.packingItems : [];
+    const singleFields = Array.isArray(mergedMappings.singleFields) ? mergedMappings.singleFields : [];
+    const columnLikeSingles = singleFields.filter(f => f && f.valueLocation && f.valueLocation.type === 'table_column');
+    if (columnLikeSingles.length > 0 && (fieldMappings || {}).singleFields) {
+      return res.status(400).json({
+        error: `无法发布：装箱清单字段 (${columnLikeSingles.map(f => f.label).join(', ')}) 被误绑定成整列，请按模板真实表头重新绑定。`,
+        errorCode: 'PACKING_FIELD_INVALID'
+      });
+    }
+    if (Array.isArray((fieldMappings || {}).packingItems) && packingItems.length === 0) {
+      return res.status(400).json({
+        error: '无法发布：装箱清单模板缺少物料行数据，请先完成清单表头识别与保存。',
+        errorCode: 'PACKING_ROWS_MISSING'
+      });
+    }
   }
 
   // Formal publish: update field_mappings, clear draft_mappings, set published_at
@@ -1335,7 +1856,18 @@ app.post('/api/templates/publish', requireAdminAccess, (req, res) => {
 app.get('/api/admin/workers/:workerId/allowed-paths', (req, res) => {
   const { workerId } = req.params;
   const paths = db.prepare('SELECT * FROM worker_allowed_paths WHERE worker_id = ? ORDER BY id ASC').all(workerId);
-  res.json(paths);
+  const authState = getWorkerAuthState(workerId);
+  const noteRow = db.prepare('SELECT note FROM worker_auth_state WHERE worker_id = ?').get(workerId);
+
+  // 旧版本前端按数组消费，这里通过查询参数保留兼容输出 (4.2)
+  if (req.query.format === 'array') return res.json(paths);
+
+  res.json({
+    workerId,
+    authState,
+    authStateNote: noteRow ? noteRow.note : null,
+    allowedPaths: paths
+  });
 });
 
 app.post('/api/admin/workers/:workerId/allowed-paths', requireAdminAccess, (req, res) => {
@@ -1401,7 +1933,14 @@ app.post('/api/admin/workers/:workerId/allowed-paths', requireAdminAccess, (req,
     }
 
     const saved = db.prepare('SELECT * FROM worker_allowed_paths WHERE id = ?').get(pathId);
-    res.json({ success: true, allowedPath: saved });
+
+    // 管理员显式配置业务路径即视为授权范围已确认，之后执行端与协调服务均按严格模式校验 (4.2, 7.2)
+    confirmWorkerAuthScope(workerId, `管理员配置业务路径 [${cleanPath}]`);
+    logAudit(null, 'ADMIN', 'System', 'SAVE_WORKER_ALLOWED_PATH', {
+      workerId, pathId, rootPath: cleanPath, allowRead: allowReadInt, allowWrite: allowWriteInt, allowCreate: allowCreateInt, version
+    });
+
+    res.json({ success: true, allowedPath: saved, authState: 'EXPLICIT' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1427,7 +1966,15 @@ app.delete('/api/admin/workers/:workerId/allowed-paths/:id', requireAdminAccess,
       `).run(new Date().toISOString(), c.id);
     }
   }
-  res.json({ success: true });
+
+  // 撤销授权后必须让执行端确认收到；未确认前不得再依据旧授权执行写入 (4.2, WC-18, WC-20)
+  const remaining = db.prepare('SELECT COUNT(*) AS cnt FROM worker_allowed_paths WHERE worker_id = ?').get(workerId);
+  if (remaining.cnt === 0) {
+    markWorkerAuthState(workerId, 'EXPLICIT', '所有业务路径授权已被撤销，执行端不得再写入任何业务目录 (4.2, WC-20)');
+  }
+  logAudit(null, 'ADMIN', 'System', 'DELETE_WORKER_ALLOWED_PATH', { workerId, pathId: id, rootPath: ap.root_path });
+
+  res.json({ success: true, remainingPaths: remaining.cnt, authState: getWorkerAuthState(workerId) });
 });
 
 app.post('/api/admin/workers/:workerId/allowed-paths/:id/check', requireAdminAccess, (req, res) => {
@@ -1498,6 +2045,7 @@ app.get('/api/admin/workers/:workerId/template-configs', (req, res) => {
 
   const result = selectedTmpls.map(t => {
     const cfg = map.get(`${t.id}_${t.type}`);
+    map.delete(`${t.id}_${t.type}`);
     const fileExists = !!(t.filepath && fs.existsSync(t.filepath));
     const isDraft = !!t.draft_mappings || !t.published_at;
     const isValid = fileExists && !isDraft;
@@ -1507,6 +2055,14 @@ app.get('/api/admin/workers/:workerId/template-configs', (req, res) => {
       statusNote = '文件缺失';
     } else if (isDraft) {
       statusNote = '草稿';
+    }
+
+    // 同步状态：仅“已下发并被执行端确认”的配置才视为同步完成 (4.2, WC-18)
+    let syncStatus = 'NOT_CONFIGURED';
+    if (cfg) {
+      if (cfg.check_status === 'PASSED') syncStatus = 'SYNCED';
+      else if (cfg.is_enabled) syncStatus = 'PENDING';
+      else syncStatus = 'DISABLED';
     }
 
     return {
@@ -1525,11 +2081,39 @@ app.get('/api/admin/workers/:workerId/template-configs', (req, res) => {
       subfolder_rule: cfg ? (cfg.subfolder_rule || 'deviceSn') : 'deviceSn',
       allow_create: cfg ? (cfg.allow_create || 0) : 0,
       version: cfg ? cfg.version : 1,
+      sync_status: syncStatus,
       check_status: cfg ? cfg.check_status : 'PENDING',
       check_message: cfg ? (cfg.check_message || '未配置') : '未配置',
       checked_at: cfg ? cfg.checked_at : null
     };
   });
+
+  // 残留配置（模板已删除或不再作为最新版本出现）也必须可见，避免静默持有授权 (4.3)
+  for (const [key, cfg] of map.entries()) {
+    result.push({
+      template_id: cfg.template_id,
+      model: '(模板已失效)',
+      doc_type: cfg.doc_type,
+      filename: '(模板记录不存在或已删除)',
+      file_exists: false,
+      is_draft: false,
+      is_valid: false,
+      status_note: '模板缺失',
+      is_orphaned: true,
+      config_id: cfg.id,
+      is_enabled: 0,
+      root_dir: cfg.root_dir || '',
+      save_mode: cfg.save_mode || 'direct',
+      subfolder_rule: cfg.subfolder_rule || 'deviceSn',
+      allow_create: cfg.allow_create || 0,
+      version: cfg.version,
+      sync_status: 'ORPHANED',
+      check_status: cfg.check_status,
+      check_message: '该配置对应的模板已不存在，请删除或重新为该终端选择模板后再配置',
+      checked_at: cfg.checked_at
+    });
+  }
+
   res.json(result);
 });
 
@@ -1564,14 +2148,28 @@ app.post('/api/admin/workers/:workerId/template-configs', requireAdminAccess, (r
   }
 
   const cleanRootDir = (rootDir || '').trim();
+
+  // 启用模板必须已配置保存根目录；未启用可先预配置目录 (4.3)
+  if (isEnabled && !cleanRootDir) {
+    return res.status(400).json({ error: '启用模板前必须先配置保存根目录，不允许以空目录启用 (4.3)' });
+  }
+
   if (cleanRootDir) {
     const isAbs = path.isAbsolute(cleanRootDir) || /^[a-zA-Z]:[\\/]/.test(cleanRootDir);
     if (!isAbs) return res.status(400).json({ error: `保存根目录必须是合法的绝对路径: ${cleanRootDir}` });
+    if (/[<>"|?*]/.test(cleanRootDir.replace(/^[a-zA-Z]:/, ''))) {
+      return res.status(400).json({ error: `保存根目录包含系统非法字符: ${cleanRootDir}` });
+    }
 
-    // Validate authorized write path boundary (E04, WC-08)
-    const authCheck = isPathInWorkerAllowedPaths(workerId, cleanRootDir, true, true);
+    // Validate authorized write path boundary with strict mode (E04, WC-08, 4.2)
+    const authCheck = isPathInWorkerAllowedPathsDetailed(workerId, cleanRootDir, { requireWrite: true });
     if (!authCheck.allowed) {
-      return res.status(400).json({ error: authCheck.reason });
+      return res.status(400).json({ error: authCheck.reason, authState: authCheck.authState });
+    }
+
+    // 保存方式为子文件夹时，子文件夹规则字段必填 (4.3)
+    if (saveMode === 'subfolder' && !String(subfolderRule || '').trim()) {
+      return res.status(400).json({ error: '保存方式为按字段建立子文件夹时，子文件夹规则字段必填 (4.3)' });
     }
   }
 
@@ -1614,7 +2212,28 @@ app.post('/api/admin/workers/:workerId/template-configs', requireAdminAccess, (r
   }
 
   const saved = db.prepare('SELECT * FROM worker_save_configs WHERE id = ?').get(configId);
-  res.json({ success: true, config: saved });
+
+  // 配置保存成功后，该终端的授权范围视为已确认，进入严格校验状态 (4.2, 7.2)
+  confirmWorkerAuthScope(workerId, `管理员配置模板保存目录 [${cleanRootDir || '未配置'}]`);
+  logAudit(null, 'ADMIN', 'System', 'SAVE_WORKER_TEMPLATE_CONFIG', {
+    workerId, templateId, docType, rootDir: cleanRootDir, isEnabled: isEnabledInt, version
+  });
+
+  res.json({ success: true, config: saved, authState: getWorkerAuthState(workerId) });
+});
+
+// 删除某终端某模板的保存配置（含模板已失效的残留配置），避免遗留授权 (4.3)
+app.delete('/api/admin/workers/:workerId/template-configs/:id', requireAdminAccess, (req, res) => {
+  const { workerId, id } = req.params;
+  const config = db.prepare('SELECT * FROM worker_save_configs WHERE id = ? AND worker_id = ?').get(id, workerId);
+  if (!config) return res.status(404).json({ error: '目录配置不存在' });
+
+  db.prepare('DELETE FROM worker_save_configs WHERE id = ?').run(id);
+  db.prepare('DELETE FROM worker_directory_checks WHERE (target_id = ? OR config_id = ?)').run(id, id);
+  logAudit(null, 'ADMIN', 'System', 'DELETE_WORKER_TEMPLATE_CONFIG', {
+    workerId, configId: id, templateId: config.template_id, docType: config.doc_type, rootDir: config.root_dir
+  });
+  res.json({ success: true, id });
 });
 
 app.post('/api/admin/workers/:workerId/template-configs/:id/check', requireAdminAccess, (req, res) => {
@@ -1695,10 +2314,10 @@ app.post('/api/admin/worker-directories', requireAdminAccess, (req, res) => {
     return res.status(400).json({ error: `保存根目录必须是合法的绝对路径: ${rootDir}` });
   }
 
-  // Validate allowed paths if configured
-  const authCheck = isPathInWorkerAllowedPaths(workerId, rootDir, true);
+  // Validate allowed paths strictly: 未确认授权范围的终端不得通过此兼容接口扩大授权 (4.2, E04)
+  const authCheck = isPathInWorkerAllowedPathsDetailed(workerId, rootDir, { requireWrite: true });
   if (!authCheck.allowed) {
-    return res.status(400).json({ error: authCheck.reason });
+    return res.status(400).json({ error: authCheck.reason, authState: authCheck.authState });
   }
 
   const now = new Date().toISOString();
@@ -1730,8 +2349,9 @@ app.post('/api/admin/worker-directories', requireAdminAccess, (req, res) => {
   }
 
   const saved = db.prepare('SELECT * FROM worker_save_configs WHERE id = ?').get(configId);
+  confirmWorkerAuthScope(workerId, `管理员配置模板保存目录 [${rootDir}]`);
   logAudit(null, 'ADMIN', 'System', 'SAVE_WORKER_DIRECTORY_CONFIG', { configId, workerId, templateId, docType, rootDir });
-  res.json({ success: true, config: saved });
+  res.json({ success: true, config: saved, authState: getWorkerAuthState(workerId) });
 });
 
 app.delete('/api/admin/worker-directories/:id', requireAdminAccess, (req, res) => {
@@ -1774,51 +2394,78 @@ app.post('/api/admin/worker-directories/:id/check', requireAdminAccess, (req, re
 });
 
 // --- 4. Worker Check Queue & Authorizations Sync ---
-app.get('/api/worker/directory-checks/pending', (req, res) => {
+app.get('/api/worker/directory-checks/pending', requireWorkerAuth, (req, res) => {
   const { workerId = 'worker-local' } = req.query;
   const checks = db.prepare(`
     SELECT * FROM worker_directory_checks
-    WHERE (worker_id = ? OR worker_id = 'worker-local') AND status = 'PENDING'
+    WHERE worker_id = ? AND status = 'PENDING'
     ORDER BY id ASC
   `).all(workerId);
   res.json(checks);
 });
 
-app.post('/api/worker/directory-checks/result', (req, res) => {
-  const { checkId, checkType = 'save_config', targetId, configId, version, status, message } = req.body;
+app.post('/api/worker/directory-checks/result', requireWorkerAuth, (req, res) => {
+  const { checkId, workerId, checkType = 'save_config', targetId, configId, version, status, message } = req.body;
   const finalId = targetId || configId;
 
+  let applied = false;
   if (checkType === 'allowed_path') {
     const ap = db.prepare('SELECT * FROM worker_allowed_paths WHERE id = ?').get(finalId);
-    if (ap && ap.version === version) {
+    // 旧版本的迟到结果不得覆盖新配置 (WC-17)
+    if (ap && Number(ap.version) === Number(version)) {
       db.prepare(`
         UPDATE worker_allowed_paths
         SET check_status = ?, check_message = ?, sync_status = 'SYNCED', checked_at = ?
         WHERE id = ?
       `).run(status, message || '', new Date().toISOString(), finalId);
+
+      // 写权限被撤销时，受影响的结果目录配置立即失效 (4.2, WC-18, WC-20)
+      if (!ap.allow_write) {
+        const affected = db.prepare('SELECT * FROM worker_save_configs WHERE worker_id = ?').all(ap.worker_id);
+        for (const c of affected) {
+          if (isSubpath(ap.root_path, c.root_dir)) {
+            db.prepare(`
+              UPDATE worker_save_configs
+              SET check_status = 'PENDING', check_message = '所属业务路径已取消写权限，需重新授权并检查 (4.2)',
+                  version = version + 1, updated_at = ?
+              WHERE id = ?
+            `).run(new Date().toISOString(), c.id);
+          }
+        }
+      }
+      applied = true;
     }
   } else {
     const config = db.prepare('SELECT * FROM worker_save_configs WHERE id = ?').get(finalId);
-    if (config && config.version === version) {
+    if (config && Number(config.version) === Number(version)) {
       db.prepare(`
         UPDATE worker_save_configs
         SET check_status = ?, check_message = ?, checked_at = ?
         WHERE id = ?
       `).run(status, message || '', new Date().toISOString(), finalId);
+      applied = true;
     }
   }
 
-  if (checkId) {
+  // 仅当结果确实应用到当前版本时才将检查任务置为完成；旧结果保留待重新检查 (WC-17)
+  if (checkId && applied) {
     db.prepare("UPDATE worker_directory_checks SET status = 'DONE' WHERE id = ?").run(checkId);
+  } else if (checkId && workerId) {
+    db.prepare("UPDATE worker_directory_checks SET status = 'STALE' WHERE id = ?").run(checkId);
   }
-  res.json({ success: true });
+
+  res.json({ success: true, applied });
 });
 
-app.get('/api/worker/authorizations', (req, res) => {
+app.get('/api/worker/authorizations', requireWorkerAuth, (req, res) => {
   const { workerId } = req.query;
   if (!workerId) return res.status(400).json({ error: '缺少 workerId' });
-  const paths = db.prepare('SELECT id, root_path, allow_read, allow_write, version FROM worker_allowed_paths WHERE worker_id = ?').all(workerId);
-  res.json({ workerId, allowedPaths: paths });
+  const paths = db.prepare('SELECT id, root_path, allow_read, allow_write, allow_create, version, sync_status FROM worker_allowed_paths WHERE worker_id = ?').all(workerId);
+  res.json({
+    workerId,
+    authState: getWorkerAuthState(workerId),
+    allowedPaths: paths
+  });
 });
 
 app.post('/api/worker/authorizations/sync', (req, res) => {
@@ -1873,7 +2520,7 @@ app.post('/api/tasks/validate-directories', (req, res) => {
       } else if (certCfg.check_status !== 'PASSED') {
         errors.push(`执行端 [${workerName}] 证书模板保存目录尚未检查通过（当前状态: ${certCfg.check_status}，原因: ${certCfg.check_message || '待检查'}）！(DIR-06)`);
       } else {
-        const authCheck = isPathInWorkerAllowedPaths(workerId, certCfg.root_dir, true);
+        const authCheck = isPathInWorkerAllowedPathsDetailed(workerId, certCfg.root_dir, { requireWrite: true });
         if (!authCheck.allowed) {
           errors.push(authCheck.reason);
         } else {
@@ -1909,7 +2556,7 @@ app.post('/api/tasks/validate-directories', (req, res) => {
       } else if (packCfg.check_status !== 'PASSED') {
         errors.push(`执行端 [${workerName}] 装箱清单保存目录尚未检查通过（当前状态: ${packCfg.check_status}，原因: ${packCfg.check_message || '待检查'}）！(DIR-07)`);
       } else {
-        const authCheck = isPathInWorkerAllowedPaths(workerId, packCfg.root_dir, true);
+        const authCheck = isPathInWorkerAllowedPathsDetailed(workerId, packCfg.root_dir, { requireWrite: true });
         if (!authCheck.allowed) {
           errors.push(authCheck.reason);
         } else {
@@ -1926,27 +2573,323 @@ app.post('/api/tasks/validate-directories', (req, res) => {
   });
 });
 
+// Helper: 解析型号对应的公共模板（优先使用已发布版本，禁止跨型号乱套） (4.3)
+function resolveModelTemplates({ bundle, model, displayName, fileType }) {
+  let tmpl = null;
+  const bundleField = fileType === 'cert' ? 'cert_template_id' : 'packing_template_id';
+  if (bundle && bundle[bundleField]) {
+    tmpl = db.prepare('SELECT * FROM templates WHERE id = ?').get(bundle[bundleField]);
+  }
+  if (!tmpl) {
+    tmpl = db.prepare("SELECT * FROM templates WHERE (model = ? OR model = ?) AND type = ? AND published_at IS NOT NULL ORDER BY published_at DESC")
+      .get(model, displayName, fileType);
+  }
+  if (!tmpl) {
+    tmpl = db.prepare("SELECT * FROM templates WHERE (model = ? OR model = ?) AND type = ? ORDER BY published_at DESC")
+      .get(model, displayName, fileType);
+  }
+  return tmpl;
+}
+
+// Helper: 校验某终端当前对某公共模板的启用/可用状态 (4.3, 5, WC-14)
+// requireReady=true 时还会校验保存目录配置与检查状态
+function evaluateWorkerTemplateFor(workerId, tmpl, docType, opts = {}) {
+  const requireReady = opts.requireReady !== false;
+  if (!tmpl) {
+    return { ok: false, enabled: false, reason: `未找到对应型号的发货证书模板` };
+  }
+  const cfg = db.prepare('SELECT * FROM worker_save_configs WHERE worker_id = ? AND template_id = ? AND doc_type = ?')
+    .get(workerId, tmpl.id, docType);
+  if (!cfg) {
+    return {
+      ok: false,
+      enabled: false,
+      config: null,
+      template: tmpl,
+      reason: `执行端 [${workerId}] 缺少${docType === 'cert' ? '证书' : '装箱清单'}模板 [${tmpl.filename}] 的保存目录配置！(DIR-0${docType === 'cert' ? 6 : 7})`
+    };
+  }
+  if (!cfg.is_enabled) {
+    return {
+      ok: false,
+      enabled: false,
+      config: cfg,
+      template: tmpl,
+      disabled: true,
+      reason: `该模板已被管理员在执行端停用，请刷新页面重新获取可用模板 (WC-14)`
+    };
+  }
+  if (!requireReady) {
+    return { ok: true, enabled: true, config: cfg, template: tmpl };
+  }
+  if (!cfg.root_dir) {
+    return {
+      ok: false,
+      enabled: true,
+      config: cfg,
+      template: tmpl,
+      reason: `执行端 [${workerId}] 的${docType === 'cert' ? '证书' : '装箱清单'}模板 [${tmpl.filename}] 尚未配置保存根目录 (4.3)`
+    };
+  }
+  if (cfg.check_status !== 'PASSED') {
+    return {
+      ok: false,
+      enabled: true,
+      config: cfg,
+      template: tmpl,
+      reason: `执行端 [${workerId}] 的${docType === 'cert' ? '证书' : '装箱清单'}模板 [${tmpl.filename}] 的保存目录尚未检查通过（当前状态: ${cfg.check_status}，原因: ${cfg.check_message || '待检查'}）！(DIR-0${docType === 'cert' ? 6 : 7})`
+    };
+  }
+  const authCheck = isPathInWorkerAllowedPathsDetailed(workerId, cfg.root_dir, { requireWrite: true });
+  if (!authCheck.allowed) {
+    const docLabel = docType === 'cert' ? '证书' : '装箱清单';
+    return {
+      ok: false,
+      enabled: true,
+      config: cfg,
+      template: tmpl,
+      reason: `${docLabel}保存根目录 [${cfg.root_dir}] 未获写入授权：${authCheck.reason}`
+    };
+  }
+  return { ok: true, enabled: true, config: cfg, template: tmpl, authState: authCheck.authState };
+}
+
+// Helper: 计算某终端某组合配置在业务路径授权变更未确认时是否可提交 (WC-18)
+function getPendingAuthorizationSync(workerId) {
+  return db.prepare("SELECT root_path, version, sync_status FROM worker_allowed_paths WHERE worker_id = ? AND sync_status != 'SYNCED'").all(workerId);
+}
+
+// Helper: 校验子文件夹规则求值并生成最终保存目录 (DIR-13, 4.3)
+function buildTargetDirectory({ cfg, deviceSn, body }) {
+  const rootDir = cfg.root_dir;
+  let subfolderName = '';
+  let targetDir = rootDir;
+  if (cfg.save_mode === 'subfolder') {
+    const ruleKey = cfg.subfolder_rule || 'deviceSn';
+    const rawVal = ruleKey === 'deviceSn' ? String(deviceSn || '').trim() : String((body || {})[ruleKey] || '').trim();
+    if (!rawVal) {
+      return { error: `子文件夹规则字段 [${ruleKey}] 缺失或为空，无法建立子文件夹！(4.3)` };
+    }
+    if (!isSafePathSegment(rawVal)) {
+      return { error: `子文件夹名称包含非法字符或试图跳出根目录 [${rawVal}]！(DIR-13)` };
+    }
+    subfolderName = rawVal;
+    targetDir = path.join(rootDir, subfolderName);
+    if (!isSubpath(rootDir, targetDir)) {
+      return { error: `安全拦截：子文件夹路径试图跳出根目录范围！(DIR-13)` };
+    }
+  }
+  return { rootDir, subfolderName, targetDir };
+}
+
+// Helper: 判断某终端已发布且已启用的模板组合 (4.3, 5, WC-12)
+// 说明：证书/清单任一被启用即构成一种可提交组合；两者都未启用时返回 null
+// （即使终端只存在“已配置但被停用”的记录，也返回可下载组合，以便提交时明确提示“已停用”，
+//   绝不静默降级为另一种组合）
+function resolveWorkerEnabledCombo(workerId, certTmpl, packTmpl) {
+  const certEval = certTmpl ? evaluateWorkerTemplateFor(workerId, certTmpl, 'cert', { requireReady: false }) : { enabled: false };
+  const packEval = packTmpl ? evaluateWorkerTemplateFor(workerId, packTmpl, 'packing', { requireReady: false }) : { enabled: false };
+  const certPresent = Boolean(certTmpl) && (certEval.enabled || Boolean(certEval.config));
+  const packPresent = Boolean(packTmpl) && (packEval.enabled || Boolean(packEval.config));
+  const certEnabled = Boolean(certEval.enabled);
+  const packEnabled = Boolean(packEval.enabled);
+
+  let combo = null;
+  if (certEnabled && packEnabled) combo = 'cert_and_packing';
+  else if (certEnabled) combo = 'cert_only';
+  else if (packEnabled) combo = 'packing_only';
+
+  return { combo, certEnabled, packEnabled, certPresent, packPresent, certEval, packEval };
+}
+
 // ==================== TASK SUBMISSION & DEDUPLICATION ====================
+/**
+ * 证书测量表区域一致性校验（整改 3.2）。
+ * 发布前必须确认：所有列属于同一区域；列键/位置不冲突；行数与模板数据区一致；
+ * 单值字段没有混进测量列；默认数据没有被截断。
+ */
+function validateCertificateTableConfig(mappings, docItems) {
+  const errors = [];
+  const tc = mappings && mappings.tableConfig;
+  const testPoints = Array.isArray(mappings && mappings.testPoints) ? mappings.testPoints : [];
+  if (!tc) return ['缺少测量表格区配置 (tableConfig)'];
+
+  const columns = Array.isArray(tc.columns) ? tc.columns : [];
+  if (columns.length === 0) return ['测量表格区没有任何列'];
+
+  const tableIdxs = new Set(columns.map(c => c.tableIdx === undefined ? tc.tableIdx : c.tableIdx));
+  if (tableIdxs.size > 1) errors.push('测量列分布在多个表格中，必须属于同一个测量区域');
+
+  const colIdxSeen = new Set();
+  for (const col of columns) {
+    const colIdx = typeof col.colIdx === 'number' ? col.colIdx : null;
+    if (colIdx === null) {
+      errors.push(`列 [${col.label || col.key}] 缺少真实列坐标`);
+      continue;
+    }
+    if (colIdxSeen.has(colIdx)) errors.push(`列坐标 ${colIdx} 被多列重复使用`);
+    colIdxSeen.add(colIdx);
+  }
+
+  const startRow = tc.startRow;
+  const endRow = tc.endRow;
+  if (typeof startRow !== 'number' || typeof endRow !== 'number' || endRow < startRow) {
+    errors.push('测量数据行范围无效');
+  } else {
+    const templateRowCount = endRow - startRow + 1;
+    if (testPoints.length !== templateRowCount) {
+      errors.push(`测量数据行数 (${testPoints.length}) 与模板数据区行数 (${templateRowCount}) 不一致，证书测量表固定行数不得增删`);
+    }
+  }
+
+  // 每行必须按稳定列键给出对应值，且维度与列数一致
+  testPoints.forEach((tp, idx) => {
+    const values = (tp && tp.values) || {};
+    for (const col of columns) {
+      const hasValue = Object.prototype.hasOwnProperty.call(values, col.key);
+      if (!hasValue) {
+        errors.push(`第 ${idx + 1} 行缺少列 [${col.label || col.key}] 的模板默认值`);
+        break;
+      }
+    }
+  });
+
+  // 单值字段不得同时作为测量列出现
+  const singleFields = Array.isArray(mappings.singleFields) ? mappings.singleFields : [];
+  for (const sf of singleFields) {
+    if (sf && sf.valueLocation && sf.valueLocation.type === 'table_column') {
+      errors.push(`单值字段 [${sf.label}] 被绑定成整列测量数据`);
+    }
+  }
+
+  // 若解析产物可用，校验列确实属于检测到的测量区域
+  if (Array.isArray(docItems) && docItems.length > 0) {
+    const regions = detectTableRegions(docItems, { type: 'cert' });
+    const region = regions.find(r => r.kind === 'measurement');
+    if (region && typeof tc.tableIdx === 'number' && tc.tableIdx !== region.tableIdx) {
+      errors.push('测量列绑定的表格与模板检测到的测量区域不一致');
+    }
+  }
+
+  return errors;
+}
+
+function parseTemplateMappings(tmpl) {
+  if (!tmpl) return {};
+  if (tmpl.mappings && typeof tmpl.mappings === 'object') return tmpl.mappings;
+  try {
+    return typeof tmpl.field_mappings === 'string' ? JSON.parse(tmpl.field_mappings || '{}') : (tmpl.field_mappings || {});
+  } catch (e) {
+    return {};
+  }
+}
+
+/**
+ * 校验提交的证书测量数据维度必须与受理时发布快照完全一致（整改 3.3）。
+ * 绕过手机界面少一行、多一行、缺列、未知列都必须拒绝。
+ */
+function validateSubmittedTestPoints(testPoints, mappings) {
+  const errors = [];
+  const tc = mappings && mappings.tableConfig;
+  const templatePoints = Array.isArray(mappings && mappings.testPoints) ? mappings.testPoints : [];
+  if (!tc || !Array.isArray(tc.columns) || tc.columns.length === 0) {
+    return { errors: ['证书模板缺少有效测量表格区，无法校验提交数据'], columns: [] };
+  }
+  const columns = tc.columns;
+
+  if (!Array.isArray(testPoints) || testPoints.length === 0) {
+    return { errors: ['提交的测量数据为空，无法生成证书'], columns };
+  }
+  if (templatePoints.length > 0 && testPoints.length !== templatePoints.length) {
+    errors.push(`测量数据行数 (${testPoints.length}) 与模板固定行数 (${templatePoints.length}) 不一致`);
+  }
+
+  const knownKeys = new Set();
+  columns.forEach(col => {
+    if (col.key) knownKeys.add(String(col.key));
+    knownKeys.add(String(col.colIdx));
+    if (col.label) knownKeys.add(String(col.label));
+  });
+
+  testPoints.forEach((tp, idx) => {
+    const values = (tp && tp.values) || {};
+    const unknown = Object.keys(values).filter(k => !knownKeys.has(String(k)));
+    if (unknown.length > 0) {
+      errors.push(`第 ${idx + 1} 行包含模板中不存在的测量列: ${unknown.join(', ')}`);
+    }
+    for (const col of columns) {
+      const hasKey = Object.prototype.hasOwnProperty.call(values, col.key);
+      const hasIdx = Object.prototype.hasOwnProperty.call(values, String(col.colIdx));
+      if (!hasKey && !hasIdx) {
+        errors.push(`第 ${idx + 1} 行缺少测量列 [${col.label || col.key}]`);
+      }
+    }
+  });
+
+  return { errors, columns };
+}
+
+/**
+ * 校验提交的装箱清单数据与模板真实行角色（整改 3.4）。
+ *
+ * 注意：模板中的保护行（主设备/传感器/参考仪器）由执行端按模板与表单参数写入，
+ * 手机在“仅证书”组合下可能不提交清单明细，因此“提交数据里看不到保护行”本身不是错误；
+ * 只有“提交数据把保护行改名/删除”或“模板没有传感器却凭空提交传感器行”才拒绝。
+ */
+function validateSubmittedPackingItems(packingItems, mappings) {
+  const errors = [];
+  const templateItems = Array.isArray(mappings && mappings.packingItems) ? mappings.packingItems : [];
+  if (templateItems.length === 0) return errors;
+  if (!Array.isArray(packingItems)) return errors;
+
+  // 主设备行是模板的固定行，提交数据中删除/改名即拒绝（整改 3.4, P09）
+  const templateMain = templateItems.find(it => it && (it.role === 'mainDevice' || String(it.name || '').trim() === '主设备'));
+  if (templateMain) {
+    const stillPresent = packingItems.some(pi => pi && (pi.role === 'mainDevice' || String(pi.name || '').trim() === '主设备'));
+    if (!stillPresent) {
+      errors.push(`保护行 [${templateMain.name || '主设备'}] 不允许删除或改名`);
+    }
+  }
+
+  // 模板没有传感器行时，不允许凭空提交传感器行
+  const templateHasSensor = templateItems.some(it => it && (it.role === 'sensor' || String(it.name || '').includes('传感器')));
+  if (!templateHasSensor) {
+    const fabricated = packingItems.find(pi => pi && (pi.role === 'sensor' || String(pi.name || '').includes('传感器')));
+    if (fabricated) errors.push('该模板没有传感器行，提交数据中不得出现传感器行');
+  }
+
+  return errors;
+}
+
 app.post('/api/tasks/submit', (req, res) => {
-  const {
-    reqId,
-    clientId,
-    clientName,
-    workerId,
-    model,
-    bundleId,
-    docCombo,
-    deviceSn,
-    salesPerson,
-    shippingLocation = '南京',
-    sensorModel,
-    sensorSn,
-    hasPump = true,
-    certDate,
-    testPoints = [],
-    packingItems = [],
-    overwriteConfirmed = false
-  } = req.body;
+  // 表单字段兼容：手机端历史上可能提交下划线命名，统一归一化，避免保存目录快照缺失字段 (J04)
+  const formBody = { ...req.body };
+  const aliasPairs = [
+    ['deviceSn', 'device_sn'], ['salesPerson', 'sales_person'], ['shippingLocation', 'shipping_location'],
+    ['sensorModel', 'sensor_model'], ['sensorSn', 'sensor_sn'], ['hasPump', 'has_pump'], ['certDate', 'cert_date'],
+    ['packingItems', 'packing_items'], ['testPoints', 'test_points']
+  ];
+  for (const [camel, snake] of aliasPairs) {
+    if ((formBody[camel] === undefined || formBody[camel] === '') && formBody[snake] !== undefined) formBody[camel] = formBody[snake];
+  }
+
+  const reqId = formBody.reqId;
+  const clientId = formBody.clientId;
+  const clientName = formBody.clientName;
+  const workerId = formBody.workerId;
+  const model = formBody.model;
+  const bundleId = formBody.bundleId;
+  const docCombo = formBody.docCombo;
+  const deviceSn = formBody.deviceSn;
+  const salesPerson = formBody.salesPerson;
+  const shippingLocation = formBody.shippingLocation || '南京';
+  const sensorModel = formBody.sensorModel;
+  const sensorSn = formBody.sensorSn;
+  const hasPump = formBody.hasPump === undefined ? true : formBody.hasPump;
+  const certDate = formBody.certDate;
+  const testPoints = formBody.testPoints || [];
+  const packingItems = formBody.packingItems || [];
+  const overwriteConfirmed = Boolean(formBody.overwriteConfirmed);
 
   if (!reqId || !clientId || !model || !deviceSn) {
     return res.status(400).json({ error: 'Missing required task submission fields' });
@@ -2035,144 +2978,144 @@ app.post('/api/tasks/submit', (req, res) => {
     bundle = db.prepare('SELECT * FROM published_bundles WHERE model_id = ? AND status = \'PUBLISHED\'').get(resolvedModel.modelId);
   }
 
-  // Determine doc combo (cert_and_packing, cert_only, packing_only)
-  const effectiveCombo = docCombo || (bundle ? bundle.doc_combo : (resolvedModel.displayName === 'POA200' ? 'cert_and_packing' : 'cert_only'));
+  // Determine doc combo: 以本终端实际启用的模板为准，服务端权威校验组合，拒绝手机伪造 docCombo (5, WC-15)
+  const certTmplForCombo = resolveModelTemplates({ bundle, model, displayName: resolvedModel.displayName, fileType: 'cert' });
+  const packTmplForCombo = resolveModelTemplates({ bundle, model, displayName: resolvedModel.displayName, fileType: 'packing' });
+  const enabledCombo = resolveWorkerEnabledCombo(workerId, certTmplForCombo, packTmplForCombo);
+
+  if (!enabledCombo.certEnabled && !enabledCombo.packEnabled) {
+    // 终端确实持有该型号模板配置，但已被停用：必须明确提示“已停用/刷新”，不得静默降级 (WC-14)
+    const disabledReasons = [enabledCombo.certEval, enabledCombo.packEval]
+      .filter(ev => ev && ev.disabled)
+      .map(ev => ev.reason);
+    if (disabledReasons.length > 0) {
+      return res.status(400).json({ error: disabledReasons.join('；') });
+    }
+    // 完全未配置：逐份文档说明缺少哪一项保存目录配置，避免笼统报错 (DIR-06, DIR-07)
+    const missingConfigReasons = [enabledCombo.certEval, enabledCombo.packEval]
+      .filter(ev => ev && ev.reason)
+      .map(ev => ev.reason);
+    if (missingConfigReasons.length > 0) {
+      return res.status(400).json({ error: missingConfigReasons.join('；'), combo: null });
+    }
+    return res.status(400).json({
+      error: `执行端 [${targetWorker.name || workerId}] 未启用该型号的任何模板（证书/清单均未启用），拒绝受理。请在终端详情页启用后再提交 (E03, WC-11)`
+    });
+  }
+
+  const requestedCombo = docCombo || null;
+
+  // 组合校验规则 (5, WC-12, WC-13, WC-15)：
+  //   1. 请求组合属于“已启用集合”的子集时按请求生成（同一型号下可只出证书或只出清单）；
+  //   2. 请求包含任何“未启用/未配置”的文档时一律拒绝，并指出具体文档，绝不静默降级；
+  //   3. 未指定组合时使用已启用集合推导的完整组合。
+  if (requestedCombo) {
+    const wantsCert = requestedCombo === 'cert_and_packing' || requestedCombo === 'cert_only';
+    const wantsPacking = requestedCombo === 'cert_and_packing' || requestedCombo === 'packing_only';
+
+    if (!wantsCert && !wantsPacking) {
+      return res.status(400).json({ error: `无法识别的文档组合 [${requestedCombo}]，已拒绝 (5)` });
+    }
+
+    if (wantsCert && !enabledCombo.certEnabled) {
+      const ev = enabledCombo.certEval;
+      const detail = ev && ev.reason ? ev.reason : `执行端 [${targetWorker.name || workerId}] 未启用发货证书模板`;
+      return res.status(400).json({ error: `${detail}；请求组合 [${requestedCombo}] 中包含该文档，已拒绝且不降级为其他组合 (WC-13, WC-14)` });
+    }
+
+    if (wantsPacking && !enabledCombo.packEnabled) {
+      const ev = enabledCombo.packEval;
+      const detail = ev && ev.reason ? ev.reason : `执行端 [${targetWorker.name || workerId}] 未启用装箱清单模板`;
+      return res.status(400).json({ error: `${detail}；请求组合 [${requestedCombo}] 中包含该文档，已拒绝且不降级为其他组合 (WC-13, WC-14)` });
+    }
+  }
+
+  const effectiveCombo = requestedCombo || enabledCombo.combo;
   const createCert = effectiveCombo === 'cert_and_packing' || effectiveCombo === 'cert_only';
   const createPacking = effectiveCombo === 'cert_and_packing' || effectiveCombo === 'packing_only';
+
+  // 说明：业务路径授权是否已同步、是否已被撤销，由“模板可见性接口”和“执行端执行前校验”负责拦截
+  // （6.5：检查通过不是永久保证；6.6/WC-20：已受理任务仍须遵守当前路径权限），
+  // 受理阶段不因授权快照未同步而拒绝，避免把已受理任务与权限变更顺序耦合。
 
   // Directory Configuration & Snapshotting (DIR-06, DIR-07, DIR-13, DIR-15)
   let certDirSnapshot = null;
   let packingDirSnapshot = null;
 
   if (createCert) {
-    let certTmpl = null;
-    if (bundle && bundle.cert_template_id) {
-      certTmpl = db.prepare('SELECT * FROM templates WHERE id = ?').get(bundle.cert_template_id);
-    }
-    if (!certTmpl) {
-      certTmpl = db.prepare("SELECT * FROM templates WHERE (model = ? OR model = ?) AND type = 'cert' AND published_at IS NOT NULL").get(model, resolvedModel.displayName);
-    }
-    if (!certTmpl) {
-      certTmpl = db.prepare("SELECT * FROM templates WHERE (model = ? OR model = ?) AND type = 'cert'").get(model, resolvedModel.displayName);
-    }
+    const certTmpl = resolveModelTemplates({ bundle, model, displayName: resolvedModel.displayName, fileType: 'cert' });
 
     if (!certTmpl) {
       return res.status(400).json({ error: `未找到 ${resolvedModel.displayName} 对应的发货证书模板` });
     }
 
-    const certCfg = db.prepare('SELECT * FROM worker_save_configs WHERE worker_id = ? AND template_id = ? AND doc_type = \'cert\'').get(workerId, certTmpl.id);
-    if (!certCfg) {
-      return res.status(400).json({
-        error: `缺少执行端 [${targetWorker.name || workerId}] 的证书模板 [${certTmpl.filename}] 的保存目录配置！(DIR-06)`
-      });
+    const certEval = evaluateWorkerTemplateFor(workerId, certTmpl, 'cert', { requireReady: true });
+    if (!certEval.ok) {
+      return res.status(400).json({ error: certEval.reason, docType: 'cert', enabled: certEval.enabled });
     }
-    if (!certCfg.is_enabled) {
-      return res.status(400).json({
-        error: `该模板已被管理员在执行端停用，请刷新页面重新获取可用模板 (WC-14)`
-      });
-    }
-    if (certCfg.check_status !== 'PASSED') {
-      return res.status(400).json({
-        error: `执行端 [${targetWorker.name || workerId}] 的证书模板 [${certTmpl.filename}] 的保存目录尚未检查通过（当前状态: ${certCfg.check_status}，原因: ${certCfg.check_message || '待检查'}）！(DIR-06)`
-      });
-    }
-    const certAuth = isPathInWorkerAllowedPaths(workerId, certCfg.root_dir, true);
-    if (!certAuth.allowed) {
-      return res.status(400).json({ error: certAuth.reason });
-    }
-    let targetDir = certCfg.root_dir;
-    let subfolderName = '';
-    if (certCfg.save_mode === 'subfolder') {
-      const ruleKey = certCfg.subfolder_rule || 'deviceSn';
-      const ruleVal = ruleKey === 'deviceSn' ? String(deviceSn).trim() : String(req.body[ruleKey] || '').trim();
-      if (!ruleVal) {
-        return res.status(400).json({ error: `子文件夹规则字段 [${ruleKey}] 缺失或为空，无法建立子文件夹！(DIR-13)` });
-      }
-      if (ruleVal.includes('..') || ruleVal.includes('/') || ruleVal.includes('\\') || /[<>:"|?*]/.test(ruleVal)) {
-        return res.status(400).json({ error: `子文件夹名称包含非法字符或试图跳出根目录 [${ruleVal}]！(DIR-13)` });
-      }
-      subfolderName = ruleVal;
-      targetDir = path.join(certCfg.root_dir, subfolderName);
-      const rel = path.relative(certCfg.root_dir, targetDir);
-      if (rel.startsWith('..') || (path.isAbsolute(rel) && !rel.startsWith(certCfg.root_dir))) {
-        return res.status(400).json({ error: `安全拦截：子文件夹路径试图跳出根目录范围！(DIR-13)` });
-      }
-    }
+    const certCfg = certEval.config;
+    const certDir = buildTargetDirectory({ cfg: certCfg, deviceSn, body: req.body });
+    if (certDir.error) return res.status(400).json({ error: certDir.error });
 
     certDirSnapshot = {
-      targetDir,
-      rootDir: certCfg.root_dir,
-      subfolderName,
+      targetDir: certDir.targetDir,
+      rootDir: certDir.rootDir,
+      subfolderName: certDir.subfolderName,
       configId: certCfg.id,
       version: certCfg.version
     };
   }
 
   if (createPacking) {
-    let packTmpl = null;
-    if (bundle && bundle.packing_template_id) {
-      packTmpl = db.prepare('SELECT * FROM templates WHERE id = ?').get(bundle.packing_template_id);
-    }
-    if (!packTmpl) {
-      packTmpl = db.prepare("SELECT * FROM templates WHERE (model = ? OR model = ?) AND type = 'packing' AND published_at IS NOT NULL").get(model, resolvedModel.displayName);
-    }
-    if (!packTmpl) {
-      packTmpl = db.prepare("SELECT * FROM templates WHERE (model = ? OR model = ?) AND type = 'packing'").get(model, resolvedModel.displayName);
-    }
-    if (!packTmpl && (resolvedModel.displayName.toUpperCase().includes('POA') || model === '3500')) {
-      packTmpl = db.prepare("SELECT * FROM templates WHERE model = 'POA200' AND type = 'packing'").get();
-    }
+    const packTmpl = resolveModelTemplates({ bundle, model, displayName: resolvedModel.displayName, fileType: 'packing' });
 
     if (!packTmpl) {
       return res.status(400).json({ error: `未找到 ${resolvedModel.displayName} 对应的装箱清单模板` });
     }
 
-    const packCfg = db.prepare('SELECT * FROM worker_save_configs WHERE worker_id = ? AND template_id = ? AND doc_type = \'packing\'').get(workerId, packTmpl.id);
-    if (!packCfg) {
-      return res.status(400).json({
-        error: `缺少执行端 [${targetWorker.name || workerId}] 的装箱清单模板 [${packTmpl.filename}] 的保存目录配置！(DIR-07)`
-      });
+    const packEval = evaluateWorkerTemplateFor(workerId, packTmpl, 'packing', { requireReady: true });
+    if (!packEval.ok) {
+      return res.status(400).json({ error: packEval.reason, docType: 'packing', enabled: packEval.enabled });
     }
-    if (!packCfg.is_enabled) {
-      return res.status(400).json({
-        error: `该模板已被管理员在执行端停用，请刷新页面重新获取可用模板 (WC-14)`
-      });
-    }
-    if (packCfg.check_status !== 'PASSED') {
-      return res.status(400).json({
-        error: `执行端 [${targetWorker.name || workerId}] 的装箱清单模板 [${packTmpl.filename}] 的保存目录尚未检查通过（当前状态: ${packCfg.check_status}，原因: ${packCfg.check_message || '待检查'}）！(DIR-07)`
-      });
-    }
-    const packAuth = isPathInWorkerAllowedPaths(workerId, packCfg.root_dir, true);
-    if (!packAuth.allowed) {
-      return res.status(400).json({ error: packAuth.reason });
-    }
-    let targetDir = packCfg.root_dir;
-    let subfolderName = '';
-    if (packCfg.save_mode === 'subfolder') {
-      const ruleKey = packCfg.subfolder_rule || 'deviceSn';
-      const ruleVal = ruleKey === 'deviceSn' ? String(deviceSn).trim() : String(req.body[ruleKey] || '').trim();
-      if (!ruleVal) {
-        return res.status(400).json({ error: `子文件夹规则字段 [${ruleKey}] 缺失或为空，无法建立子文件夹！(DIR-13)` });
-      }
-      if (ruleVal.includes('..') || ruleVal.includes('/') || ruleVal.includes('\\') || /[<>:"|?*]/.test(ruleVal)) {
-        return res.status(400).json({ error: `子文件夹名称包含非法字符或试图跳出根目录 [${ruleVal}]！(DIR-13)` });
-      }
-      subfolderName = ruleVal;
-      targetDir = path.join(packCfg.root_dir, subfolderName);
-      const rel = path.relative(packCfg.root_dir, targetDir);
-      if (rel.startsWith('..') || (path.isAbsolute(rel) && !rel.startsWith(packCfg.root_dir))) {
-        return res.status(400).json({ error: `安全拦截：子文件夹路径试图跳出根目录范围！(DIR-13)` });
-      }
-    }
+    const packCfg = packEval.config;
+    const packDir = buildTargetDirectory({ cfg: packCfg, deviceSn, body: req.body });
+    if (packDir.error) return res.status(400).json({ error: packDir.error });
 
     packingDirSnapshot = {
-      targetDir,
-      rootDir: packCfg.root_dir,
-      subfolderName,
+      targetDir: packDir.targetDir,
+      rootDir: packDir.rootDir,
+      subfolderName: packDir.subfolderName,
       configId: packCfg.id,
       version: packCfg.version
     };
+  }
+
+  // 后端权威校验提交数据维度：绕过手机界面少一行/多一行/缺列/未知列一律拒绝 (整改 3.3, M12)
+  // 仅在模板已发布有效测量表格区时生效；缺少表格区配置的模板由“未绑定/未发布”流程拦截。
+  if (createCert) {
+    const certTmplForDimension = resolveModelTemplates({ bundle, model, displayName: resolvedModel.displayName, fileType: 'cert' });
+    const certMappings = parseTemplateMappings(certTmplForDimension);
+    if (certMappings.tableConfig && Array.isArray(certMappings.tableConfig.columns) && certMappings.tableConfig.columns.length > 0) {
+      const dim = validateSubmittedTestPoints(testPoints, certMappings);
+      if (dim.errors.length > 0) {
+        return res.status(400).json({
+          error: `证书测量数据维度校验失败：${dim.errors.join('；')}`,
+          errorCode: 'DIMENSION_MISMATCH',
+          expectedColumns: dim.columns.map(c => ({ key: c.key, label: c.label, colIdx: c.colIdx }))
+        });
+      }
+    }
+  }
+
+  if (createPacking) {
+    const packTmplForDimension = resolveModelTemplates({ bundle, model, displayName: resolvedModel.displayName, fileType: 'packing' });
+    const packMappings = parseTemplateMappings(packTmplForDimension);
+    if (Array.isArray(packMappings.packingItems) && packMappings.packingItems.length > 0) {
+      const packErrors = validateSubmittedPackingItems(packingItems, packMappings);
+      if (packErrors.length > 0) {
+        return res.status(400).json({ error: `装箱清单数据校验失败：${packErrors.join('；')}`, errorCode: 'PACKING_DIMENSION_MISMATCH' });
+      }
+    }
   }
 
   const ambientTemp = (req.body.ambientTemp !== undefined && req.body.ambientTemp !== null && req.body.ambientTemp !== '') ? String(req.body.ambientTemp) : '22.1';
@@ -2347,14 +3290,17 @@ app.post('/api/tasks/:id/retry', (req, res) => {
 });
 
 // ==================== WORKER TASK DISTRIBUTION & RETURN ====================
-app.get('/api/worker/tasks/pending', (req, res) => {
-  const { workerId = 'worker-local' } = req.query;
+app.get('/api/worker/tasks/pending', requireWorkerAuth, (req, res) => {
+  const { workerId = '' } = req.query;
+  if (!workerId) return res.status(400).json({ error: '缺少 workerId，拒绝领取任务' });
 
   db.exec('BEGIN IMMEDIATE');
   try {
+    // 多执行端归属（REV183-11 / MW17）：只领取派给本终端的任务。
+    // 不得再用 'worker-local' / 'worker-e2e' 兜底抢单——否则任一终端都能把别人的任务领走。
     const task = db.prepare(`
       SELECT * FROM tasks
-      WHERE status = 'QUEUED' AND (worker_id = ? OR worker_id IS NULL OR worker_id = 'worker-local' OR worker_id = 'worker-e2e')
+      WHERE status = 'QUEUED' AND worker_id = ?
       ORDER BY id ASC LIMIT 1
     `).get(workerId);
 
@@ -2369,6 +3315,9 @@ app.get('/api/worker/tasks/pending', (req, res) => {
       if (!bundle && task.model_id) {
         bundle = db.prepare('SELECT * FROM published_bundles WHERE model_id = ?').get(task.model_id);
       }
+
+      // 修复：此前遗漏型号别名解析，导致 templateId 回退分支抛 ReferenceError 并被吞掉，任务永远派发不出去
+      const taskModel = resolveModelAlias(task.model);
 
       const files = db.prepare('SELECT * FROM task_files WHERE task_id = ?').all(task.id).map(f => {
         let templateId = null;
@@ -2397,10 +3346,8 @@ app.get('/api/worker/tasks/pending', (req, res) => {
           }
         }
         if (!templateId) {
-          let tmpl = db.prepare("SELECT * FROM templates WHERE (model = ? OR model = ?) AND type = ? AND published_at IS NOT NULL").get(task.model, resolvedModel.displayName, f.file_type);
-          if (!tmpl && f.file_type === 'packing' && (resolvedModel.displayName.toUpperCase().includes('POA') || task.model === '3500')) {
-            tmpl = db.prepare("SELECT * FROM templates WHERE model = 'POA200' AND type = 'packing' AND published_at IS NOT NULL").get();
-          }
+          const tmpl = db.prepare("SELECT * FROM templates WHERE (model = ? OR model = ?) AND type = ? AND published_at IS NOT NULL ORDER BY published_at DESC")
+            .get(task.model, taskModel.displayName, f.file_type);
           if (tmpl) {
             templateId = tmpl.id;
             fieldMappings = JSON.parse(tmpl.draft_mappings || tmpl.field_mappings || '{}');
@@ -2427,7 +3374,7 @@ app.get('/api/worker/tasks/pending', (req, res) => {
   }
 });
 
-app.post('/api/worker/tasks/:id/file-failed', (req, res) => {
+app.post('/api/worker/tasks/:id/file-failed', requireWorkerAuth, (req, res) => {
   const taskId = req.params.id;
   const { fileType, errorMsg } = req.body;
 
@@ -2437,7 +3384,7 @@ app.post('/api/worker/tasks/:id/file-failed', (req, res) => {
 
   const files = db.prepare('SELECT * FROM task_files WHERE task_id = ?').all(taskId);
   const anySuccess = files.some(f => f.status === 'PREVIEW_READY' || f.status === 'PRINTED');
-  const allFinished = files.every(f => f.status === 'PREVIEW_READY' || f.status === 'PRINTED' || f.status === 'FAILED');
+  const allFinished = files.every(f => ['PREVIEW_READY', 'PREVIEW_FAILED', 'PRINTED', 'FAILED'].includes(f.status));
 
   if (allFinished && anySuccess) {
     // DIR-20: 证书与清单分别记录状态；其中一份失败时，不得将整个任务显示为全部成功。
@@ -2450,7 +3397,7 @@ app.post('/api/worker/tasks/:id/file-failed', (req, res) => {
   res.json({ success: true, taskId, fileType });
 });
 
-app.post('/api/worker/tasks/:id/file-returned', upload.single('wordFile'), (req, res) => {
+app.post('/api/worker/tasks/:id/file-returned', requireWorkerAuth, upload.single('wordFile'), (req, res) => {
   const taskId = req.params.id;
   const { fileType, officialFilename, sha256, workerFilePath } = req.body;
 
@@ -2460,30 +3407,49 @@ app.post('/api/worker/tasks/:id/file-returned', upload.single('wordFile'), (req,
   fs.renameSync(req.file.path, destPath);
 
   const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId);
-  let previews = [];
+
+  // 预览基于本任务实际生成并返回的 Word 文件转换；失败必须如实标记，不得伪造就绪 (整改 A.2/A.3)
+  // 分阶段：Word→PDF、PDF→逐页图片；任一阶段失败都不算就绪 (PV05)
+  let previewPayload = null;
+  let previewError = null;
   try {
-    previews = generateDocumentPreview(destPath, previewDir, `${taskId}_${fileType}`, {
-      task,
+    previewPayload = generateDocumentPreview({
+      sourcePath: destPath,
+      previewDir,
+      taskId,
       fileType,
-      officialFilename
+      force: false
     });
   } catch (err) {
-    console.error('Preview error:', err);
+    previewError = err.message;
+    console.error(`[Preview] task ${taskId} ${fileType} 预览生成失败(阶段 ${err.stage || 'unknown'}):`, err.message);
   }
+
+  const fileStatus = previewError ? 'PREVIEW_FAILED' : 'PREVIEW_READY';
+  const previewImagesJson = previewPayload ? JSON.stringify(previewPayload.pageUrls) : JSON.stringify([]);
 
   db.prepare(`
     UPDATE task_files
-    SET server_filepath = ?, sha256 = ?, preview_images = ?, status = 'PREVIEW_READY', worker_filepath = ?
+    SET server_filepath = ?, sha256 = ?, preview_images = ?, status = ?, error_msg = ?, worker_filepath = ?
     WHERE task_id = ? AND file_type = ?
-  `).run(destPath, sha256 || getFileSha256(destPath), JSON.stringify(previews), workerFilePath || null, taskId, fileType);
+  `).run(
+    destPath,
+    sha256 || getFileSha256(destPath),
+    previewImagesJson,
+    fileStatus,
+    previewError,
+    workerFilePath || null,
+    taskId,
+    fileType
+  );
 
   const files = db.prepare('SELECT * FROM task_files WHERE task_id = ?').all(taskId);
-  const anyFailed = files.some(f => f.status === 'FAILED');
-  const allFinished = files.every(f => f.status === 'PREVIEW_READY' || f.status === 'PRINTED' || f.status === 'FAILED');
+  const anyFailed = files.some(f => f.status === 'FAILED' || f.status === 'PREVIEW_FAILED');
+  const allFinished = files.every(f => ['PREVIEW_READY', 'PREVIEW_FAILED', 'PRINTED', 'FAILED'].includes(f.status));
 
   if (allFinished) {
     if (anyFailed) {
-      // DIR-20: 证书与清单分别记录状态；其中一份失败时，不得将整个任务显示为全部成功。
+      // DIR-20：证书与清单分别记录状态；其中一份失败时，不得将整个任务显示为全部成功。
       db.prepare("UPDATE tasks SET status = 'PARTIAL_SUCCESS', completed_at = ? WHERE id = ?").run(new Date().toISOString(), taskId);
     } else {
       db.prepare("UPDATE tasks SET status = 'SUCCESS', completed_at = ? WHERE id = ?").run(new Date().toISOString(), taskId);
@@ -2492,52 +3458,454 @@ app.post('/api/worker/tasks/:id/file-returned', upload.single('wordFile'), (req,
     db.prepare("UPDATE tasks SET status = 'IN_PROGRESS' WHERE id = ?").run(taskId);
   }
 
-  logAudit(null, 'WORKER', 'WorkerService', 'FILE_RETURNED', { taskId, fileType, officialFilename, previews });
-  res.json({ success: true, taskId, fileType, previews });
+  logAudit(null, 'WORKER', 'WorkerService', 'FILE_RETURNED', {
+    taskId, fileType, officialFilename, fileStatus, previewError,
+    previewPages: previewPayload ? previewPayload.pages : null,
+    previewEngine: previewPayload ? previewPayload.engine : null,
+    previewImageEngine: previewPayload ? previewPayload.imageEngine : null
+  });
+
+  res.json({
+    success: true,
+    taskId,
+    fileType,
+    fileStatus,
+    previewImages: previewPayload ? previewPayload.pageUrls : [],
+    previewUrl: previewPayload ? previewPayload.pdfUrl : null,
+    previewError,
+    previewPages: previewPayload ? previewPayload.pages : null,
+    previewEngine: previewPayload ? previewPayload.engine : null,
+    previewImageEngine: previewPayload ? previewPayload.imageEngine : null
+  });
 });
 
+/**
+ * 仅重试预览：不重新生成原文档、不再次打印 (整改 A.4)
+ */
+app.post('/api/tasks/:id/files/:fileType/retry-preview', async (req, res) => {
+  const { id, fileType } = req.params;
+  const taskFile = db.prepare('SELECT * FROM task_files WHERE task_id = ? AND file_type = ?').get(id, fileType);
+  if (!taskFile) return res.status(404).json({ error: '未找到对应的文件记录' });
+
+  if (!taskFile.server_filepath || !fs.existsSync(taskFile.server_filepath)) {
+    return res.status(400).json({
+      error: '原 Word 文档不存在，无法重试预览。请重新生成该文档。',
+      status: taskFile.status
+    });
+  }
+
+  // 仅重做失败的那一阶段（PV04/PV05）：
+  //  - 没有有效 PDF → 只重做 Word→PDF（下一阶段随之进行）
+  //  - 已有有效 PDF → 只重做 PDF→页图，不重新转换、不重新生成 Word
+  const pdfPath = getPreviewPdfPath(previewDir, id, fileType);
+  const pdfUsable = isValidPdf(pdfPath)
+    && fs.existsSync(pdfPath)
+    && fs.statSync(pdfPath).mtimeMs >= fs.statSync(taskFile.server_filepath).mtimeMs;
+  const forceStage = pdfUsable ? 'images' : 'pdf';
+  if (forceStage === 'images') {
+    // 只清理页图，保留有效 PDF
+    const pageDir = getPreviewPageDir(previewDir, id, fileType);
+    if (fs.existsSync(pageDir)) {
+      for (const f of fs.readdirSync(pageDir)) {
+        try { fs.unlinkSync(path.join(pageDir, f)); } catch (e) {}
+      }
+    }
+  } else {
+    clearDocumentPreview(previewDir, id, fileType);
+  }
+
+  try {
+    const preview = generateDocumentPreview({
+      sourcePath: taskFile.server_filepath,
+      previewDir,
+      taskId: id,
+      fileType,
+      forceStage
+    });
+    db.prepare(`
+      UPDATE task_files SET preview_images = ?, status = 'PREVIEW_READY', error_msg = NULL
+      WHERE task_id = ? AND file_type = ?
+    `).run(JSON.stringify(preview.pageUrls), id, fileType);
+    reconcileTaskStatus(id);
+    logAudit(null, 'WORKER', 'WorkerService', 'RETRY_PREVIEW', {
+      taskId: id, fileType, retryStage: forceStage, pages: preview.pages, imageEngine: preview.imageEngine
+    });
+    res.json({
+      success: true,
+      taskId: id,
+      fileType,
+      retryStage: forceStage,
+      previewUrl: preview.pdfUrl,
+      previewImages: preview.pageUrls,
+      pages: preview.pages,
+      engine: preview.engine,
+      imageEngine: preview.imageEngine
+    });
+  } catch (err) {
+    db.prepare(`
+      UPDATE task_files SET status = 'PREVIEW_FAILED', error_msg = ?, preview_images = '[]'
+      WHERE task_id = ? AND file_type = ?
+    `).run(err.message, id, fileType);
+    reconcileTaskStatus(id);
+    res.status(500).json({
+      success: false,
+      error: err.message,
+      failedStage: err.stage || forceStage,
+      status: 'PREVIEW_FAILED'
+    });
+  }
+});
+
+/** 转换与页图渲染能力自检：能启动 Word 不代表能导出 PDF，如实报告检测到的组件与原因 (3.2) */
+app.get('/api/preview/capabilities', (req, res) => {
+  const caps = getConversionCapabilities();
+  res.json({
+    success: true,
+    ...caps,
+    wordToPdfReady: caps.wordToPdf.engines.length > 0,
+    pdfToImageReady: caps.pdfToImage.engines.length > 0,
+    notice: '这里只报告检测到的组件；真实可用性以实际转换结果为准。'
+  });
+});
+
+/** 依据分文件状态重新汇总任务状态（一份成功一份失败不得报全部成功） */
+function reconcileTaskStatus(taskId) {
+  const files = db.prepare('SELECT * FROM task_files WHERE task_id = ?').all(taskId);
+  const anyFailed = files.some(f => f.status === 'FAILED' || f.status === 'PREVIEW_FAILED');
+  const allFinished = files.every(f => ['PREVIEW_READY', 'PREVIEW_FAILED', 'PRINTED', 'FAILED'].includes(f.status));
+  if (!allFinished) {
+    db.prepare("UPDATE tasks SET status = 'IN_PROGRESS' WHERE id = ?").run(taskId);
+    return;
+  }
+  if (anyFailed) {
+    db.prepare("UPDATE tasks SET status = 'PARTIAL_SUCCESS', completed_at = ? WHERE id = ?").run(new Date().toISOString(), taskId);
+  } else {
+    db.prepare("UPDATE tasks SET status = 'SUCCESS', completed_at = ? WHERE id = ?").run(new Date().toISOString(), taskId);
+  }
+}
+
 // ==================== PRINT JOBS ====================
+/**
+ * 打印状态机（整改 4.3）
+ *   QUEUED              手机已提交，等待执行端领取
+ *   CLAIMED             执行端已原子领取
+ *   DISPATCHING         正在调用打印能力
+ *   SUBMITTED_TO_SPOOLER 已确认进入 Windows 打印队列（可带队列作业号）
+ *   FAILED              明确失败（文件不存在/未授权/命令非零退出等）
+ *   RESULT_UNKNOWN      已调用但结果无法确认（不得自动重印）
+ */
+const PRINT_JOB_FINAL_STATUSES = ['SUBMITTED_TO_SPOOLER', 'FAILED', 'RESULT_UNKNOWN'];
+
+function parseSnapshotItems(raw) {
+  try {
+    const parsed = JSON.parse(raw || '[]');
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+/** 把某个文件项的状态汇总回打印任务状态 */
+function reconcilePrintJobStatus(printJobId) {
+  const items = db.prepare('SELECT * FROM print_job_items WHERE print_job_id = ? ORDER BY id ASC').all(printJobId);
+  if (items.length === 0) return null;
+  let overall;
+  const nonFinal = items.filter(it => !PRINT_JOB_FINAL_STATUSES.includes(it.status));
+  if (nonFinal.length > 0) {
+    // 仍有文件未定案：报告推进到的最远阶段，且**进度不得回退**
+    // （已有文件进入队列后，整体不能退回“仅领取”，否则手机看到的状态会倒退）(PR13/PV05 同思路)
+    if (nonFinal.some(it => it.status === 'DISPATCHING')) {
+      overall = 'DISPATCHING';
+    } else if (items.some(it => it.status === 'SUBMITTED_TO_SPOOLER')) {
+      overall = 'SUBMITTED_TO_SPOOLER';
+    } else if (nonFinal.some(it => it.status === 'CLAIMED')) {
+      overall = 'CLAIMED';
+    } else {
+      overall = 'QUEUED';
+    }
+  } else if (items.some(it => it.status === 'RESULT_UNKNOWN')) {
+    overall = 'RESULT_UNKNOWN';
+  } else if (items.every(it => it.status === 'SUBMITTED_TO_SPOOLER')) {
+    overall = 'SUBMITTED_TO_SPOOLER';
+  } else if (items.some(it => it.status === 'SUBMITTED_TO_SPOOLER')) {
+    // 全部定案且部分成功：确定失败项不影响已进入队列的文件
+    overall = 'PARTIAL_SUBMITTED';
+  } else {
+    overall = 'FAILED';
+  }
+  const firstError = items.find(it => it.error_msg && it.error_msg.trim());
+  db.prepare('UPDATE print_jobs SET status = ?, error_msg = ?, updated_at = ? WHERE id = ?')
+    .run(overall, firstError ? firstError.error_msg : null, new Date().toISOString(), printJobId);
+  return overall;
+}
+
+function serializePrintJob(job) {
+  const items = db.prepare('SELECT * FROM print_job_items WHERE print_job_id = ? ORDER BY id ASC').all(job.id);
+  return {
+    ...job,
+    batch_items: parseSnapshotItems(job.batch_items),
+    items: items.map(it => ({
+      id: it.id,
+      taskId: it.task_id,
+      taskFileId: it.task_file_id,
+      fileType: it.file_type,
+      officialFilename: it.official_filename,
+      copies: it.copies,
+      status: it.status,
+      attempts: it.attempts,
+      windowsJobId: it.windows_job_id,
+      printerName: it.printer_name,
+      errorMsg: it.error_msg,
+      dispatchedAt: it.dispatched_at,
+      updatedAt: it.updated_at,
+      // 受理时确认的真实文件与内容版本：执行端据此校验并打印，不按文件名猜测 (PR-B04/PR14)
+      snapshotPath: it.snapshot_path,
+      sha256: it.sha256
+    })),
+    // 阶段语义提示：受理 ≠ 进入队列 ≠ 已出纸
+    stageNotice: '“已受理/已排队”仅代表系统已登记；“SUBMITTED_TO_SPOOLER”代表已确认进入 Windows 打印队列，仍不等于实际出纸；结果不确定时必须人工核对后再决定是否重印。'
+  };
+}
+
 app.post('/api/print/submit', (req, res) => {
-  const { clientId, workerId = 'worker-local', printerName = '', batchItems = [] } = req.body;
-  if (!clientId || !batchItems.length) {
-    return res.status(400).json({ error: 'clientId and batchItems required' });
+  const body = req.body || {};
+  const clientId = body.clientId;
+  const requestId = body.requestId || body.reqId || null;
+  const taskId = body.taskId;
+  const printerName = String(body.printerName || body.printerId || '').trim();
+  const batchItems = Array.isArray(body.batchItems) ? body.batchItems : [];
+
+  if (!clientId) return res.status(400).json({ error: '缺少 clientId，拒绝受理打印' });
+  if (!taskId) {
+    return res.status(400).json({
+      error: '缺少 taskId：打印必须关联已生成的真实任务文件，不能按文件名猜测 (PR-B03/PR-B04)',
+      errorCode: 'TASK_REQUIRED'
+    });
+  }
+  if (batchItems.length === 0) return res.status(400).json({ error: '缺少待打印文件清单 batchItems' });
+  if (!printerName) return res.status(400).json({ error: '缺少目标打印机，拒绝受理打印' });
+
+  // 幂等：同一 requestId 重复提交返回同一打印任务，避免重复出纸 (PR10)
+  if (requestId) {
+    const existing = db.prepare('SELECT * FROM print_jobs WHERE request_id = ?').get(requestId);
+    if (existing) {
+      return res.json({ success: true, printJobId: existing.id, status: existing.status, deduplicated: true, job: serializePrintJob(existing) });
+    }
+  }
+
+  const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId);
+  if (!task) return res.status(404).json({ error: `未找到任务 ${taskId}，拒绝受理打印` });
+
+  const workerId = String(body.workerId || task.worker_id || '').trim();
+  if (!workerId) return res.status(400).json({ error: '任务没有关联执行终端，拒绝受理打印' });
+
+  const taskFiles = db.prepare('SELECT * FROM task_files WHERE task_id = ?').all(taskId);
+  if (taskFiles.length === 0) return res.status(400).json({ error: `任务 ${taskId} 尚无生成文件，拒绝受理打印` });
+
+  // 解析真实文件与内容版本；不信任手机提供的任何路径
+  const resolved = [];
+  for (const raw of batchItems) {
+    const fileType = raw && raw.fileType ? String(raw.fileType) : '';
+    const copiesRaw = raw && raw.copies !== undefined && raw.copies !== null && raw.copies !== '' ? Number(raw.copies) : 1;
+    if (fileType !== 'cert' && fileType !== 'packing') {
+      return res.status(400).json({ error: `不支持的 fileType [${fileType || '空'}]，仅允许 cert / packing`, errorCode: 'BAD_FILETYPE' });
+    }
+    if (!Number.isInteger(copiesRaw) || copiesRaw < 1 || copiesRaw > 99) {
+      return res.status(400).json({ error: `份数非法 [${raw && raw.copies}]，必须是 1-99 的整数`, errorCode: 'BAD_COPIES' });
+    }
+    let fileRec = null;
+    if (raw && raw.fileId !== undefined && raw.fileId !== null && String(raw.fileId).trim() !== '') {
+      fileRec = taskFiles.find(f => String(f.id) === String(raw.fileId));
+      if (!fileRec) {
+        return res.status(404).json({ error: `任务 ${taskId} 中不存在 fileId [${raw.fileId}]，拒绝受理打印`, errorCode: 'FILE_NOT_FOUND' });
+      }
+      if (fileRec.file_type !== fileType) {
+        return res.status(400).json({ error: `fileId [${raw.fileId}] 的实际类型为 ${fileRec.file_type}，与请求的 ${fileType} 不一致`, errorCode: 'FILETYPE_MISMATCH' });
+      }
+    } else {
+      fileRec = taskFiles.find(f => f.file_type === fileType) || null;
+      if (!fileRec) {
+        return res.status(404).json({ error: `任务 ${taskId} 没有 ${fileType} 类型的文件，拒绝受理打印`, errorCode: 'FILE_NOT_FOUND' });
+      }
+    }
+    if (!fileRec.server_filepath) {
+      return res.status(400).json({ error: `${fileType} 文件尚未生成回传，拒绝受理打印`, errorCode: 'FILE_NOT_GENERATED' });
+    }
+    const snapshotHash = fileRec.sha256 || (fs.existsSync(fileRec.server_filepath) ? getFileSha256(fileRec.server_filepath) : null);
+    if (!snapshotHash) {
+      return res.status(400).json({ error: `${fileType} 文件内容无法确定（缺少哈希），拒绝受理打印`, errorCode: 'HASH_UNAVAILABLE' });
+    }
+    resolved.push({
+      fileId: fileRec.id,
+      fileType,
+      officialFilename: fileRec.official_filename,
+      copies: copiesRaw,
+      // 执行端优先使用它自己保存的 worker_filepath；协调端保存副本仅作回退
+      snapshotPath: fileRec.worker_filepath || fileRec.server_filepath,
+      serverPath: fileRec.server_filepath,
+      sha256: snapshotHash
+    });
   }
 
   const createdAt = new Date().toISOString();
-  const result = db.prepare(`
-    INSERT INTO print_jobs (client_id, worker_id, printer_name, batch_items, status, created_at)
-    VALUES (?, ?, ?, ?, 'QUEUED', ?)
-  `).run(clientId, workerId, printerName, JSON.stringify(batchItems), createdAt);
-
-  logAudit(null, clientId, 'User', 'SUBMIT_PRINT_JOB', { printJobId: result.lastInsertRowid, printerName, batchItems });
-  res.json({ success: true, printJobId: result.lastInsertRowid, status: 'QUEUED' });
-});
-
-app.get('/api/print/pending', (req, res) => {
-  const { workerId } = req.query;
-  let query = "SELECT * FROM print_jobs WHERE status = 'QUEUED'";
-  const params = [];
-  if (workerId) {
-    query += " AND (worker_id = ? OR worker_id = 'worker-local' OR worker_id = 'worker-e2e')";
-    params.push(workerId);
-  }
-  query += ' ORDER BY id ASC LIMIT 5';
-
-  const jobs = db.prepare(query).all(...params).map(j => ({
-    ...j,
-    batch_items: JSON.parse(j.batch_items || '[]')
+  const snapshot = resolved.map(r => ({
+    fileId: r.fileId,
+    fileType: r.fileType,
+    copies: r.copies,
+    sha256: r.sha256,
+    officialFilename: r.officialFilename
   }));
 
-  res.json(jobs);
+  const result = db.prepare(`
+    INSERT INTO print_jobs (client_id, worker_id, printer_name, batch_items, status, created_at, task_id, request_id, updated_at)
+    VALUES (?, ?, ?, ?, 'QUEUED', ?, ?, ?, ?)
+  `).run(clientId, workerId, printerName, JSON.stringify(snapshot), createdAt, taskId, requestId, createdAt);
+
+  const printJobId = result.lastInsertRowid;
+  const insertItem = db.prepare(`
+    INSERT INTO print_job_items (
+      print_job_id, task_id, task_file_id, file_type, official_filename,
+      snapshot_path, sha256, copies, status, printer_name, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'QUEUED', ?, ?, ?)
+  `);
+  for (const r of resolved) {
+    insertItem.run(printJobId, taskId, r.fileId, r.fileType, r.officialFilename, r.snapshotPath, r.sha256, r.copies, printerName, createdAt, createdAt);
+    try {
+      db.prepare('UPDATE task_files SET print_job_id = ? WHERE id = ?').run(printJobId, r.fileId);
+    } catch (e) {}
+  }
+
+  logAudit(null, clientId, 'User', 'SUBMIT_PRINT_JOB', {
+    printJobId, workerId, printerName, taskId, items: snapshot
+  });
+
+  const job = db.prepare('SELECT * FROM print_jobs WHERE id = ?').get(printJobId);
+  res.json({
+    success: true,
+    printJobId,
+    status: 'QUEUED',
+    message: '系统已受理打印请求，等待执行端领取；受理不等于已进入打印机队列或已出纸。',
+    job: serializePrintJob(job)
+  });
 });
 
-app.post('/api/print/:id/status', (req, res) => {
-  const { id } = req.params;
-  const { status, errorMsg } = req.body;
+/** 执行端查询某个打印文件项的真实保存路径（仅内部端口） */
+app.get('/api/worker/tasks/print-item/:id/file', requireWorkerAuth, (req, res) => {
+  const item = db.prepare('SELECT * FROM print_job_items WHERE id = ?').get(req.params.id);
+  if (!item) return res.status(404).json({ error: `未找到打印文件项 ${req.params.id}` });
+  res.json({
+    success: true,
+    printItemId: item.id,
+    printJobId: item.print_job_id,
+    taskId: item.task_id,
+    taskFileId: item.task_file_id,
+    fileType: item.file_type,
+    snapshotPath: item.snapshot_path,
+    workerFilePath: item.snapshot_path,
+    sha256: item.sha256,
+    copies: item.copies
+  });
+});
 
-  db.prepare('UPDATE print_jobs SET status = ? WHERE id = ?').run(status, id);
-  logAudit(null, 'WORKER', 'PrintWorker', 'UPDATE_PRINT_STATUS', { printJobId: id, status, errorMsg });
-  res.json({ success: true, printJobId: id, status });
+app.get('/api/print/pending', requireWorkerAuth, (req, res) => {
+  const { workerId } = req.query;
+  if (!workerId) return res.status(400).json({ error: '缺少 workerId，拒绝领取打印任务' });
+
+  // 原子领取：只取本终端的任务，且状态必须仍为 QUEUED，避免多终端重复领取 (PR-B06/PR11)
+  const candidates = db.prepare(
+    "SELECT id FROM print_jobs WHERE worker_id = ? AND status = 'QUEUED' ORDER BY id ASC LIMIT 5"
+  ).all(workerId);
+
+  const claimJob = db.prepare(
+    "UPDATE print_jobs SET status = 'CLAIMED', claimed_by = ?, claimed_at = ?, updated_at = ? WHERE id = ? AND status = 'QUEUED'"
+  );
+  const claimItem = db.prepare(
+    "UPDATE print_job_items SET status = 'CLAIMED', attempts = attempts + 1, updated_at = ? WHERE print_job_id = ? AND status = 'QUEUED'"
+  );
+
+  const claimed = [];
+  for (const c of candidates) {
+    const now = new Date().toISOString();
+    const info = claimJob.run(workerId, now, now, c.id);
+    if (info.changes !== 1) continue; // 已被其他轮询领取
+    claimItem.run(now, c.id);
+    const job = db.prepare('SELECT * FROM print_jobs WHERE id = ?').get(c.id);
+    claimed.push(serializePrintJob(job));
+  }
+
+  res.json(claimed);
+});
+
+/**
+ * 手机查询打印任务状态（含每个文件独立状态；只读，允许对外端口）
+ * 注意：必须注册在 `/api/print/pending` 之后，且只接受数字编号，
+ * 否则 'pending' 之类固定子路径会被 `:id` 抢先匹配（路由顺序陷阱）。
+ */
+app.get('/api/print/:id(\\d+)', (req, res) => {
+  const id = String(req.params.id);
+  const job = db.prepare('SELECT * FROM print_jobs WHERE id = ?').get(id);
+  if (!job) return res.status(404).json({ error: `未找到打印任务 ${id}` });
+  res.json({ success: true, job: serializePrintJob(job) });
+});
+
+/** 执行端回报打印状态（仅内部端口） */
+app.post('/api/print/:id/status', requireWorkerAuth, (req, res) => {
+  const { id } = req.params;
+  const { status, errorMsg, fileId, fileType, windowsJobId, printerName } = req.body || {};
+
+  const allowed = ['CLAIMED', 'DISPATCHING', 'SUBMITTED_TO_SPOOLER', 'FAILED', 'RESULT_UNKNOWN', 'UNKNOWN'];
+  if (!allowed.includes(status)) {
+    return res.status(400).json({ error: `不支持的打印状态 [${status}]，已拒绝，避免写入未定义状态` });
+  }
+
+  // 打印任务归属校验：只允许目标任务所属终端回报，防 W2 越权更新 W1 任务 (§6 / MW16)
+  const printJob = db.prepare('SELECT * FROM print_jobs WHERE id = ?').get(id);
+  if (!printJob) return res.status(404).json({ error: `未找到打印任务 ${id}` });
+  const identity = req.workerIdentity;
+  if (identity && identity.workerId && printJob.worker_id && identity.workerId !== printJob.worker_id) {
+    return res.status(403).json({
+      success: false,
+      error: `打印任务 ${id} 归属终端 [${printJob.worker_id}]，当前认证身份 [${identity.workerId}] 无权更新`,
+      code: 'PRINT_JOB_OWNERSHIP_MISMATCH'
+    });
+  }
+
+  const job = printJob;
+
+  const now = new Date().toISOString();
+  if (fileId || fileType) {
+    // 单项状态：证书/清单分别记录，确定单项失败不影响已成功项 (PR13)
+    const item = fileId
+      ? db.prepare('SELECT * FROM print_job_items WHERE print_job_id = ? AND task_file_id = ?').get(id, fileId)
+      : db.prepare('SELECT * FROM print_job_items WHERE print_job_id = ? AND file_type = ?').get(id, fileType);
+    if (!item) {
+      return res.status(404).json({ error: `打印任务 ${id} 中没有匹配的文件项 (fileId=${fileId || '-'}, fileType=${fileType || '-'})` });
+    }
+    db.prepare(`
+      UPDATE print_job_items
+      SET status = ?, error_msg = ?, windows_job_id = COALESCE(?, windows_job_id),
+          printer_name = COALESCE(?, printer_name), dispatched_at = ?, updated_at = ?
+      WHERE id = ?
+    `).run(
+      status === 'UNKNOWN' ? 'RESULT_UNKNOWN' : status,
+      errorMsg || null,
+      windowsJobId || null,
+      printerName || null,
+      now,
+      now,
+      item.id
+    );
+  } else if (status !== 'CLAIMED') {
+    db.prepare('UPDATE print_jobs SET error_msg = ?, updated_at = ? WHERE id = ?').run(errorMsg || null, now, id);
+  }
+
+  // 每次回报后都汇总整体状态，否则任务会一直停留在 QUEUED (PR-B05)
+  const overall = reconcilePrintJobStatus(id);
+  logAudit(null, 'WORKER', 'PrintWorker', 'UPDATE_PRINT_STATUS', {
+    printJobId: id, status, overall, fileId: fileId || null, fileType: fileType || null, windowsJobId: windowsJobId || null, errorMsg: errorMsg || null
+  });
+  const updated = db.prepare('SELECT * FROM print_jobs WHERE id = ?').get(id);
+  res.json({ success: true, printJobId: Number(id), itemStatus: status, status: overall, job: serializePrintJob(updated) });
 });
 
 // ==================== AUDIT LOGS ====================
@@ -2550,24 +3918,75 @@ app.get('/api/audit-logs', (req, res) => {
 });
 
 if (require.main === module) {
+  const workerPort = internalPort();
+  // 执行端接入口监听地址（整改 §3.2）：
+  //  - 默认 0.0.0.0，使局域网内远程执行端可达；可用 INTERNAL_BIND 指定单个网卡地址，
+  //    或设为 127.0.0.1 退回「仅协调机本机执行端」；
+  //  - 该端口绝不可发布到公网隧道；远程接入的安全性由执行端身份凭据保证，而不是靠绑定地址。
+  const workerBindHost = String(process.env.INTERNAL_BIND || process.env.WORKER_BIND || '0.0.0.0').trim() || '0.0.0.0';
+
   app.listen(PORT, () => {
     console.log('====================================================');
     console.log('协调服务 (Coordination Service) 启动成功！');
     console.log('====================================================');
-    console.log(`- 服务端口: ${PORT}`);
+    console.log(`- 对外服务端口: ${PORT}`);
+    if (workerPort) {
+      console.log(`- 执行端接入口: ${workerBindHost}:${workerPort}（隧道请勿发布该端口）`);
+    } else {
+      console.log('- 执行端接入口: 未启用（执行端接口与对外端口共用；公网暴露时建议设置 INTERNAL_PORT）');
+    }
     console.log(`- 关键 API 路由已就绪:`);
     console.log(`  * GET  /api/published-bundles (获取已发布型号与文档组合配置)`);
     console.log(`  * POST /api/tasks/submit       (任务提交与重复校验)`);
     console.log(`  * GET  /api/workers            (执行终端心跳与状态列表)`);
     console.log(`  * POST /api/templates/publish  (模板三合一严格校验与动态组合生成)`);
-    console.log(`- 协调管理控制台 (仅限协调服务电脑本机): http://localhost:${PORT}/admin`);
-    console.log(`- 手机端发货作业地址 (车间局域网操作): http://<局域网IP>:${PORT}/frontend`);
+    console.log(`- 协调管理控制台 (仅限本机直连，隧道访问会被拒绝): http://localhost:${PORT}/admin`);
+    console.log(`- 手机端发货作业地址 (含访问口令): /frontend/index.html?k=<口令>`);
+    console.log(`- 访问口令文件: ${path.join(__dirname, '../../data/access_token.txt')}`);
     console.log(`- 数据存储目录: ${path.join(__dirname, '../../data')}`);
+    if (workerPort && workerBindHost !== '127.0.0.1' && workerBindHost !== 'localhost') {
+      console.log(`- 远程执行端接入地址（在其它电脑上使用）:`);
+      for (const ip of listLanIPv4()) {
+        console.log(`    node src/worker/worker.js --server http://${ip}:${workerPort}`);
+      }
+      console.log(`  * 若远程电脑连接超时/被拒，请在协调电脑上**仅按需**放行可信局域网访问 TCP ${workerPort}`);
+      console.log(`    例: New-NetFirewallRule -DisplayName "phoneApp Worker" -Direction Inbound -Protocol TCP -LocalPort ${workerPort} -Action Allow -Profile Private -RemoteAddress LocalSubnet`);
+      console.log(`    （不要关闭整机防火墙，也不要把该端口发布到 Cloudflare 等公网隧道）`);
+    }
     console.log('====================================================');
     console.log('等待手机端/前端连接，以及执行端 (worker.js) 上线...');
+
+    // 执行端接入口：单独监听一个端口，执行端接口凭 localPort 判定只在此端口放行。
+    if (workerPort && workerPort !== Number(PORT)) {
+      const workerServer = app.listen(workerPort, workerBindHost, () => {
+        console.log(`- 执行端接入口已就绪: http://${workerBindHost}:${workerPort}`);
+      });
+      workerServer.on('error', (err) => {
+        const hint = err.code === 'EADDRINUSE'
+          ? `端口 ${workerPort} 已被占用，请释放该端口或改用其它 INTERNAL_PORT`
+          : (err.code === 'EADDRNOTAVAIL'
+            ? `绑定地址 ${workerBindHost} 在本机不存在，请改用本机实际网卡地址或 0.0.0.0`
+            : err.message);
+        console.error(`[严重] 执行端接入口 ${workerBindHost}:${workerPort} 启动失败: ${hint}`);
+        console.error('       远程执行端将无法接入；请修正后重启协调服务（不要在不确认的情况下继续操作）。');
+      });
+    }
   });
 }
 
 module.exports = app;
 module.exports.isLocalhostRequest = isLocalhostRequest;
 module.exports.resolveModelAlias = resolveModelAlias;
+// 供回归测试直接调用真实生产校验逻辑（不使用源码字符串断言）
+module.exports.validateSubmittedTestPoints = validateSubmittedTestPoints;
+module.exports.validateSubmittedPackingItems = validateSubmittedPackingItems;
+module.exports.validateCertificateTableConfig = validateCertificateTableConfig;
+module.exports.detectPackingHeaderLabels = detectPackingHeaderLabels;
+module.exports.detectCertificateTableHeaders = detectCertificateTableHeaders;
+// 多执行端接入：身份/接入鉴权相关（供回归测试直接调用真实生产逻辑）
+module.exports.authenticateWorker = authenticateWorker;
+module.exports.registerWorkerSecret = registerWorkerSecret;
+module.exports.hashWorkerSecret = hashWorkerSecret;
+module.exports.normalizeClientIp = normalizeClientIp;
+module.exports.listLanIPv4 = listLanIPv4;
+module.exports.requireWorkerAuth = requireWorkerAuth;

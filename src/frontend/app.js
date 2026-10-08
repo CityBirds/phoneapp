@@ -5,6 +5,62 @@
 
 const API_BASE = window.location.origin;
 
+/**
+ * 共享访问口令（用于公网/隧道访问时的入口控制）
+ * 取用顺序：URL ?k= > localStorage > Cookie。
+ * 首次用带 ?k= 的链接打开后会被记住，之后无需再输入。
+ */
+const PHONE_ACCESS_TOKEN = (() => {
+  try {
+    const fromUrl = new URLSearchParams(window.location.search).get('k') || new URLSearchParams(window.location.search).get('token');
+    if (fromUrl) {
+      localStorage.setItem('phoneapp_access_token', fromUrl);
+      return String(fromUrl).trim();
+    }
+    const saved = localStorage.getItem('phoneapp_access_token');
+    if (saved) return String(saved).trim();
+    const m = document.cookie.match(/(?:^|;\s*)phoneapp_token=([^;]+)/);
+    if (m) return decodeURIComponent(m[1]);
+  } catch (e) {}
+  return '';
+})();
+
+/** 给所有 API 请求附加访问口令（header + 查询参数双通道，兼容无 Cookie 的浏览器） */
+(function installAccessTokenInterceptor() {
+  if (typeof window.fetch !== 'function') return;
+  const originalFetch = window.fetch.bind(window);
+  window.fetch = function (input, init) {
+    try {
+      const url = typeof input === 'string' ? input : (input && input.url) || '';
+      const isApi = /\/api\//.test(url);
+      const sameOrigin = !/^https?:\/\//i.test(url) || url.startsWith(window.location.origin);
+      if (PHONE_ACCESS_TOKEN && isApi && sameOrigin) {
+        const opts = Object.assign({}, init);
+        const headers = new Headers(opts.headers || (typeof input === 'object' && input.headers) || {});
+        headers.set('x-phone-token', PHONE_ACCESS_TOKEN);
+        opts.headers = headers;
+        // 同时带上查询参数，规避部分内嵌浏览器不允许跨站 Cookie 的情况
+        if (!/[?&](k|token)=/.test(url)) {
+          const sep = url.includes('?') ? '&' : '?';
+          input = url + sep + 'k=' + encodeURIComponent(PHONE_ACCESS_TOKEN);
+        }
+      }
+    } catch (e) {}
+    const p = originalFetch(input, init);
+    // 口令缺失或失效时，引导到口令登录页（避免页面空白无提示）
+    try {
+      p.then((res) => {
+        if (res && res.status === 401 && !window.__phoneappRedirecting) {
+          window.__phoneappRedirecting = true;
+          try { localStorage.removeItem('phoneapp_access_token'); } catch (e) {}
+          window.location.replace('/frontend/login.html?expired=1');
+        }
+      }).catch(() => {});
+    } catch (e) {}
+    return p;
+  };
+})();
+
 // HTML Escape Helper (R01, P01)
 function escapeHtml(str) {
   if (str === null || str === undefined) return '';
@@ -339,22 +395,52 @@ async function loadPublishedBundles(workerId = null) {
 
 function renderModelSelectOptions() {
   const select = document.getElementById('model-select');
+  const statusEl = document.getElementById('model-load-status');
   if (!select) return;
 
   if (!state.bundles || state.bundles.length === 0) {
     select.innerHTML = '<option value="">(暂无已发布模板配置)</option>';
+    if (statusEl) {
+      statusEl.style.display = 'block';
+      statusEl.className = 'status-tip warning';
+      const wName = state.selectedWorker ? state.selectedWorker.name : '当前执行端';
+      statusEl.innerHTML = `ℹ️ 执行端 [${wName}] 未启用任何已发布模板。请前往协调服务管理后台在<b>终端详情页</b>配置并启用模板。`;
+    }
     onModelChange();
     return;
   }
 
-  select.innerHTML = state.bundles.map(b => {
+  const readyBundles = state.bundles.filter(b => b.is_ready !== false);
+  const unreadyBundles = state.bundles.filter(b => b.is_ready === false);
+
+  // 5：已发布、已启用但目录未配置或检查未通过的模板必须显示不可用原因且禁止提交，不得隐藏后静默降级
+  const buildOption = (b, disabled) => {
     let comboText = ' (带清单)';
     if (b.doc_combo === 'cert_only') comboText = ' (仅证书)';
     if (b.doc_combo === 'packing_only') comboText = ' (仅清单)';
 
     const optName = b.option_name && b.option_name !== '通用' ? ` - ${b.option_name}` : '';
-    return `<option value="${b.id}">${b.model_display}${optName}${comboText}</option>`;
-  }).join('');
+    const label = `${b.model_display}${optName}${comboText}${disabled ? '［不可提交］' : ''}`;
+    return `<option value="${b.id}" ${disabled ? 'disabled' : ''}>${label}</option>`;
+  };
+
+  select.innerHTML = readyBundles.map(b => buildOption(b, false)).join('')
+    + unreadyBundles.map(b => buildOption(b, true)).join('');
+
+  if (readyBundles.length === 0 && select.options.length > 0) {
+    select.selectedIndex = 0;
+  }
+
+  if (statusEl) {
+    if (unreadyBundles.length > 0) {
+      statusEl.style.display = 'block';
+      statusEl.className = 'status-tip warning';
+      const reasons = unreadyBundles.map(b => `· ${b.model_display}：${b.unready_reason || '保存目录不可用'}`).join('<br>');
+      statusEl.innerHTML = `⚠️ 以下模板已启用但当前不可提交，请通知管理员在终端详情页处理：<br>${reasons}`;
+    } else {
+      statusEl.style.display = 'none';
+    }
+  }
 
   onModelChange();
 }
@@ -626,16 +712,29 @@ function initTestPointsForModel() {
   let pts = (certTmpl && certTmpl.field_mappings && certTmpl.field_mappings.testPoints)
     || (snapshot && snapshot.testPoints);
 
-  if ((!pts || pts.length === 0) && tc && tc.rowCount > 0) {
+  // 证书测量表固定行数：以模板数据区行数为准（整改 3.3, M07/M08/M10）
+  const templateRowCount = (tc && typeof tc.rowCount === 'number' && tc.rowCount > 0) ? tc.rowCount : 0;
+  const configWarning = validateActiveTableConfig(tc, pts);
+
+  // 没有有效测量表格区绑定时，不渲染任何“假表头/假行”，只显示告警（整改 3.3）
+  const hasValidBinding = !!(tc && Array.isArray(tc.columns) && tc.columns.length > 0);
+  if (!hasValidBinding) {
+    state.testPoints = [];
+    state.testPointsConfigWarning = configWarning.length > 0
+      ? configWarning
+      : ['已发布配置缺少测量表格区绑定 (tableConfig)'];
+    renderTestPoints();
+    return;
+  }
+
+  if (templateRowCount > 0 && (!pts || pts.length === 0 || pts.length !== templateRowCount)) {
+    // 已保存行数与模板数据区不一致时，按模板默认值重建，避免把上个模板的行列带进来
     pts = [];
-    for (let i = 0; i < tc.rowCount; i++) {
-      const rowItem = {
-        point: i + 1,
-        values: {}
-      };
+    for (let i = 0; i < templateRowCount; i++) {
+      const rowItem = { point: i + 1, values: {} };
       columns.forEach(col => {
-        let val = (col.defaultValues && col.defaultValues[i]) ? col.defaultValues[i] : '';
-        if (col.isSeq && !val) val = String(i + 1);
+        let val = (col.defaultValues && col.defaultValues[i] !== undefined) ? col.defaultValues[i] : '';
+        if (col.isSeq && (val === '' || val === undefined)) val = String(i + 1);
         rowItem.values[col.key] = val;
         rowItem.values[String(col.colIdx)] = val;
         rowItem.values[col.label] = val;
@@ -659,9 +758,10 @@ function initTestPointsForModel() {
           values[col.key] = p.std !== undefined ? p.std : (p.standard || '');
         } else if (col.isAct) {
           values[col.key] = p.act !== undefined ? p.act : (p.actual || '');
-        } else if (col.defaultValues && col.defaultValues[i]) {
+        } else if (col.defaultValues && col.defaultValues[i] !== undefined) {
           values[col.key] = col.defaultValues[i];
         } else {
+          // 模板里真实存在的空格保持为空，不补造数据（整改 3.3）
           values[col.key] = '';
         }
       }
@@ -689,14 +789,47 @@ function initTestPointsForModel() {
 
     return {
       point: p.point || i + 1,
-      name: ptName || `测试点 ${i + 1}`,
+      name: ptName || '',
       std: stdVal,
       act: actVal,
       values
     };
   });
 
+  state.testPointsConfigWarning = configWarning;
   renderTestPoints();
+}
+
+/**
+ * 手机端配置自检：把已发布配置与模板数据区对照，
+ * 发现问题时提示重新绑定发布，而不是静默继续使用污染配置（整改 3.3, M11）。
+ *
+ * 关键：缺少测量表格区绑定（tableConfig.columns）时必须明确报警并阻止提交，
+ * 不能悄悄退化成“序号/标准值/实测值”三列假表头继续生成错误文档。
+ */
+function validateActiveTableConfig(tc, pts) {
+  const warnings = [];
+  if (!tc) {
+    warnings.push('已发布配置缺少测量表格区绑定 (tableConfig)，无法确定真实列名与行数');
+    return warnings;
+  }
+  const columns = Array.isArray(tc.columns) ? tc.columns : [];
+  if (columns.length === 0) {
+    warnings.push('测量表格区没有列定义 (tableConfig.columns 为空)');
+  }
+  const tableIdxs = new Set(columns.map(c => (c.tableIdx === undefined ? tc.tableIdx : c.tableIdx)));
+  if (tableIdxs.size > 1) warnings.push('测量列跨多个表格区域');
+
+  // 旧版格式：行里只有 std/act 兼容字段、没有按列 key 保存的 values
+  const legacyRows = (Array.isArray(pts) ? pts : []).filter(p => p && (!p.values || Object.keys(p.values).length === 0));
+  if (legacyRows.length > 0 && columns.length > 0) {
+    warnings.push(`存在 ${legacyRows.length} 行旧格式测量数据（缺少按列保存的 values），需重新发布模板`);
+  }
+
+  if (typeof tc.rowCount === 'number' && Array.isArray(pts) && pts.length > 0 && pts.length !== tc.rowCount) {
+    warnings.push(`测量行数 (${pts.length}) 与模板数据区 (${tc.rowCount}) 不一致`);
+  }
+  return warnings;
 }
 
 function renderTestPoints() {
@@ -705,24 +838,46 @@ function renderTestPoints() {
 
   const bundle = state.activeBundle;
   const certTmpl = bundle ? bundle.certTemplate : null;
-  const tc = certTmpl && certTmpl.field_mappings ? certTmpl.field_mappings.tableConfig : null;
+  const snapshot = bundle ? bundle.config_snapshot : {};
+  // 与 initTestPointsForModel 保持同一数据源顺序（证书模板优先，其次发布快照）
+  const tc = (certTmpl && certTmpl.field_mappings && certTmpl.field_mappings.tableConfig)
+    || (snapshot && snapshot.tableConfig);
   const columns = getActiveTestPointColumns(tc);
+  const hasValidBinding = !!(tc && Array.isArray(tc.columns) && tc.columns.length > 0);
 
   // Render Table Headers <thead> in exact template order with exact template names!
+  // 无有效绑定时不渲染任何假表头，避免手机出现与模板不符的列（整改 3.3）
   const thead = document.getElementById('test-points-thead');
-  if (thead) {
+  if (thead && hasValidBinding) {
     let thHtml = '<tr>';
     columns.forEach(col => {
-      let title = col.label || '列';
+      const title = col.label || '列';
       thHtml += `<th class="col-test-dyn">${escapeHtml(title)}</th>`;
     });
-    thHtml += '<th style="width: 70px; text-align: center;">操作</th></tr>';
+    // 证书测量表固定行数，不提供增删入口与操作列（整改 3.3, M07）
+    thHtml += '</tr>';
     thead.innerHTML = thHtml;
   }
 
-  const colSpan = columns.length + 1;
+  const warningBox = document.getElementById('test-points-warning');
+  if (warningBox) {
+    if (state.testPointsConfigWarning && state.testPointsConfigWarning.length > 0) {
+      warningBox.style.display = 'block';
+      warningBox.innerHTML = '⚠️ 当前发布的证书测量配置存在问题：' + state.testPointsConfigWarning.join('；') +
+        '。请通知管理员重新分析并发布模板后再提交。';
+    } else {
+      warningBox.style.display = 'none';
+      warningBox.innerHTML = '';
+    }
+  }
+
+  if (!hasValidBinding) {
+    tbody.innerHTML = `<tr><td colspan="${columns.length || 1}" style="text-align: center; color: #b91c1c; padding: 16px;">当前发布的证书模板没有可用的测量表列绑定（tableConfig.columns 为空），已停止渲染以<b>避免生成与模板不符的测量表</b>。请通知管理员在控制台重新分析并正式发布该模板。</td></tr>`;
+    return;
+  }
+
   if (!state.testPoints || state.testPoints.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="${colSpan}" style="text-align: center; color: #94a3b8; padding: 16px;">当前证书暂无测量点，可点击右上角「+ 添加测量点」新增</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="${columns.length || 1}" style="text-align: center; color: #94a3b8; padding: 16px;">当前模板未配置测量数据行，请联系管理员检查模板绑定</td></tr>`;
     return;
   }
 
@@ -754,9 +909,12 @@ function renderTestPoints() {
         placeholder = col.label || '';
       }
 
-      let inputAttr = `id="tp-cell-${i}-${colKey}" data-row="${i}" data-col-key="${escapeHtml(colKey)}" data-col-idx="${col.colIdx}"`;
-      if (col.isStd) inputAttr += ` id="tp-std-${i + 1}" data-cell-id="tp-cell-${i}-${colKey}"`;
-      else if (col.isAct) inputAttr += ` id="tp-act-${i + 1}" data-cell-id="tp-cell-${i}-${colKey}"`;
+      // 每个输入框只能有一个唯一 id（此前重复拼接 tp-act/tp-std 会生成两个 id 属性，
+      // 导致多个实测列回退到同一个控件，互相覆盖）(整改 C.5)
+      let inputAttr = `id="tp-cell-${i}-${colKey}" data-row="${i}" data-col-key="${escapeHtml(colKey)}" data-col-idx="${col.colIdx}" data-col-role="${col.role || 'other'}"`;
+      if (col.isStd) inputAttr += ` data-cell-role="std"`;
+      else if (col.isAct) inputAttr += ` data-cell-role="act"`;
+      if (col.isSeq) inputAttr += ' readonly style="background:#f1f5f9;"';
       cellsHtml += `
         <td>
           <input type="text" 
@@ -768,12 +926,6 @@ function renderTestPoints() {
         </td>
       `;
     });
-
-    cellsHtml += `
-      <td style="text-align: center;">
-        <button type="button" class="btn btn-sm btn-danger" onclick="deleteTestPointRow(${i})">删除</button>
-      </td>
-    `;
 
     return `<tr>${cellsHtml}</tr>`;
   }).join('');
@@ -807,56 +959,24 @@ function updateTestPoint(idx, key, val) {
   }
 }
 
+/**
+ * 证书测量表固定行数：不提供新增/删除行入口（整改 3.3, M07）。
+ * 保留函数名仅为兼容旧页面按钮，调用时明确拒绝而不是静默改维度。
+ */
 function addTestPointRow() {
-  if (!state.testPoints) state.testPoints = [];
-  const bundle = state.activeBundle;
-  const certTmpl = bundle ? bundle.certTemplate : null;
-  const tc = certTmpl && certTmpl.field_mappings ? certTmpl.field_mappings.tableConfig : null;
-  const columns = getActiveTestPointColumns(tc);
-
-  const newNum = state.testPoints.length + 1;
-  const newRow = {
-    point: newNum,
-    name: String(newNum),
-    std: '',
-    act: '',
-    values: {}
-  };
-
-  columns.forEach(col => {
-    let defVal = '';
-    if (col.isSeq) {
-      defVal = String(newNum);
-    }
-    newRow.values[col.key] = defVal;
-    newRow.values[String(col.colIdx)] = defVal;
-    newRow.values[col.label] = defVal;
-  });
-
-  state.testPoints.push(newRow);
-  renderTestPoints();
+  alert('证书测量表行数由模板固定，不支持增加测量点。如需变更请通知管理员重新发布模板。');
 }
 
 function deleteTestPointRow(idx) {
-  if (!state.testPoints || !state.testPoints[idx]) return;
-  state.testPoints.splice(idx, 1);
-  const bundle = state.activeBundle;
-  const tc = bundle?.certTemplate?.field_mappings?.tableConfig;
-  const columns = getActiveTestPointColumns(tc);
-  const seqCol = columns.find(c => c.isSeq);
+  alert('证书测量表行数由模板固定，不支持删除测量点。如需变更请通知管理员重新发布模板。');
+}
 
-  state.testPoints.forEach((p, i) => {
-    p.point = i + 1;
-    if (seqCol && p.values) {
-      if (!p.values[seqCol.key] || /^\d+$/.test(p.values[seqCol.key])) {
-        p.values[seqCol.key] = String(i + 1);
-        p.values[String(seqCol.colIdx)] = String(i + 1);
-        p.values[seqCol.label] = String(i + 1);
-        p.name = String(i + 1);
-      }
-    }
-  });
-  renderTestPoints();
+function getPackingRoleConfig() {
+  const bundle = state.activeBundle;
+  const packTmpl = bundle ? bundle.packingTemplate : null;
+  const mappings = (packTmpl && packTmpl.field_mappings) || {};
+  const roles = Array.isArray(mappings.packingRowRoles) ? mappings.packingRowRoles : [];
+  return { roles, mappings };
 }
 
 function findMainDeviceRowIndex() {
@@ -875,17 +995,24 @@ function findMainDeviceRowIndex() {
     }
   }
 
-  // Exact name or row heuristics
+  // 行角色优先（来自模板真实行，整改 B03）
+  const roleIdx = state.packingItems.findIndex(it => it.role === 'mainDevice');
+  if (roleIdx !== -1) return roleIdx;
+
+  // Exact name heuristics
   const mainIdx = state.packingItems.findIndex(it => (it.name || '').trim() === '主设备');
   if (mainIdx !== -1) return mainIdx;
 
-  // Fallback to row 1 if verified to be protected / standard main row
-  const protectedRows = (packTmpl && packTmpl.field_mappings && packTmpl.field_mappings.protectedRows) || [1];
-  if (state.packingItems[0] && (state.packingItems[0].isProtected || protectedRows.includes(1))) {
-    return 0;
-  }
+  // Fallback: the protected row that is not a sensor row
+  const protectedIdx = state.packingItems.findIndex(it => it.isProtected && it.role !== 'sensor');
+  if (protectedIdx !== -1) return protectedIdx;
 
   return -1;
+}
+
+function findSensorRowIndex() {
+  if (!state.packingItems) return -1;
+  return state.packingItems.findIndex(it => it.role === 'sensor');
 }
 
 function generateMainDeviceRemark(sn, hasPump) {
@@ -905,40 +1032,42 @@ function initPackingItemsForModel() {
     || [];
 
   state.packingItems = JSON.parse(JSON.stringify(itemsConfig));
+  // 记录模板物料行数基准：必须在模板行基础上增删，不能凭空新增模板不存在的物料行（整改 3.4）
+  state.packingTemplateRowCount = state.packingItems.length;
 
   // 当前选中的设备型号名称（例如 DPT-990-Ex）
   const curModel = (bundle ? (bundle.model_display || bundle.model) : state.currentModel) || '';
 
-  // 1. 若模板尚未配置物料明细，自动按当前型号生成标准物料明细
+  // 模板未配置物料明细时，只能按模板真实行角色给出最小可用行，不得虚构传感器行（整改 3.4）
   if (!state.packingItems || state.packingItems.length === 0) {
-    const isPOA = curModel.toUpperCase().includes('POA');
     state.packingItems = [
-      { index: 1, name: '主设备', spec: curModel || '设备', count: 1, unit: '台', standard: '是', remark: '', isProtected: true }
+      { index: 1, name: '主设备', spec: curModel || '', count: 1, unit: '', standard: '', remark: '', isProtected: true, role: 'mainDevice' }
     ];
-    if (isPOA) {
-      state.packingItems.push({ index: 2, name: '传感器', spec: 'PMT210SEN', count: 1, unit: '支', standard: '是', remark: '', isProtected: true });
-      state.packingItems.push({ index: 3, name: '仪器包装箱', spec: 'ABS', count: 1, unit: '个', standard: '是', remark: '' });
-      state.packingItems.push({ index: 4, name: '用户手册', spec: '中英文', count: 1, unit: '份', standard: '是', remark: '' });
-    } else {
-      state.packingItems.push({ index: 2, name: '包装箱', spec: 'ABS', count: 1, unit: '个', standard: '是', remark: '' });
-      state.packingItems.push({ index: 3, name: '用户手册', spec: '中英文', count: 1, unit: '本', standard: '是', remark: '' });
-      state.packingItems.push({ index: 4, name: '操作说明', spec: '中英文', count: 1, unit: '份', standard: '是', remark: '' });
-    }
+    console.warn('Packing template has no configured rows; only the main device row is used. Ask admin to publish template rows.');
   }
 
-  // 2. 核心修复：确保主设备行（保护行）的规格/型号严格对应当前选择的型号！
-  let mainIdx = findMainDeviceRowIndex();
-  if (mainIdx === -1 && state.packingItems.length > 0) {
-    mainIdx = 0;
-  }
+  // 同步真实行角色与保护标记（不依赖型号名称推断）
+  state.packingItems.forEach((it, idx) => {
+    if (!it.role) {
+      if (/主设备|主机/.test(String(it.name || ''))) it.role = 'mainDevice';
+      else if (/传感器|探头/.test(String(it.name || ''))) it.role = 'sensor';
+      else if (/参考仪器|标准器/.test(String(it.name || ''))) it.role = 'reference';
+      else it.role = 'material';
+    }
+    it.isProtected = (it.role === 'mainDevice' || it.role === 'sensor' || it.role === 'reference' || !!it.isProtected);
+    it.index = idx + 1;
+  });
+
+  // 核心：确保主设备行的规格/型号严格对应当前选择的型号
+  const mainIdx = findMainDeviceRowIndex();
   if (mainIdx !== -1 && curModel) {
     state.packingItems[mainIdx].spec = curModel;
   }
 
-  // 3. 同步设备序列号与备注
+  // 同步设备序列号与备注
   syncDeviceSnToPackingList(false);
 
-  // 4. 无论备注是否变更，切换型号时必须强制重新渲染装箱清单表格！
+  // 切换型号时必须强制重新渲染装箱清单表格
   renderPackingTable();
 }
 
@@ -966,35 +1095,37 @@ function renderPackingTable() {
   const tbody = document.getElementById('packing-items-body');
   if (!tbody) return;
 
-  const bundle = state.activeBundle;
-  const packTmpl = bundle ? bundle.packingTemplate : null;
-  const protectedRows = (packTmpl && packTmpl.field_mappings && packTmpl.field_mappings.protectedRows) || [1];
+  const { mappings } = getPackingRoleConfig();
+  const protectedRows = (mappings && Array.isArray(mappings.protectedRows)) ? mappings.protectedRows : [];
 
   tbody.innerHTML = state.packingItems.map((item, idx) => {
     const rowNum = item.index || idx + 1;
     const isProtected = item.isProtected || protectedRows.includes(rowNum);
     const nameInput = isProtected
-      ? `${item.name} <span class="badge badge-warning">保护行</span>`
-      : `<input type="text" class="form-control" value="${item.name || ''}" placeholder="自定义物料名称" onchange="updatePackingItem(${idx}, 'name', this.value)">`;
+      ? `${escapeHtml(item.name)} <span class="badge badge-warning">保护行</span>`
+      : `<input type="text" class="form-control" value="${escapeHtml(item.name || '')}" placeholder="自定义物料名称" onchange="updatePackingItem(${idx}, 'name', this.value)">`;
 
     const mainDeviceIdx = findMainDeviceRowIndex();
+    const sensorIdx = findSensorRowIndex();
     const isMainDeviceRow = (idx === mainDeviceIdx);
+    const isSensorRow = (idx === sensorIdx);
     const remarkCell = isMainDeviceRow
       ? `<input type="text" class="form-control" value="${escapeHtml(item.remark || '')}" readonly style="background: #f1f5f9; color: #334155;">`
-      : `<input type="text" class="form-control" value="${escapeHtml(item.remark || '')}" onchange="updatePackingItem(${idx}, 'remark', this.value)">`;
+      : `<input type="text" class="form-control" value="${escapeHtml(item.remark || '')}" placeholder="${isSensorRow ? 'SN: 传感器序列号' : ''}" onchange="updatePackingItem(${idx}, 'remark', this.value)">`;
 
     return `
       <tr>
         <td><b>${rowNum}</b></td>
         <td>${nameInput}</td>
         <td><input type="text" class="form-control" value="${escapeHtml(item.spec || '')}" onchange="updatePackingItem(${idx}, 'spec', this.value)"></td>
-        <td><input type="number" class="form-control" style="width: 60px;" value="${item.count || 1}" onchange="updatePackingItem(${idx}, 'count', this.value)"></td>
-        <td><input type="text" class="form-control" style="width: 60px;" value="${escapeHtml(item.unit || '件')}" onchange="updatePackingItem(${idx}, 'unit', this.value)"></td>
+        <td><input type="number" class="form-control" style="width: 60px;" value="${item.count === '' ? '' : (item.count || 1)}" onchange="updatePackingItem(${idx}, 'count', this.value)"></td>
+        <td><input type="text" class="form-control" style="width: 60px;" value="${escapeHtml(item.unit || '')}" onchange="updatePackingItem(${idx}, 'unit', this.value)"></td>
         <td>${isProtected 
-            ? (item.standard || '是') 
+            ? escapeHtml(item.standard || '')
             : `<select class="form-control" style="width: 65px; padding: 2px 4px; font-size: 13px;" onchange="updatePackingItem(${idx}, 'standard', this.value)">
+                <option value="" ${item.standard === '' || item.standard === undefined ? 'selected' : ''}>(空)</option>
                 <option value="否" ${item.standard === '否' ? 'selected' : ''}>否</option>
-                <option value="是" ${item.standard !== '否' ? 'selected' : ''}>是</option>
+                <option value="是" ${item.standard === '是' ? 'selected' : ''}>是</option>
               </select>`
           }</td>
         <td>${remarkCell}</td>
@@ -1021,22 +1152,24 @@ function addPackingRow() {
     name: '', // Empty custom name by default
     spec: '',
     count: 1,
-    unit: '件',
-    standard: '否',
-    remark: ''
+    // 无依据不补“件”“是”（整改 3.4）
+    unit: '',
+    standard: '',
+    remark: '',
+    role: 'material',
+    isProtected: false
   });
   renderPackingTable();
 }
 
 function deletePackingRow(idx) {
   const item = state.packingItems[idx];
-  const bundle = state.activeBundle;
-  const packTmpl = bundle ? bundle.packingTemplate : null;
-  const protectedRows = (packTmpl && packTmpl.field_mappings && packTmpl.field_mappings.protectedRows) || [1];
+  const { mappings } = getPackingRoleConfig();
+  const protectedRows = (mappings && Array.isArray(mappings.protectedRows)) ? mappings.protectedRows : [];
   const rowNum = item ? (item.index || idx + 1) : idx + 1;
 
-  if (item && (item.isProtected || protectedRows.includes(rowNum))) {
-    return alert('保护行（主设备/传感器）严禁删除 (E06, T06, R07)');
+  if (item && (item.isProtected || item.role === 'mainDevice' || item.role === 'sensor' || item.role === 'reference' || protectedRows.includes(rowNum))) {
+    return alert('保护行（主设备/传感器/参考仪器）严禁删除 (E06, T06, R07)');
   }
   state.packingItems.splice(idx, 1);
   state.packingItems.forEach((it, i) => it.index = i + 1);
@@ -1098,6 +1231,30 @@ async function submitTaskForm() {
   const docCombo = bundle.doc_combo;
   const isPackingNeeded = docCombo === 'cert_and_packing' || docCombo === 'packing_only';
   const isPOA200 = bundle.model_display === 'POA200';
+  const snapshot = bundle.config_snapshot || {};
+
+  // 证书测量表固定行数：维度/绑定不一致时最先拒绝提交，绝不绕过后端生成错误文档
+  // （整改 3.3, M12；必须先于清单校验，避免报出与真实原因无关的错误）
+  const submitShowCert = docCombo === 'cert_and_packing' || docCombo === 'cert_only';
+  const certTmplForSubmit = bundle.certTemplate;
+  const tcForSubmit = (certTmplForSubmit && certTmplForSubmit.field_mappings && certTmplForSubmit.field_mappings.tableConfig)
+    || snapshot.tableConfig;
+  const certColumnsForSubmit = getActiveTestPointColumns(tcForSubmit);
+  if (submitShowCert) {
+    if (!tcForSubmit || !Array.isArray(tcForSubmit.columns) || tcForSubmit.columns.length === 0) {
+      alert('当前发布的证书模板缺少测量表格区绑定 (tableConfig.columns 为空)，已阻止提交以避免生成与模板不符的测量表。\n请联系管理员在控制台重新分析并正式发布该模板。');
+      return;
+    }
+    const expectedRows = (typeof tcForSubmit.rowCount === 'number' && tcForSubmit.rowCount > 0) ? tcForSubmit.rowCount : 0;
+    if (expectedRows > 0 && state.testPoints.length !== expectedRows) {
+      alert(`测量数据行数 (${state.testPoints.length}) 与模板固定行数 (${expectedRows}) 不一致，已阻止提交。请刷新页面重新加载当前发布配置。`);
+      return;
+    }
+    if (state.testPointsConfigWarning && state.testPointsConfigWarning.length > 0) {
+      alert('当前发布的证书测量配置存在问题：' + state.testPointsConfigWarning.join('；') + '。已阻止提交，请联系管理员重新分析并发布模板。');
+      return;
+    }
+  }
 
   let sensorModel = undefined;
   const currentModelStr = (bundle.model_display || bundle.model || '').trim();
@@ -1110,12 +1267,17 @@ async function submitTaskForm() {
     }
   }
 
+  // 传感器序号只从模板中真实存在的传感器行读取；没有传感器行则不采集、不强制（整改 3.4, P05）
   let sensorSn = '';
-  if (isPOA200 && state.packingItems.length >= 2) {
-    const sensorRow = state.packingItems.find(it => it.name === '传感器' || it.index === 2) || state.packingItems[1];
+  const sensorRowIdx = isPackingNeeded ? findSensorRowIndex() : -1;
+  if (sensorRowIdx !== -1) {
+    const sensorRow = state.packingItems[sensorRowIdx];
     if (sensorRow && sensorRow.remark) {
-      const match = sensorRow.remark.match(/SN[:：]\s*([A-Za-z0-9_-]+)/i) || [null, sensorRow.remark];
-      sensorSn = match[1] || sensorRow.remark;
+      const match = sensorRow.remark.match(/SN[:：]\s*([A-Za-z0-9_-]+)/i);
+      sensorSn = match ? match[1] : '';
+    }
+    if (!sensorSn && sensorRow && typeof sensorRow.sn === 'string' && sensorRow.sn) {
+      sensorSn = sensorRow.sn;
     }
   }
 
@@ -1133,12 +1295,27 @@ async function submitTaskForm() {
         return alert(`第 ${i + 1} 行物料名称不能为空，请输入有效的自定义物料名称！`);
       }
     }
+    // 模板没有传感器行时不得凭空新增传感器行（整改 3.4, P05）
+    if (findSensorRowIndex() === -1 && state.packingItems.some(it => /传感器|探头/.test(String(it.name || '')))) {
+      return alert('当前模板没有传感器行，不能新增传感器行，请删除该行或通知管理员重新发布模板。');
+    }
   }
 
   // Dynamic test points gathering based on state.testPoints and template columns
+  // （证书绑定与行数校验已在上方证书段落先行执行）
   const certTmpl = bundle ? bundle.certTemplate : null;
-  const tc = certTmpl && certTmpl.field_mappings ? certTmpl.field_mappings.tableConfig : null;
-  const columns = getActiveTestPointColumns(tc);
+  const tc = tcForSubmit;
+  const columns = certColumnsForSubmit;
+
+  // 以稳定列 key 的 values 作为多列表格权威数据源 (整改 C.1/C.2)
+  // - 每个列只读取自己的列 key 控件（tp-cell-row-colKey），不再回退到共享的 tp-act/tp-std 控件；
+  // - 兼容字段 std/act 仅在“该列没有列值且只有一个同角色列”时作为回退，避免多列互相覆盖；
+  const roleColumnCounts = { seq: 0, std: 0, act: 0 };
+  (columns || []).forEach(c => {
+    if (c.isSeq) roleColumnCounts.seq++;
+    if (c.isStd) roleColumnCounts.std++;
+    if (c.isAct) roleColumnCounts.act++;
+  });
 
   const testPoints = (state.testPoints || []).map((p, i) => {
     const values = { ...(p.values || {}) };
@@ -1148,15 +1325,20 @@ async function submitTaskForm() {
 
     columns.forEach(col => {
       const el = document.getElementById(`tp-cell-${i}-${col.key}`)
-        || (col.isStd ? document.getElementById(`tp-std-${i + 1}`) : null)
-        || (col.isAct ? document.getElementById(`tp-act-${i + 1}`) : null)
         || (document.querySelector ? document.querySelector(`[data-row="${i}"][data-col-key="${col.key}"]`) : null);
 
-      let liveVal = el ? el.value.trim() : (values[col.key] !== undefined ? values[col.key] : (values[String(col.colIdx)] !== undefined ? values[String(col.colIdx)] : ''));
-      if (liveVal === '' && col.isSeq) liveVal = liveName;
-      if (liveVal === '' && col.isStd) liveVal = liveStd;
-      if (liveVal === '' && col.isAct) liveVal = liveAct;
+      let liveVal = el ? String(el.value).trim() : '';
+      if (liveVal === '') {
+        if (values[col.key] !== undefined && values[col.key] !== null) liveVal = String(values[col.key]);
+        else if (values[String(col.colIdx)] !== undefined && values[String(col.colIdx)] !== null) liveVal = String(values[String(col.colIdx)]);
+      }
 
+      // 仅在“没有列值 + 该角色只有一列”时使用兼容字段，且区分空字符串/零值/字段缺失
+      if (liveVal === '' && col.isSeq && roleColumnCounts.seq === 1) liveVal = liveName;
+      if (liveVal === '' && col.isStd && roleColumnCounts.std === 1) liveVal = liveStd;
+      if (liveVal === '' && col.isAct && roleColumnCounts.act === 1) liveVal = liveAct;
+
+      // 多列表格以列 key 为权威，不把某一列的值写进其他列的 key
       values[col.key] = liveVal;
       values[String(col.colIdx)] = liveVal;
       values[col.label] = liveVal;
@@ -1168,7 +1350,8 @@ async function submitTaskForm() {
       } else if (col.isStd && liveVal) {
         liveStd = liveVal;
       } else if (col.isAct && liveVal) {
-        liveAct = liveVal;
+        // 只有单一实测列时才更新兼容字段 act，多实测列不得互相覆盖 (整改 C.1/C.2)
+        if (roleColumnCounts.act === 1) liveAct = liveVal;
       }
     });
 
@@ -1250,8 +1433,10 @@ async function pollTaskPreview(taskId) {
 
       const targetFile = task.files.find(f => f.file_type === state.activePreviewType);
       const isReady = targetFile && targetFile.preview_images && targetFile.preview_images.length > 0;
+      // 预览转换失败同样是终态：停止轮询并展示失败原因（整改 A.3/A.6）
+      const isPreviewFailed = targetFile && (targetFile.status === 'PREVIEW_FAILED' || targetFile.status === 'FAILED');
 
-      if (isReady || task.status === 'SUCCESS' || attempts >= 25) {
+      if (isReady || isPreviewFailed || task.status === 'SUCCESS' || task.status === 'PARTIAL_SUCCESS' || task.status === 'FAILED' || attempts >= 25) {
         clearInterval(timer);
         renderPreviewBox();
       }
@@ -1259,6 +1444,32 @@ async function pollTaskPreview(taskId) {
       if (attempts >= 25) clearInterval(timer);
     }
   }, 700);
+}
+
+/**
+ * 预览/下载资源 URL 附加访问口令。
+ * 图片由 <img> 加载，不会走 window.fetch 拦截器，因此必须显式带上口令，
+ * 否则经隧道访问时会被访问控制中间件拒绝 (PV10)。
+ */
+function withAccessToken(url) {
+  if (!url) return '';
+  if (!PHONE_ACCESS_TOKEN) return url;
+  if (/[?&](k|token)=/.test(url)) return url;
+  return url + (url.includes('?') ? '&' : '?') + 'k=' + encodeURIComponent(PHONE_ACCESS_TOKEN);
+}
+
+/** 渲染分页图片预览（手机不装 Office、也不依赖浏览器内嵌 PDF）(PV01/PV02/PV07) */
+function renderPagedPreview(pageUrls, title) {
+  if (!pageUrls || pageUrls.length === 0) return '';
+  const pages = pageUrls.map((u, i) => `
+    <div class="preview-page-wrap" style="margin-bottom: 14px;">
+      <div style="font-size: 12px; color: #64748b; margin-bottom: 4px;">第 ${i + 1} / ${pageUrls.length} 页</div>
+      <img src="${withAccessToken(u)}" alt="第 ${i + 1} 页"
+           loading="${i === 0 ? 'eager' : 'lazy'}"
+           style="width: 100%; height: auto; border: 1px solid #e2e8f0; border-radius: 8px; background: #fff;">
+    </div>
+  `).join('');
+  return `<div class="paged-preview" data-title="${escapeHtml(title || '')}">${pages}</div>`;
 }
 
 // ==================== PREVIEW & PRINT ====================
@@ -1287,35 +1498,82 @@ function renderPreviewBox() {
   }
 
   const downloadUrl = `${API_BASE}/api/tasks/${state.currentTask.id}/files/${state.activePreviewType}/download`;
+  const pdfUrl = `${API_BASE}/previews/task_${state.currentTask.id}_${state.activePreviewType}.pdf`;
   if (btnBox) {
     btnBox.innerHTML = `
-      <a href="${downloadUrl}" class="btn btn-sm btn-outline" download="${targetFile.official_filename}">
+      <a href="${withAccessToken(downloadUrl)}" class="btn btn-sm btn-outline" download="${escapeHtml(targetFile.official_filename)}">
         ⬇️ 下载 Word 原件
       </a>
     `;
   }
 
   const previews = targetFile.preview_images || [];
+  const isPreviewFailed = targetFile.status === 'PREVIEW_FAILED' ||
+    (!previews.length && !!targetFile.error_msg && targetFile.status !== 'GENERATING');
+
   if (previews.length > 0) {
+    // 分页图片预览：来自本任务真实 Word 转换出的 PDF 逐页渲染，不重画、不用模板原件冒充
     container.innerHTML = `
-      <div style="font-weight: 700; margin-bottom: 10px; color: #1e293b; font-size: 14px;">
-        ${targetFile.official_filename}
+      <div style="font-weight: 700; margin-bottom: 6px; color: #1e293b; font-size: 14px;">
+        ${escapeHtml(targetFile.official_filename)}
       </div>
-      ${previews.map(url => `
-        <div style="margin-bottom: 12px; cursor: pointer;" onclick="openPreviewModal('${url}', '${targetFile.official_filename}', '${downloadUrl}')">
-          <img src="${url}" alt="Preview Page" style="border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);">
-          <div style="font-size: 12px; color: #0284c7; margin-top: 4px;">🔍 点击可全屏放大查看</div>
-        </div>
-      `).join('')}
+      <div style="font-size: 12px; color: #64748b; margin-bottom: 10px;">
+        以下为本任务实际生成的 Word 原件转换后的真实分页预览，共 <b>${previews.length}</b> 页（无需在手机上安装 Office）。
+      </div>
+      ${renderPagedPreview(previews, targetFile.official_filename)}
+      <div style="margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap;">
+        <a href="${withAccessToken(downloadUrl)}" class="btn btn-sm btn-outline" download="${escapeHtml(targetFile.official_filename)}">⬇️ 下载 Word 原件</a>
+        <a href="${withAccessToken(pdfUrl)}" target="_blank" rel="noopener" class="btn btn-sm btn-outline">🔍 查看/下载 PDF</a>
+        <button type="button" class="btn btn-sm btn-secondary" onclick="retryPreview('${state.activePreviewType}')">🔄 仅重试失败的转换阶段</button>
+      </div>
+    `;
+  } else if (isPreviewFailed) {
+    container.innerHTML = `
+      <div style="font-weight: 600; margin-bottom: 8px;">${escapeHtml(targetFile.official_filename)}</div>
+      <div class="badge badge-danger" style="margin-top: 12px; padding: 8px 16px; display: block; text-align: left;">
+        ❌ 预览转换失败（原 Word 文档已生成并保存，可正常下载）
+      </div>
+      <div style="margin-top: 10px; font-size: 13px; color: #b91c1c; word-break: break-all;">
+        失败阶段与原因：${escapeHtml(targetFile.error_msg || '未能把 Word 转换为页图预览')}
+      </div>
+      <div style="margin-top: 12px; display: flex; gap: 8px;">
+        <button type="button" class="btn btn-sm btn-primary" onclick="retryPreview('${state.activePreviewType}')">🔄 仅重试失败的转换阶段（不重新生成原文档）</button>
+        <a href="${withAccessToken(downloadUrl)}" class="btn btn-sm btn-outline" download="${escapeHtml(targetFile.official_filename)}">⬇️ 下载 Word 原件</a>
+      </div>
     `;
   } else {
     container.innerHTML = `
-      <div style="font-weight: 600; margin-bottom: 8px;">${targetFile.official_filename}</div>
+      <div style="font-weight: 600; margin-bottom: 8px;">${escapeHtml(targetFile.official_filename)}</div>
       <div class="badge badge-warning" style="margin-top: 12px; padding: 8px 16px;">
-        正在后台生成 Word 原件及分页预览图片...
+        正在生成 Word 原件并转换真实预览，请稍候...
       </div>
     `;
   }
+}
+
+/**
+ * 仅重试预览：不重新生成原文档、不再次打印 (整改 A.4)
+ */
+async function retryPreview(fileType) {
+  if (!state.currentTask) return;
+  try {
+    const res = await fetch(`${API_BASE}/api/tasks/${state.currentTask.id}/files/${fileType}/retry-preview`, { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
+    await refreshCurrentTask();
+    renderPreviewBox();
+  } catch (err) {
+    alert('重试预览失败：' + err.message);
+  }
+}
+
+/** 重新拉取当前任务详情，保证预览地址带最新版本号（避免读到旧缓存） */
+async function refreshCurrentTask() {
+  if (!state.currentTask) return;
+  try {
+    const res = await fetch(`${API_BASE}/api/tasks/${state.currentTask.id}`);
+    if (res.ok) state.currentTask = await res.json();
+  } catch (e) {}
 }
 
 function openPreviewModal(imgUrl, title, downloadUrl) {
@@ -1336,39 +1594,127 @@ async function submitPrintJob() {
 
   const printCert = document.getElementById('print-check-cert').checked;
   const printPack = document.getElementById('print-check-pack').checked;
-  const copies = parseInt(document.getElementById('print-copies').value) || 1;
+  const copiesRaw = document.getElementById('print-copies').value;
+  const copies = parseInt(copiesRaw, 10);
 
   if (!printCert && !printPack) return alert('请至少勾选一个打印文件');
+  if (!Number.isInteger(copies) || copies < 1 || copies > 99) {
+    return alert('打印份数必须是 1-99 的整数');
+  }
 
+  const select = document.getElementById('printer-select');
+  const chosenPrinter = select ? select.value : '';
+  if (!chosenPrinter) {
+    return alert('当前执行终端未连接或未配置可用打印机');
+  }
+
+  const workerId = state.selectedWorker ? state.selectedWorker.id : '';
+  if (!workerId) return alert('请先选择执行终端');
+
+  const taskId = state.currentTask.id;
+  const files = state.currentTask.files || [];
+
+  // 必须携带 taskId + fileId，后端据此解析真实文件与内容版本；不允许按文件名/路径猜测 (PR-B03/PR-B04)
   const batchItems = [];
-  if (printCert) batchItems.push({ fileType: 'cert', copies });
-  if (printPack) batchItems.push({ fileType: 'packing', copies });
+  const wantCert = printCert;
+  const wantPack = printPack;
+  for (const f of files) {
+    if (wantCert && f.file_type === 'cert') batchItems.push({ fileId: f.id, fileType: 'cert', copies });
+    if (wantPack && f.file_type === 'packing') batchItems.push({ fileId: f.id, fileType: 'packing', copies });
+  }
+  if (batchItems.length === 0) {
+    return alert('当前任务中没有可打印的已生成文件，请先生成文档后再打印');
+  }
 
+  const requestId = 'print_' + Date.now() + '_' + Math.random().toString(36).substring(2, 8);
+
+  let res;
   try {
-    const select = document.getElementById('printer-select');
-    const chosenPrinter = select ? select.value : '';
-
-    if (!chosenPrinter) {
-      return alert('当前执行终端未连接或未配置可用打印机');
-    }
-
-    const workerId = state.selectedWorker ? state.selectedWorker.id : 'worker-local';
-
-    const res = await fetch(`${API_BASE}/api/print/submit`, {
+    res = await fetch(`${API_BASE}/api/print/submit`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
+        requestId,
         clientId: state.clientId,
         workerId,
+        taskId,
         printerName: chosenPrinter,
         batchItems
       })
     });
-    const data = await res.json();
-    alert(`打印任务已成功发送至终端 [${workerId}] 打印队列！(Print Job #${data.printJobId})`);
-  } catch (err) {
-    alert('提交打印失败: ' + err.message);
+  } catch (netErr) {
+    // 网络不确定：不盲目重复提交，提示用同一 requestId 查询/重试 (PR10)
+    return alert(`提交打印结果不确定（网络异常）：${netErr.message}\n请稍后在“打印状态”中查询，不要重复点击打印，避免重复出纸。`);
   }
+
+  const contentType = res.headers.get('content-type') || '';
+  let data = null;
+  if (contentType.includes('application/json')) {
+    try { data = await res.json(); } catch (e) { data = null; }
+  } else {
+    const text = await res.text().catch(() => '');
+    return alert(`打印提交失败：服务响应不是 JSON（HTTP ${res.status}）。${String(text).replace(/<[^>]*>/g, ' ').slice(0, 120)}`);
+  }
+
+  // 必须同时满足 HTTP 成功、success 为真、且有有效 printJobId，才显示受理成功 (PR-B02)
+  if (!res.ok || !data || data.success !== true || !data.printJobId) {
+    const reason = (data && data.error) ? data.error : `HTTP ${res.status}，响应异常`;
+    return alert(`打印提交失败：${reason}`);
+  }
+
+  const jobId = data.printJobId;
+  state.lastPrintJobId = jobId;
+  alert(
+    `系统已受理打印请求（编号 #${jobId}）。\n` +
+    `当前阶段：${data.status || 'QUEUED'}（已排队，等待执行端领取）\n` +
+    `注意：受理不等于已进入打印机队列，更不等于已出纸；请稍后在“打印状态”中确认。`
+  );
+  pollPrintJobStatus(jobId);
+}
+
+/** 查询打印任务阶段与每个文件的独立状态，并如实区分“已入队列 / 结果不明” (4.1/4.3) */
+async function pollPrintJobStatus(jobId, attempts = 8) {
+  for (let i = 0; i < attempts; i++) {
+    await new Promise(r => setTimeout(r, i === 0 ? 800 : 2000));
+    let job = null;
+    try {
+      const res = await fetch(`${API_BASE}/api/print/${jobId}`);
+      if (!res.ok) break;
+      const data = await res.json();
+      job = data && data.job;
+    } catch (e) {
+      break;
+    }
+    if (!job) break;
+    const items = job.items || [];
+    const finished = ['SUBMITTED_TO_SPOOLER', 'FAILED', 'RESULT_UNKNOWN', 'PARTIAL_SUBMITTED'].includes(job.status);
+    if (finished) {
+      reportPrintJobResult(job);
+      return;
+    }
+    if (i === attempts - 1) reportPrintJobResult(job, true);
+  }
+}
+
+function reportPrintJobResult(job, stillPending = false) {
+  const items = job.items || [];
+  const lines = items.map(it => {
+    const fileLabel = it.fileType === 'cert' ? '发货证书' : '装箱清单';
+    const stage = {
+      QUEUED: '已排队（等待执行端领取）',
+      CLAIMED: '执行端已领取',
+      DISPATCHING: '正在调用打印',
+      SUBMITTED_TO_SPOOLER: it.windowsJobId ? `已进入 Windows 打印队列（作业号 ${it.windowsJobId}）` : '已提交打印队列（未取得队列作业号，无法确认）',
+      FAILED: `失败：${it.errorMsg || '未知原因'}`,
+      RESULT_UNKNOWN: `结果无法确认：${it.errorMsg || '已调用打印但未能确认，请勿自动重印'}`
+    }[it.status] || it.status;
+    return `· ${fileLabel}（${it.copies || 1} 份）：${stage}`;
+  }).join('\n');
+
+  const head = stillPending
+    ? `打印任务 #${job.id} 仍在处理中（当前状态：${job.status}）`
+    : `打印任务 #${job.id} 状态：${job.status}`;
+  alert(`${head}\n${lines}\n\n${job.stageNotice || ''}`);
 }
 
 // ==================== HISTORY ====================

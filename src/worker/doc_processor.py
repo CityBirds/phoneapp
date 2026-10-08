@@ -64,7 +64,38 @@ def process_word_document(template_path, output_path, data):
                 sensor_sn = str(form_data.get('sensorSn', ''))
                 cert_date = str(form_data.get('certDate') or form_data.get('date') or '')
                 has_pump = bool(form_data.get('hasPump', True))
-                is_poa = 'POA' in model.upper()
+                # 保护行/传感器行由该任务绑定模板的 protectedRows/packingItems 决定，
+                # 不再用型号名称（含 POA）推导 (整改 B.1/B.5)，否则 POA3500 会被误当成 POA200
+                is_pump_model = 'POA' in model.upper()
+                field_mappings = data.get('fieldMappings') or data.get('field_mappings') or {}
+                packing_cfg_items = field_mappings.get('packingItems') or []
+                has_sensor_row_configured = False
+                sensor_row_name = '传感器'
+                sensor_data_index = -1
+                for _idx, _cfg in enumerate(packing_cfg_items):
+                    if _cfg.get('isProtectedSensor') or str(_cfg.get('name') or '') == '传感器':
+                        has_sensor_row_configured = True
+                        sensor_data_index = _idx
+                        if _cfg.get('name'):
+                            sensor_row_name = str(_cfg.get('name'))
+                        break
+                if not has_sensor_row_configured and sensor_model:
+                    has_sensor_row_configured = True
+
+                def set_cell_text(tbl, row, col, value):
+                    """完整覆写单元格文本，避免 Range.Text 在存在格式标记时变成追加（如 19.998 mA mA）"""
+                    if value is None:
+                        return False
+                    try:
+                        rng = tbl.Cell(row, col).Range
+                        try:
+                            rng.MoveEnd(1, -1)  # wdCharacter=1，排除单元格结束标记
+                        except Exception:
+                            pass
+                        rng.Text = str(value)
+                        return True
+                    except Exception:
+                        return False
 
                 # Replace default SN AP10007513 in StoryRanges
                 if device_sn and device_sn != "AP10007513":
@@ -148,53 +179,82 @@ def process_word_document(template_path, output_path, data):
                                     if act_val is not None and table.Columns.Count >= 3:
                                         table.Cell(r_idx, 3).Range.Text = str(act_val)
                     elif doc_type == 'packing':
-                        pump_str = "带泵" if (is_poa and has_pump) else ""
+                        pump_str = "带泵" if (is_pump_model and has_pump) else ""
                         main_remark = f"SN: {device_sn} {pump_str}".strip() if pump_str else f"SN: {device_sn}"
                         sensor_remark_str = f"SN: {sensor_sn}" if sensor_sn else ""
-
-                        if table.Rows.Count >= 2:
-                            if model and table.Columns.Count >= 3:
-                                table.Cell(2, 3).Range.Text = model
-                            if table.Columns.Count >= 7:
-                                table.Cell(2, 7).Range.Text = main_remark
-
-                        if is_poa and table.Rows.Count >= 3:
-                            if sensor_model and table.Columns.Count >= 3:
-                                table.Cell(3, 3).Range.Text = sensor_model
-                            if table.Columns.Count >= 7:
-                                table.Cell(3, 7).Range.Text = sensor_remark_str
-
                         packing_items = form_data.get('packingItems', [])
+                        first_data_row = 2
+
+                        # 按行名称识别真实存在的保护行，不假设“第二行就是传感器行” (整改 B.5/B.6)
+                        for _r in range(2, table.Rows.Count + 1):
+                            try:
+                                _name = str(table.Cell(_r, 2).Range.Text).strip()
+                            except Exception:
+                                continue
+                            if _name.startswith('主设备'):
+                                if model:
+                                    set_cell_text(table, _r, 3, model)
+                                set_cell_text(table, _r, 7, main_remark)
+                            elif has_sensor_row_configured and _name == sensor_row_name:
+                                if sensor_model:
+                                    set_cell_text(table, _r, 3, sensor_model)
+                                set_cell_text(table, _r, 7, sensor_remark_str)
+
                         if packing_items:
-                            needed_rows = 1 + len(packing_items)
-                            while table.Rows.Count < needed_rows:
-                                table.Rows.Add()
-                            while table.Rows.Count > needed_rows and table.Rows.Count > 2:
-                                table.Rows.Item(table.Rows.Count).Delete()
+                            # 若模板配置未指明传感器行，则按条目名称/标记推断（仅当模板确实配置了传感器行时才生效）
+                            if sensor_data_index < 0 and has_sensor_row_configured:
+                                for _i, _it in enumerate(packing_items):
+                                    if str(_it.get('name') or '') == sensor_row_name or _it.get('isProtectedSensor'):
+                                        sensor_data_index = _i
+                                        break
+
+                            # 只在数据区增删行：在最后一行数据行的某个单元格上 Range.Rows.Add()，
+                            # 新行会插入到该数据行之后、表格下方内容之前 (整改 C.6)
+                            template_data_rows = max(0, table.Rows.Count - first_data_row + 1)
+                            current_data_rows = template_data_rows
+                            guard = 0
+                            while current_data_rows < len(packing_items) and guard < 60:
+                                guard += 1
+                                added = False
+                                last_row = first_data_row + current_data_rows - 1
+                                for _c in range(table.Columns.Count, 0, -1):
+                                    try:
+                                        table.Cell(last_row, _c).Range.Rows.Add()
+                                        added = True
+                                        break
+                                    except Exception:
+                                        continue
+                                if not added:
+                                    break
+                                current_data_rows += 1
 
                             for idx, item in enumerate(packing_items):
-                                r = 2 + idx
-                                if 2 <= r <= table.Rows.Count and table.Columns.Count >= 7:
-                                    table.Cell(r, 1).Range.Text = str(idx + 1)
-                                    if item.get('name') is not None: table.Cell(r, 2).Range.Text = str(item.get('name'))
-
-                                    if idx == 0 and model:
-                                        table.Cell(r, 3).Range.Text = model
-                                    elif is_poa and idx == 1 and sensor_model:
-                                        table.Cell(r, 3).Range.Text = sensor_model
-                                    elif item.get('spec') is not None:
-                                        table.Cell(r, 3).Range.Text = str(item.get('spec'))
-
-                                    if item.get('count') is not None: table.Cell(r, 4).Range.Text = str(item.get('count'))
-                                    if item.get('unit') is not None: table.Cell(r, 5).Range.Text = str(item.get('unit'))
-                                    if item.get('standard') is not None: table.Cell(r, 6).Range.Text = str(item.get('standard'))
-
-                                    if idx == 0:
-                                        table.Cell(r, 7).Range.Text = main_remark
-                                    elif is_poa and idx == 1:
-                                        table.Cell(r, 7).Range.Text = sensor_remark_str
-                                    elif item.get('remark') is not None:
-                                        table.Cell(r, 7).Range.Text = str(item.get('remark'))
+                                r = first_data_row + idx
+                                if r < first_data_row or r > table.Rows.Count:
+                                    break
+                                set_cell_text(table, r, 1, str(idx + 1))
+                                if item.get('name') is not None:
+                                    set_cell_text(table, r, 2, str(item.get('name')))
+                                # 规格：主设备用型号；只有真实传感器行才用传感器型号，其余保留用户填写值 (整改 B.6)
+                                if idx == 0 and model:
+                                    set_cell_text(table, r, 3, model)
+                                elif sensor_data_index >= 0 and idx == sensor_data_index and sensor_model:
+                                    set_cell_text(table, r, 3, sensor_model)
+                                elif item.get('spec') is not None:
+                                    set_cell_text(table, r, 3, str(item.get('spec')))
+                                if item.get('count') is not None:
+                                    set_cell_text(table, r, 4, str(item.get('count')))
+                                if item.get('unit') is not None:
+                                    set_cell_text(table, r, 5, str(item.get('unit')))
+                                if item.get('standard') is not None:
+                                    set_cell_text(table, r, 6, str(item.get('standard')))
+                                # 备注：仅主设备行与真实传感器行使用自动备注 (整改 B.6)
+                                if idx == 0:
+                                    set_cell_text(table, r, 7, main_remark)
+                                elif sensor_data_index >= 0 and idx == sensor_data_index:
+                                    set_cell_text(table, r, 7, sensor_remark_str)
+                                elif item.get('remark') is not None:
+                                    set_cell_text(table, r, 7, str(item.get('remark')))
 
                 doc.Save()
                 doc.Close(False)

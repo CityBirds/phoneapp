@@ -11,7 +11,7 @@ const { extractDocumentStructure } = require('../src/common/doc_structure');
 const { findFieldCandidates, isDateFieldLabel, inferFieldType } = require('../src/common/matcher');
 const { resolveModelAlias } = require('../src/backend/server');
 const { generateWordDocument } = require('../src/worker/word_engine');
-const { generateDocumentPreview } = require('../src/backend/preview');
+const { generateDocumentPreview, getPreviewPageDir } = require('../src/backend/preview');
 const { getFileSha256 } = require('../src/common/utils');
 
 const samplesDir = path.join(__dirname, '../samples');
@@ -234,16 +234,25 @@ test('R17 / R21: Real Word Preview Generation', () => {
     }
   });
 
-  const previews = generateDocumentPreview(tmpOutPath, previewDir, 'test_task_cert', {
-    fileType: 'cert',
-    task: { model: '990', device_sn: 'EX10260902' }
+  // 整改 3.1（2026-10-07）：预览 = 真实 Word → PDF → 逐页图片，
+  // 返回 { pdfUrl, pageUrls, pages, pdfPath, ... }；PDF 与页图都必须产出。
+  const preview = generateDocumentPreview({
+    sourcePath: tmpOutPath,
+    previewDir,
+    taskId: 'test_task_cert',
+    fileType: 'cert'
   });
 
-  assert.ok(previews.length > 0, 'Preview images should be generated');
-  const previewFile = path.join(previewDir, path.basename(previews[0]));
-  assert.ok(fs.existsSync(previewFile), 'Preview file should exist on disk');
+  assert.ok(preview.pdfUrl && preview.pdfUrl.length > 0, 'Preview PDF URL should be generated');
+  assert.ok(Array.isArray(preview.pageUrls) && preview.pageUrls.length > 0, 'Preview page images should be generated');
+  assert.ok(preview.pages === preview.pageUrls.length, 'Page count must match rendered page images');
+  assert.ok(preview.pageUrls.every(u => /\.png(\?|$)/i.test(u)), 'Page images must be PNG URLs');
+  assert.ok(fs.existsSync(preview.pdfPath), 'Preview PDF file should exist on disk');
+  assert.strictEqual(path.extname(preview.pdfPath).toLowerCase(), '.pdf', 'Preview artifact must be a PDF');
 
   // Clean up test artifacts
   if (fs.existsSync(tmpOutPath)) try { fs.unlinkSync(tmpOutPath); } catch (e) {}
-  if (fs.existsSync(previewFile)) try { fs.unlinkSync(previewFile); } catch (e) {}
+  if (fs.existsSync(preview.pdfPath)) try { fs.unlinkSync(preview.pdfPath); } catch (e) {}
+  const pageDir = getPreviewPageDir(previewDir, 'test_task_cert', 'cert');
+  if (fs.existsSync(pageDir)) try { fs.rmSync(pageDir, { recursive: true, force: true }); } catch (e) {}
 });
