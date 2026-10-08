@@ -117,8 +117,53 @@ const state = {
   activePreviewType: 'cert',
   historyRange: 'today',
   testPoints: [],
-  packingItems: []
+  packingItems: [],
+  pollingSessionId: 0,
+  lastQueryError: null,
+  lastQueryTime: null,
+  clientPollTimeout: false,
+  initializedBundleKey: null
 };
+
+/** 从已发布模板解析主设备序列号默认值 (2.1, SN01-SN05) */
+function extractDefaultDeviceSn(bundle) {
+  if (!bundle) return { sn: '', conflict: false };
+
+  let certSn = '';
+  let packingSn = '';
+
+  const certTmpl = bundle.certTemplate;
+  if (certTmpl && certTmpl.field_mappings) {
+    const singleFields = certTmpl.field_mappings.singleFields || [];
+    const snField = singleFields.find(f =>
+      f.status === 'bound' && /Inst\.?\s*SN|设备序列号|序列号|Instrument\s*SN|SN:/i.test(f.label || '')
+    );
+    if (snField && (snField.candidateValue || snField.defaultValue)) {
+      certSn = String(snField.candidateValue || snField.defaultValue).trim();
+    }
+  }
+
+  const packTmpl = bundle.packingTemplate;
+  if (packTmpl && packTmpl.field_mappings) {
+    const items = packTmpl.field_mappings.packingItems || [];
+    const mainItem = items.find(it => it.role === 'mainDevice' || /主设备|主机/.test(it.name || ''));
+    if (mainItem) {
+      if (mainItem.sn) {
+        packingSn = String(mainItem.sn).trim();
+      } else if (mainItem.remark) {
+        const match = /SN:\s*([^\s\r\n带泵]+)/i.exec(mainItem.remark);
+        if (match) packingSn = match[1].trim();
+      }
+    }
+  }
+
+  if (certSn && packingSn && certSn !== packingSn) {
+    return { sn: certSn, certSn, packingSn, conflict: true };
+  }
+
+  const sn = certSn || packingSn || '';
+  return { sn, certSn, packingSn, conflict: false };
+}
 
 
 // ==================== INITIALIZATION ====================
@@ -465,6 +510,25 @@ function onModelChange() {
   if (!bundle) return;
 
   state.currentModel = bundle.model_display;
+
+  const bundleKey = bundle ? `${bundle.id}_v${bundle.version || '1'}` : '';
+  if (bundleKey && state.initializedBundleKey !== bundleKey) {
+    state.initializedBundleKey = bundleKey;
+    const extracted = extractDefaultDeviceSn(bundle);
+    const snInput = document.getElementById('device-sn');
+    if (snInput) {
+      snInput.value = extracted.sn || '';
+    }
+    const conflictEl = document.getElementById('sn-conflict-notice');
+    if (conflictEl) {
+      if (extracted.conflict) {
+        conflictEl.style.display = 'block';
+        conflictEl.innerHTML = `⚠️ 模板内置序列号存在冲突（证书: <b>${escapeHtml(extracted.certSn)}</b>，清单: <b>${escapeHtml(extracted.packingSn)}</b>），已默认采用证书序列号，请核对。`;
+      } else {
+        conflictEl.style.display = 'none';
+      }
+    }
+  }
 
   const docCombo = bundle.doc_combo;
   const showCert = docCombo === 'cert_and_packing' || docCombo === 'cert_only';
@@ -1015,11 +1079,30 @@ function findSensorRowIndex() {
   return state.packingItems.findIndex(it => it.role === 'sensor');
 }
 
-function generateMainDeviceRemark(sn, hasPump) {
+function generateMainDeviceRemark(oldRemark, sn, hasPump) {
   const cleanSn = String(sn || '').trim();
-  if (!cleanSn) return '';
   const pumpStr = hasPump ? '带泵' : '';
-  return `SN: ${cleanSn}${pumpStr}`;
+  const snTag = cleanSn ? `SN: ${cleanSn}${pumpStr}` : '';
+  const cleanOld = String(oldRemark || '').trim();
+
+  if (!cleanOld) {
+    return snTag;
+  }
+
+  const snRegex = /SN:\s*[^\s\r\n]+/i;
+  if (snRegex.test(cleanOld)) {
+    if (snTag) {
+      return cleanOld.replace(snRegex, snTag);
+    } else {
+      return cleanOld.replace(snRegex, '').replace(/\s+/g, ' ').trim();
+    }
+  } else {
+    if (snTag) {
+      return `${cleanOld} ${snTag}`.trim();
+    } else {
+      return cleanOld;
+    }
+  }
 }
 
 function initPackingItemsForModel() {
@@ -1083,7 +1166,7 @@ function syncDeviceSnToPackingList(render = true) {
   }
 
   const targetRow = state.packingItems[mainIdx];
-  const newRemark = generateMainDeviceRemark(rawSn, state.hasPump);
+  const newRemark = generateMainDeviceRemark(targetRow.remark, rawSn, state.hasPump);
   const changed = (targetRow.remark !== newRemark);
   targetRow.remark = newRemark;
   if (render && changed) {
@@ -1414,36 +1497,73 @@ function renderPreviewLoading() {
   container.innerHTML = `
     <div style="text-align: center; padding: 24px;">
       <div style="font-size: 36px; margin-bottom: 8px;">⚙️</div>
-      <div style="font-weight: 700; font-size: 16px; color: #0284c7;">正在极速生成 Word 原件及分页高清预览...</div>
+      <div style="font-weight: 700; font-size: 16px; color: #0284c7;">正在生成 Word 原件并转换分页高清预览...</div>
       <p style="font-size: 13px; color: #64748b; margin-top: 6px;">
-        协调服务已分派至终端 <b>${state.selectedWorker ? state.selectedWorker.name : ''}</b>，毫秒级就绪...
+        任务已分派至终端 <b>${state.selectedWorker ? escapeHtml(state.selectedWorker.name) : ''}</b>，后台正顺序处理中...
       </p>
     </div>
   `;
 }
 
 async function pollTaskPreview(taskId) {
-  let attempts = 0;
-  const timer = setInterval(async () => {
-    attempts++;
+  state.pollingSessionId++;
+  const currentSessionId = state.pollingSessionId;
+  const pollStartTime = Date.now();
+
+  async function doPoll() {
+    if (state.pollingSessionId !== currentSessionId) return;
+
     try {
-      const res = await fetch(`${API_BASE}/api/tasks/${taskId}`);
-      const task = await res.json();
-      state.currentTask = task;
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 8000);
+      const res = await fetch(`${API_BASE}/api/tasks/${taskId}`, { signal: controller.signal });
+      clearTimeout(timeoutId);
 
-      const targetFile = task.files.find(f => f.file_type === state.activePreviewType);
-      const isReady = targetFile && targetFile.preview_images && targetFile.preview_images.length > 0;
-      // 预览转换失败同样是终态：停止轮询并展示失败原因（整改 A.3/A.6）
-      const isPreviewFailed = targetFile && (targetFile.status === 'PREVIEW_FAILED' || targetFile.status === 'FAILED');
+      if (state.pollingSessionId !== currentSessionId) return;
 
-      if (isReady || isPreviewFailed || task.status === 'SUCCESS' || task.status === 'PARTIAL_SUCCESS' || task.status === 'FAILED' || attempts >= 25) {
-        clearInterval(timer);
+      if (!res.ok) {
+        state.lastQueryError = `HTTP ${res.status}`;
         renderPreviewBox();
+        setTimeout(doPoll, 2000);
+        return;
+      }
+
+      const task = await res.json();
+      if (state.pollingSessionId !== currentSessionId) return;
+
+      state.currentTask = task;
+      state.lastQueryError = null;
+      state.lastQueryTime = new Date().toLocaleTimeString();
+
+      renderPreviewBox();
+
+      const allFinished = (task.files || []).length > 0 && (task.files || []).every(f =>
+        ['PREVIEW_READY', 'PREVIEW_FAILED', 'PREVIEW_TIMEOUT', 'PRINTED', 'FAILED'].includes(f.status)
+      );
+
+      const elapsedSec = (Date.now() - pollStartTime) / 1000;
+
+      if (!allFinished) {
+        if (elapsedSec < 120) {
+          setTimeout(doPoll, 1200);
+        } else {
+          state.clientPollTimeout = true;
+          renderPreviewBox();
+        }
+      } else {
+        state.clientPollTimeout = false;
       }
     } catch (e) {
-      if (attempts >= 25) clearInterval(timer);
+      if (state.pollingSessionId !== currentSessionId) return;
+      state.lastQueryError = '网络连接异常，正在持续尝试重新探测...';
+      renderPreviewBox();
+      setTimeout(doPoll, 2500);
     }
-  }, 700);
+  }
+
+  state.clientPollTimeout = false;
+  state.lastQueryError = null;
+  doPoll();
 }
 
 /**
@@ -1478,6 +1598,9 @@ function switchPreviewDoc(type) {
   document.getElementById('preview-tab-cert').className = type === 'cert' ? 'toggle-btn active' : 'toggle-btn';
   document.getElementById('preview-tab-pack').className = type === 'packing' ? 'toggle-btn active' : 'toggle-btn';
   renderPreviewBox();
+  if (state.currentTask) {
+    refreshCurrentTask();
+  }
 }
 
 function renderPreviewBox() {
@@ -1490,30 +1613,39 @@ function renderPreviewBox() {
     return;
   }
 
-  const targetFile = state.currentTask.files.find(f => f.file_type === state.activePreviewType);
+  const targetFile = state.currentTask.files ? state.currentTask.files.find(f => f.file_type === state.activePreviewType) : null;
   if (!targetFile) {
-    container.innerHTML = '未找到对应的文件记录';
+    container.innerHTML = `
+      <div style="padding: 12px 0;">
+        <div style="color: #64748b; font-size: 13px;">未包含 ${state.activePreviewType === 'cert' ? '证书' : '发货清单'} 文档</div>
+        <button type="button" class="btn btn-sm btn-secondary" style="margin-top: 8px;" onclick="refreshCurrentTask()">🔄 刷新状态</button>
+      </div>
+    `;
     if (btnBox) btnBox.innerHTML = '';
     return;
   }
 
   const downloadUrl = `${API_BASE}/api/tasks/${state.currentTask.id}/files/${state.activePreviewType}/download`;
   const pdfUrl = `${API_BASE}/previews/task_${state.currentTask.id}_${state.activePreviewType}.pdf`;
+
+  const refreshBtnHtml = `<button type="button" class="btn btn-sm btn-secondary" onclick="refreshCurrentTask()">🔄 刷新状态</button>`;
+  const downloadBtnHtml = `<a href="${withAccessToken(downloadUrl)}" class="btn btn-sm btn-outline" download="${escapeHtml(targetFile.official_filename)}">⬇️ 下载 Word 原件</a>`;
+
   if (btnBox) {
-    btnBox.innerHTML = `
-      <a href="${withAccessToken(downloadUrl)}" class="btn btn-sm btn-outline" download="${escapeHtml(targetFile.official_filename)}">
-        ⬇️ 下载 Word 原件
-      </a>
-    `;
+    btnBox.innerHTML = `${refreshBtnHtml} ${downloadBtnHtml}`;
   }
 
-  const previews = targetFile.preview_images || [];
-  const isPreviewFailed = targetFile.status === 'PREVIEW_FAILED' ||
-    (!previews.length && !!targetFile.error_msg && targetFile.status !== 'GENERATING');
+  const queryNoticeHtml = state.lastQueryError
+    ? `<div class="badge badge-warning" style="margin-bottom: 10px; display: block; text-align: left; background: #fff3cd; color: #856404;">⚠️ 状态查询异常：${escapeHtml(state.lastQueryError)}</div>`
+    : '';
 
-  if (previews.length > 0) {
-    // 分页图片预览：来自本任务真实 Word 转换出的 PDF 逐页渲染，不重画、不用模板原件冒充
+  const previews = targetFile.preview_images || [];
+  const isPreviewFailed = targetFile.status === 'PREVIEW_FAILED' || targetFile.status === 'PREVIEW_TIMEOUT' ||
+    (targetFile.status === 'FAILED' && !previews.length);
+
+  if (targetFile.status === 'PREVIEW_READY' && previews.length > 0) {
     container.innerHTML = `
+      ${queryNoticeHtml}
       <div style="font-weight: 700; margin-bottom: 6px; color: #1e293b; font-size: 14px;">
         ${escapeHtml(targetFile.official_filename)}
       </div>
@@ -1522,34 +1654,58 @@ function renderPreviewBox() {
       </div>
       ${renderPagedPreview(previews, targetFile.official_filename)}
       <div style="margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap;">
-        <a href="${withAccessToken(downloadUrl)}" class="btn btn-sm btn-outline" download="${escapeHtml(targetFile.official_filename)}">⬇️ 下载 Word 原件</a>
+        ${refreshBtnHtml}
+        ${downloadBtnHtml}
         <a href="${withAccessToken(pdfUrl)}" target="_blank" rel="noopener" class="btn btn-sm btn-outline">🔍 查看/下载 PDF</a>
-        <button type="button" class="btn btn-sm btn-secondary" onclick="retryPreview('${state.activePreviewType}')">🔄 仅重试失败的转换阶段</button>
+        <button type="button" class="btn btn-sm btn-secondary" onclick="retryPreview('${state.activePreviewType}')">🔄 仅重试预览转换</button>
       </div>
     `;
   } else if (isPreviewFailed) {
     container.innerHTML = `
+      ${queryNoticeHtml}
       <div style="font-weight: 600; margin-bottom: 8px;">${escapeHtml(targetFile.official_filename)}</div>
-      <div class="badge badge-danger" style="margin-top: 12px; padding: 8px 16px; display: block; text-align: left;">
-        ❌ 预览转换失败（原 Word 文档已生成并保存，可正常下载）
+      <div class="badge badge-danger" style="margin-top: 8px; padding: 8px 16px; display: block; text-align: left;">
+        ❌ 预览转换未就绪（原 Word 文档已生成并保存，可正常下载）
       </div>
       <div style="margin-top: 10px; font-size: 13px; color: #b91c1c; word-break: break-all;">
         失败阶段与原因：${escapeHtml(targetFile.error_msg || '未能把 Word 转换为页图预览')}
       </div>
-      <div style="margin-top: 12px; display: flex; gap: 8px;">
-        <button type="button" class="btn btn-sm btn-primary" onclick="retryPreview('${state.activePreviewType}')">🔄 仅重试失败的转换阶段（不重新生成原文档）</button>
-        <a href="${withAccessToken(downloadUrl)}" class="btn btn-sm btn-outline" download="${escapeHtml(targetFile.official_filename)}">⬇️ 下载 Word 原件</a>
+      <div style="margin-top: 12px; display: flex; gap: 8px; flex-wrap: wrap;">
+        <button type="button" class="btn btn-sm btn-primary" onclick="retryPreview('${state.activePreviewType}')">🔄 仅重试预览转换（不重新生成 Word 原件）</button>
+        ${downloadBtnHtml}
+        ${refreshBtnHtml}
       </div>
     `;
   } else {
+    let stageText = '原件已生成，正在后台转换真实预览...';
+    if (targetFile.status === 'QUEUED') stageText = '原件已生成，正在排队转换 PDF...';
+    if (targetFile.status === 'CONVERTING_PDF') stageText = '原件已生成，正在转换 PDF...';
+    if (targetFile.status === 'CONVERTING_IMAGE') stageText = 'PDF 已生成，正在渲染高清页图...';
+    if (targetFile.status === 'GENERATING') stageText = '执行端正在生成 Word 原件...';
+
+    if (state.clientPollTimeout) {
+      stageText = `暂未取得最终结果（后台处理中，最近更新时间: ${state.lastQueryTime || '刚才'}）`;
+    }
+
     container.innerHTML = `
+      ${queryNoticeHtml}
       <div style="font-weight: 600; margin-bottom: 8px;">${escapeHtml(targetFile.official_filename)}</div>
-      <div class="badge badge-warning" style="margin-top: 12px; padding: 8px 16px;">
-        正在生成 Word 原件并转换真实预览，请稍候...
+      <div class="badge badge-warning" style="margin-top: 8px; padding: 10px 16px; display: block; text-align: left;">
+        ⏳ ${escapeHtml(stageText)}
+      </div>
+      <div style="margin-top: 12px; display: flex; gap: 8px; flex-wrap: wrap;">
+        ${refreshBtnHtml}
+        ${downloadBtnHtml}
       </div>
     `;
   }
 }
+
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && state.currentTask) {
+    refreshCurrentTask();
+  }
+});
 
 /**
  * 仅重试预览：不重新生成原文档、不再次打印 (整改 A.4)

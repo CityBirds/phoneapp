@@ -12,7 +12,8 @@ const {
 } = require('../common/matcher');
 const { extractDocumentStructure } = require('../common/doc_structure');
 const { getBeijingCalendarRange, generateUUID, getFileSha256 } = require('../common/utils');
-const { generateDocumentPreview, getPreviewPdfPath, getPreviewPageDir, isValidPdf, getConversionCapabilities } = require('./preview');
+const { generateDocumentPreview, getPreviewPdfPath, getPreviewPageDir, isValidPdf, getConversionCapabilities, clearDocumentPreview } = require('./preview');
+const PreviewQueue = require('./preview_queue');
 const accessControl = require('./access_control');
 const {
   getAccessToken,
@@ -27,6 +28,31 @@ const {
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+const previewQueue = new PreviewQueue({
+  concurrency: 1,
+  onTaskStatusChanged: (taskId) => {
+    try { reconcileTaskStatus(taskId); } catch (e) {}
+  }
+});
+
+// Startup recovery: reset orphaned/converting preview jobs from previous crashed runs (1.1.6, WAIT08)
+try {
+  const convertingFiles = db.prepare(`
+    SELECT DISTINCT task_id FROM task_files
+    WHERE status IN ('QUEUED', 'PROCESSING', 'CONVERTING', 'CONVERTING_PDF', 'CONVERTING_IMAGE')
+  `).all();
+  db.prepare(`
+    UPDATE task_files
+    SET status = 'PREVIEW_FAILED', error_msg = '服务重启，之前的预览转换过程中断，可重试'
+    WHERE status IN ('QUEUED', 'PROCESSING', 'CONVERTING', 'CONVERTING_PDF', 'CONVERTING_IMAGE')
+  `).run();
+  for (const row of convertingFiles) {
+    try { reconcileTaskStatus(row.task_id); } catch (e) {}
+  }
+} catch (e) {
+  console.warn('[Preview Startup Recovery Warning]', e.message);
+}
 
 app.use(cors());
 app.use(express.json());
@@ -3406,81 +3432,53 @@ app.post('/api/worker/tasks/:id/file-returned', requireWorkerAuth, upload.single
   const destPath = path.join(returnedDir, `${taskId}_${fileType}_${req.file.originalname}`);
   fs.renameSync(req.file.path, destPath);
 
-  const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId);
+  const pdfPath = getPreviewPdfPath(previewDir, taskId, fileType);
+  const pdfUsable = isValidPdf(pdfPath)
+    && fs.existsSync(pdfPath)
+    && fs.statSync(pdfPath).mtimeMs >= fs.statSync(destPath).mtimeMs;
+  const initialStatus = pdfUsable ? 'CONVERTING_IMAGE' : 'CONVERTING_PDF';
 
-  // 预览基于本任务实际生成并返回的 Word 文件转换；失败必须如实标记，不得伪造就绪 (整改 A.2/A.3)
-  // 分阶段：Word→PDF、PDF→逐页图片；任一阶段失败都不算就绪 (PV05)
-  let previewPayload = null;
-  let previewError = null;
-  try {
-    previewPayload = generateDocumentPreview({
-      sourcePath: destPath,
-      previewDir,
-      taskId,
-      fileType,
-      force: false
-    });
-  } catch (err) {
-    previewError = err.message;
-    console.error(`[Preview] task ${taskId} ${fileType} 预览生成失败(阶段 ${err.stage || 'unknown'}):`, err.message);
-  }
-
-  const fileStatus = previewError ? 'PREVIEW_FAILED' : 'PREVIEW_READY';
-  const previewImagesJson = previewPayload ? JSON.stringify(previewPayload.pageUrls) : JSON.stringify([]);
+  const fileSha = sha256 || getFileSha256(destPath);
 
   db.prepare(`
     UPDATE task_files
-    SET server_filepath = ?, sha256 = ?, preview_images = ?, status = ?, error_msg = ?, worker_filepath = ?
+    SET server_filepath = ?, sha256 = ?, preview_images = '[]', status = ?, error_msg = NULL, worker_filepath = ?
     WHERE task_id = ? AND file_type = ?
   `).run(
     destPath,
-    sha256 || getFileSha256(destPath),
-    previewImagesJson,
-    fileStatus,
-    previewError,
+    fileSha,
+    initialStatus,
     workerFilePath || null,
     taskId,
     fileType
   );
 
-  const files = db.prepare('SELECT * FROM task_files WHERE task_id = ?').all(taskId);
-  const anyFailed = files.some(f => f.status === 'FAILED' || f.status === 'PREVIEW_FAILED');
-  const allFinished = files.every(f => ['PREVIEW_READY', 'PREVIEW_FAILED', 'PRINTED', 'FAILED'].includes(f.status));
+  reconcileTaskStatus(taskId);
 
-  if (allFinished) {
-    if (anyFailed) {
-      // DIR-20：证书与清单分别记录状态；其中一份失败时，不得将整个任务显示为全部成功。
-      db.prepare("UPDATE tasks SET status = 'PARTIAL_SUCCESS', completed_at = ? WHERE id = ?").run(new Date().toISOString(), taskId);
-    } else {
-      db.prepare("UPDATE tasks SET status = 'SUCCESS', completed_at = ? WHERE id = ?").run(new Date().toISOString(), taskId);
-    }
-  } else {
-    db.prepare("UPDATE tasks SET status = 'IN_PROGRESS' WHERE id = ?").run(taskId);
-  }
+  previewQueue.enqueue({
+    taskId,
+    fileType,
+    sourcePath: destPath,
+    previewDir,
+    forceStage: pdfUsable ? 'images' : 'pdf'
+  });
 
   logAudit(null, 'WORKER', 'WorkerService', 'FILE_RETURNED', {
-    taskId, fileType, officialFilename, fileStatus, previewError,
-    previewPages: previewPayload ? previewPayload.pages : null,
-    previewEngine: previewPayload ? previewPayload.engine : null,
-    previewImageEngine: previewPayload ? previewPayload.imageEngine : null
+    taskId, fileType, officialFilename, fileStatus: initialStatus
   });
 
   res.json({
     success: true,
     taskId,
     fileType,
-    fileStatus,
-    previewImages: previewPayload ? previewPayload.pageUrls : [],
-    previewUrl: previewPayload ? previewPayload.pdfUrl : null,
-    previewError,
-    previewPages: previewPayload ? previewPayload.pages : null,
-    previewEngine: previewPayload ? previewPayload.engine : null,
-    previewImageEngine: previewPayload ? previewPayload.imageEngine : null
+    fileStatus: initialStatus,
+    previewStatus: initialStatus,
+    message: '原件已接收并持久化，正在后台处理预览转换'
   });
 });
 
 /**
- * 仅重试预览：不重新生成原文档、不再次打印 (整改 A.4)
+ * 仅重试预览：不重新生成原文档、不再次打印 (整改 A.4 / 1.1.7)
  */
 app.post('/api/tasks/:id/files/:fileType/retry-preview', async (req, res) => {
   const { id, fileType } = req.params;
@@ -3494,16 +3492,13 @@ app.post('/api/tasks/:id/files/:fileType/retry-preview', async (req, res) => {
     });
   }
 
-  // 仅重做失败的那一阶段（PV04/PV05）：
-  //  - 没有有效 PDF → 只重做 Word→PDF（下一阶段随之进行）
-  //  - 已有有效 PDF → 只重做 PDF→页图，不重新转换、不重新生成 Word
   const pdfPath = getPreviewPdfPath(previewDir, id, fileType);
   const pdfUsable = isValidPdf(pdfPath)
     && fs.existsSync(pdfPath)
     && fs.statSync(pdfPath).mtimeMs >= fs.statSync(taskFile.server_filepath).mtimeMs;
   const forceStage = pdfUsable ? 'images' : 'pdf';
+
   if (forceStage === 'images') {
-    // 只清理页图，保留有效 PDF
     const pageDir = getPreviewPageDir(previewDir, id, fileType);
     if (fs.existsSync(pageDir)) {
       for (const f of fs.readdirSync(pageDir)) {
@@ -3514,46 +3509,35 @@ app.post('/api/tasks/:id/files/:fileType/retry-preview', async (req, res) => {
     clearDocumentPreview(previewDir, id, fileType);
   }
 
-  try {
-    const preview = generateDocumentPreview({
-      sourcePath: taskFile.server_filepath,
-      previewDir,
-      taskId: id,
-      fileType,
-      forceStage
-    });
-    db.prepare(`
-      UPDATE task_files SET preview_images = ?, status = 'PREVIEW_READY', error_msg = NULL
-      WHERE task_id = ? AND file_type = ?
-    `).run(JSON.stringify(preview.pageUrls), id, fileType);
-    reconcileTaskStatus(id);
-    logAudit(null, 'WORKER', 'WorkerService', 'RETRY_PREVIEW', {
-      taskId: id, fileType, retryStage: forceStage, pages: preview.pages, imageEngine: preview.imageEngine
-    });
-    res.json({
-      success: true,
-      taskId: id,
-      fileType,
-      retryStage: forceStage,
-      previewUrl: preview.pdfUrl,
-      previewImages: preview.pageUrls,
-      pages: preview.pages,
-      engine: preview.engine,
-      imageEngine: preview.imageEngine
-    });
-  } catch (err) {
-    db.prepare(`
-      UPDATE task_files SET status = 'PREVIEW_FAILED', error_msg = ?, preview_images = '[]'
-      WHERE task_id = ? AND file_type = ?
-    `).run(err.message, id, fileType);
-    reconcileTaskStatus(id);
-    res.status(500).json({
-      success: false,
-      error: err.message,
-      failedStage: err.stage || forceStage,
-      status: 'PREVIEW_FAILED'
-    });
-  }
+  const initialStatus = forceStage === 'images' ? 'CONVERTING_IMAGE' : 'CONVERTING_PDF';
+
+  db.prepare(`
+    UPDATE task_files SET status = ?, error_msg = NULL, preview_images = '[]'
+    WHERE task_id = ? AND file_type = ?
+  `).run(initialStatus, id, fileType);
+
+  reconcileTaskStatus(id);
+
+  previewQueue.enqueue({
+    taskId: id,
+    fileType,
+    sourcePath: taskFile.server_filepath,
+    previewDir,
+    forceStage
+  });
+
+  logAudit(null, 'WORKER', 'WorkerService', 'RETRY_PREVIEW', {
+    taskId: id, fileType, retryStage: forceStage
+  });
+
+  res.json({
+    success: true,
+    taskId: id,
+    fileType,
+    retryStage: forceStage,
+    status: initialStatus,
+    message: '已启动后台预览转换重试'
+  });
 });
 
 /** 转换与页图渲染能力自检：能启动 Word 不代表能导出 PDF，如实报告检测到的组件与原因 (3.2) */
@@ -3571,8 +3555,8 @@ app.get('/api/preview/capabilities', (req, res) => {
 /** 依据分文件状态重新汇总任务状态（一份成功一份失败不得报全部成功） */
 function reconcileTaskStatus(taskId) {
   const files = db.prepare('SELECT * FROM task_files WHERE task_id = ?').all(taskId);
-  const anyFailed = files.some(f => f.status === 'FAILED' || f.status === 'PREVIEW_FAILED');
-  const allFinished = files.every(f => ['PREVIEW_READY', 'PREVIEW_FAILED', 'PRINTED', 'FAILED'].includes(f.status));
+  const anyFailed = files.some(f => f.status === 'FAILED' || f.status === 'PREVIEW_FAILED' || f.status === 'PREVIEW_TIMEOUT');
+  const allFinished = files.every(f => ['PREVIEW_READY', 'PREVIEW_FAILED', 'PREVIEW_TIMEOUT', 'PRINTED', 'FAILED'].includes(f.status));
   if (!allFinished) {
     db.prepare("UPDATE tasks SET status = 'IN_PROGRESS' WHERE id = ?").run(taskId);
     return;

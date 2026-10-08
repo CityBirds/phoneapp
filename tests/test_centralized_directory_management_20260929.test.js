@@ -1,4 +1,4 @@
-﻿const test = require('node:test');
+const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('path');
 const fs = require('fs');
@@ -379,6 +379,7 @@ test('DIR-02, DIR-04, DIR-05, DIR-12, DIR-24: 多执行端独立目录、证书�
   assert.ok(filesA.some(f => f.includes('清单') && f.includes(snA)));
 
   // 2. Submit task to Worker B with same model
+  await workerB.sendHeartbeat();
   const snB = 'AP20008888';
   const resB = await fetch(`${serverUrl}/api/tasks/submit`, {
     method: 'POST',
