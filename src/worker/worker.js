@@ -1,6 +1,7 @@
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const crypto = require('crypto');
 const { execSync } = require('child_process');
 const { generateWordDocument } = require('./word_engine');
 const { isPathInWhitelist, isPrinterAllowed, isSubpath, safeRealPath } = require('./security');
@@ -402,73 +403,157 @@ class ExecutionWorker {
     }
   }
 
-  async fetchTemplateForTask(model, fileType, templateId = null) {
-    try {
-      const res = await fetch(`${this.serverUrl}/api/templates`, { headers: this.workerAuthHeaders() });
-      if (res.ok) {
-        const tmpls = await res.json();
-        // Priority 1: Match by exact templateId if provided
-        let found = templateId ? tmpls.find(t => t.id === templateId) : null;
-        // Priority 2: Match by exact model and type
-        if (!found) {
-          found = tmpls.find(t => (t.model === model || t.model.toUpperCase() === model.toUpperCase()) && t.type === fileType);
-        }
-        // Priority 3: Match by normalized model substring (e.g. 'POA3500' <-> '3500')
-        if (!found) {
-          const cleanModel = String(model).replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
-          found = tmpls.find(t => {
-            const cleanTmpl = String(t.model).replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
-            return (cleanTmpl === cleanModel || cleanModel.includes(cleanTmpl) || cleanTmpl.includes(cleanModel)) && t.type === fileType;
-          });
-        }
-        if (found) {
-          if (found.filepath && fs.existsSync(found.filepath)) {
-            return found;
-          }
-          try {
-            const cacheDir = path.join(this.workingDir, 'cached_templates');
-            if (!fs.existsSync(cacheDir)) {
-              fs.mkdirSync(cacheDir, { recursive: true });
-            }
-            const localTmplPath = path.join(cacheDir, `${found.id}_${found.filename}`);
-            const dlRes = await fetch(`${this.serverUrl}/api/templates/${found.id}/download`, { headers: this.workerAuthHeaders() });
-            if (dlRes.ok) {
-              const buffer = Buffer.from(await dlRes.arrayBuffer());
-              fs.writeFileSync(localTmplPath, buffer);
-              return {
-                ...found,
-                filepath: localTmplPath
-              };
-            }
-          } catch (dlErr) {
-            console.warn('[Worker Template Download Warning]', dlErr.message);
-          }
-        }
-      }
-    } catch (e) {
-      console.warn('[Worker fetchTemplateForTask error]', e.message);
+  async fetchTemplateForTask(model, fileType, templateId = null, expectedHash = null, taskContext = null) {
+    const cacheDir = path.join(this.workingDir, 'cached_templates');
+    if (!fs.existsSync(cacheDir)) {
+      fs.mkdirSync(cacheDir, { recursive: true });
     }
 
-    const samplesDir = path.resolve(__dirname, '../../samples');
-    let fallbackPath = '';
-    if (fileType === 'cert') {
-      if (model === '990' || model === 'DPT-990-Ex' || model === '990-Ex') {
-        fallbackPath = path.join(samplesDir, '990-Ex-EX10260902发货证书.doc');
-      } else if (model === 'DPT810') {
-        fallbackPath = path.join(samplesDir, 'DPT810证书(变送器-A010007031)-JM-26.8.28.doc');
+    let targetTemplateId = templateId;
+    let expectedSha = expectedHash;
+    let templateUrl = null;
+
+    if (taskContext && taskContext.fileRec) {
+      targetTemplateId = targetTemplateId || taskContext.fileRec.template_id;
+      expectedSha = expectedSha || taskContext.fileRec.template_hash;
+      templateUrl = taskContext.fileRec.template_url;
+    }
+
+    let templateMeta = null;
+    if (!targetTemplateId) {
+      // Standalone query by model & type (e.g. unit tests or legacy calls)
+      try {
+        const res = await fetch(`${this.serverUrl}/api/templates`, { headers: this.workerAuthHeaders() });
+        if (res.ok) {
+          const tmpls = await res.json();
+          // Priority 1: Exact match by model & type
+          templateMeta = tmpls.find(t => String(t.model || '').trim().toUpperCase() === String(model || '').trim().toUpperCase() && t.type === fileType);
+          // Priority 2: Normalized prefix match (e.g. POA3500 <-> 3500, X64-03)
+          if (!templateMeta && model) {
+            const cleanModel = String(model).replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+            const normModel = cleanModel.replace(/^POA/, '');
+            templateMeta = tmpls.find(t => {
+              if (t.type !== fileType) return false;
+              const cleanT = String(t.model || '').replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+              const normT = cleanT.replace(/^POA/, '');
+              return (normModel && normT && normModel === normT) || (cleanModel && cleanT && cleanModel === cleanT);
+            });
+          }
+          if (templateMeta) {
+            targetTemplateId = templateMeta.id;
+            expectedSha = expectedSha || templateMeta.file_hash;
+          }
+        }
+      } catch (e) {}
+    }
+
+    if (!targetTemplateId) {
+      throw new Error(`[TEMPLATE_ERROR] 无法确定型号 ${model} (${fileType}) 对应的模板 ID，且协调端无可用模板 (X64-03)`);
+    }
+
+    const safeAsciiFilename = `${targetTemplateId}.doc`;
+    const localTmplPath = path.join(cacheDir, safeAsciiFilename);
+
+    // 1. Cache verification (C04 / X64-05): Check existence, size, non-HTML, and SHA256 integrity
+    if (fs.existsSync(localTmplPath)) {
+      const stat = fs.statSync(localTmplPath);
+      let isValidCache = false;
+      if (stat.size > 0) {
+        const fd = fs.openSync(localTmplPath, 'r');
+        const buf = Buffer.alloc(Math.min(stat.size, 64));
+        fs.readSync(fd, buf, 0, buf.length, 0);
+        fs.closeSync(fd);
+        const head = buf.toString('utf-8').trim();
+        if (!head.startsWith('<') && !head.startsWith('{')) {
+          if (expectedSha) {
+            const actualSha = crypto.createHash('sha256').update(fs.readFileSync(localTmplPath)).digest('hex');
+            if (actualSha === expectedSha) {
+              isValidCache = true;
+            } else {
+              console.warn(`[Worker] Cache SHA256 mismatch for ${safeAsciiFilename} (cached=${actualSha}, expected=${expectedSha}), invalidating.`);
+              try { fs.unlinkSync(localTmplPath); } catch (e) {}
+            }
+          } else {
+            isValidCache = true;
+          }
+        } else {
+          console.warn(`[Worker] Corrupted HTML/JSON cache detected for ${safeAsciiFilename}, deleting.`);
+          try { fs.unlinkSync(localTmplPath); } catch (e) {}
+        }
       } else {
-        fallbackPath = path.join(samplesDir, 'POA200证书AP10007513-20260403发南京订单-PSR-12-223(封装）带泵.doc');
+        try { fs.unlinkSync(localTmplPath); } catch (e) {}
       }
-    } else if (fileType === 'packing') {
-      if (model === 'POA200') {
-        fallbackPath = path.join(samplesDir, 'POA200(140)AP10007513发货清单20260403带泵.doc');
-      } else if (model === '990' || model === 'DPT-990-Ex' || model === '990-Ex') {
-        fallbackPath = path.join(samplesDir, '990-Ex-EX10260902装箱清单.doc');
-      } else {
-        fallbackPath = path.join(samplesDir, 'POA200(140)AP10007513发货清单20260403带泵.doc');
+
+      if (isValidCache) {
+        return {
+          id: targetTemplateId,
+          filepath: localTmplPath,
+          ...(templateMeta || {})
+        };
       }
     }
-    return { filepath: fallbackPath, field_mappings: {} };
+
+    // 2. Download from coordinator server (C01 / X64-01 / X64-04): Task-scoped endpoint preferred
+    let dlUrl;
+    if (templateUrl) {
+      dlUrl = `${this.serverUrl}${templateUrl}`;
+    } else if (taskContext && taskContext.task && taskContext.task.id) {
+      dlUrl = `${this.serverUrl}/api/worker/tasks/${taskContext.task.id}/templates/${fileType}`;
+    } else {
+      dlUrl = `${this.serverUrl}/api/templates/${targetTemplateId}/download`;
+    }
+
+    let dlRes;
+    try {
+      dlRes = await fetch(dlUrl, { headers: this.workerAuthHeaders() });
+    } catch (netErr) {
+      throw new Error(`[TEMPLATE_DOWNLOAD_FAILED] 网络连接失败 (url: ${dlUrl}): ${netErr.message}`);
+    }
+
+    if (!dlRes.ok && dlUrl.includes('/api/worker/tasks/')) {
+      // Fallback to library download endpoint if task endpoint returns 404 (e.g. unsaved test tasks)
+      const fallbackUrl = `${this.serverUrl}/api/templates/${targetTemplateId}/download`;
+      try {
+        const fbRes = await fetch(fallbackUrl, { headers: this.workerAuthHeaders() });
+        if (fbRes.ok) {
+          dlRes = fbRes;
+          dlUrl = fallbackUrl;
+        }
+      } catch (e) {}
+    }
+
+    if (!dlRes.ok) {
+      console.warn(`[Worker] Template download failed for ${targetTemplateId}: HTTP ${dlRes.status} (url: ${dlUrl})`);
+      throw new Error(`[TEMPLATE_DOWNLOAD_FAILED] HTTP ${dlRes.status} downloading template ${targetTemplateId} from ${dlUrl}`);
+    }
+
+    const buffer = Buffer.from(await dlRes.arrayBuffer());
+    if (buffer.length === 0) {
+      throw new Error(`[TEMPLATE_DOWNLOAD_FAILED] Downloaded 0 bytes for template ${targetTemplateId}`);
+    }
+
+    const headCheck = buffer.slice(0, 64).toString('utf-8').trim();
+    if (headCheck.startsWith('<') || headCheck.startsWith('{')) {
+      throw new Error(`[TEMPLATE_DOWNLOAD_FAILED] Downloaded template content is HTML/JSON error page: ${headCheck.slice(0, 80)}`);
+    }
+
+    const downloadedSha = crypto.createHash('sha256').update(buffer).digest('hex');
+    const headerSha = dlRes.headers && (typeof dlRes.headers.get === 'function' ? (dlRes.headers.get('x-template-hash') || dlRes.headers.get('x-file-hash')) : null);
+    const finalExpectedSha = expectedSha || headerSha;
+    if (finalExpectedSha && downloadedSha !== finalExpectedSha) {
+      throw new Error(`[TEMPLATE_DOWNLOAD_FAILED] Downloaded template SHA256 mismatch (got ${downloadedSha}, expected ${finalExpectedSha})`);
+    }
+
+    // Atomic write via temp file
+    const tmpPath = `${localTmplPath}.tmp_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    fs.writeFileSync(tmpPath, buffer);
+    fs.renameSync(tmpPath, localTmplPath);
+
+    return {
+      id: targetTemplateId,
+      filepath: localTmplPath,
+      ...(templateMeta || {})
+    };
   }
 
   async processTask(task) {
@@ -479,7 +564,7 @@ class ExecutionWorker {
 
     for (const fileRec of files) {
       try {
-        const tmplObj = await this.fetchTemplateForTask(task.model, fileRec.file_type, fileRec.template_id);
+        const tmplObj = await this.fetchTemplateForTask(task.model, fileRec.file_type, fileRec.template_id, fileRec.template_hash, { task, fileRec });
         const templatePath = tmplObj.filepath;
         const fieldMappings = (fileRec.field_mappings && Object.keys(fileRec.field_mappings).length > 0)
           ? fileRec.field_mappings

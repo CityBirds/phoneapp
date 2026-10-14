@@ -132,27 +132,55 @@ function extractDefaultDeviceSn(bundle) {
   let certSn = '';
   let packingSn = '';
 
-  const certTmpl = bundle.certTemplate;
-  if (certTmpl && certTmpl.field_mappings) {
-    const singleFields = certTmpl.field_mappings.singleFields || [];
-    const snField = singleFields.find(f =>
-      f.status === 'bound' && /Inst\.?\s*SN|设备序列号|序列号|Instrument\s*SN|SN:/i.test(f.label || '')
-    );
-    if (snField && (snField.candidateValue || snField.defaultValue)) {
-      certSn = String(snField.candidateValue || snField.defaultValue).trim();
+  let snapshot = {};
+  if (bundle.config_snapshot) {
+    try {
+      snapshot = typeof bundle.config_snapshot === 'string' ? JSON.parse(bundle.config_snapshot) : bundle.config_snapshot;
+    } catch (e) {
+      snapshot = {};
     }
   }
 
-  const packTmpl = bundle.packingTemplate;
-  if (packTmpl && packTmpl.field_mappings) {
-    const items = packTmpl.field_mappings.packingItems || [];
-    const mainItem = items.find(it => it.role === 'mainDevice' || /主设备|主机/.test(it.name || ''));
-    if (mainItem) {
-      if (mainItem.sn) {
-        packingSn = String(mainItem.sn).trim();
-      } else if (mainItem.remark) {
-        const match = /SN:\s*([^\s\r\n带泵]+)/i.exec(mainItem.remark);
-        if (match) packingSn = match[1].trim();
+  const snRegex = /Inst\.?\s*SN|出厂编号|设备编号|机身号|产品编号|设备序列号|序列号|Instrument\s*SN|SN[:：]|deviceSn|serialNo|serialNumber/i;
+
+  // 1. 从证书模板提取默认序列号
+  const certTmpl = bundle.certTemplate || snapshot.certTemplate;
+  const certMappings = (certTmpl && certTmpl.field_mappings) || snapshot.certMappings || {};
+  if (certMappings) {
+    const singleFields = certMappings.singleFields || [];
+    const snField = singleFields.find(f => {
+      const matchLabel = snRegex.test(f.label || '');
+      const matchKey = snRegex.test(f.key || f.name || '');
+      return (matchLabel || matchKey) && (f.candidateValue || f.defaultValue || f.value);
+    });
+    if (snField) {
+      const rawVal = snField.candidateValue || snField.defaultValue || snField.value || '';
+      certSn = String(rawVal).replace(/带泵/g, '').trim();
+    }
+  }
+
+  // 2. 从装箱清单模板提取主设备默认序列号
+  const packTmpl = bundle.packingTemplate || snapshot.packingTemplate;
+  const packMappings = (packTmpl && packTmpl.field_mappings) || snapshot.packingMappings || {};
+  if (packMappings) {
+    // 优先从 packingRowRoles 提取
+    const roles = Array.isArray(packMappings.packingRowRoles) ? packMappings.packingRowRoles : [];
+    const mainRole = roles.find(r => r.role === 'mainDevice' || /主设备|主机/.test(r.name || ''));
+    if (mainRole && mainRole.sn) {
+      packingSn = String(mainRole.sn).replace(/带泵/g, '').trim();
+    }
+
+    // 其次从 packingItems 提取
+    if (!packingSn) {
+      const items = Array.isArray(packMappings.packingItems) ? packMappings.packingItems : (snapshot.packingItems || []);
+      const mainItem = items.find(it => it.role === 'mainDevice' || /主设备|主机/.test(it.name || ''));
+      if (mainItem) {
+        if (mainItem.sn) {
+          packingSn = String(mainItem.sn).replace(/带泵/g, '').trim();
+        } else if (mainItem.remark) {
+          const match = /SN[:：]\s*([^\s\r\n带泵]+)/i.exec(mainItem.remark);
+          if (match) packingSn = match[1].replace(/带泵/g, '').trim();
+        }
       }
     }
   }
@@ -518,6 +546,16 @@ function onModelChange() {
     const snInput = document.getElementById('device-sn');
     if (snInput) {
       snInput.value = extracted.sn || '';
+    }
+    const tipEl = document.getElementById('sn-auto-fill-tip');
+    if (tipEl) {
+      if (extracted.sn) {
+        tipEl.style.display = 'block';
+        tipEl.style.color = '#0284c7';
+        tipEl.innerHTML = `ℹ️ 已随所选模板自动填充默认序列号：<b>${escapeHtml(extracted.sn)}</b>`;
+      } else {
+        tipEl.style.display = 'none';
+      }
     }
     const conflictEl = document.getElementById('sn-conflict-notice');
     if (conflictEl) {
@@ -1081,27 +1119,28 @@ function findSensorRowIndex() {
 
 function generateMainDeviceRemark(oldRemark, sn, hasPump) {
   const cleanSn = String(sn || '').trim();
-  const pumpStr = hasPump ? '带泵' : '';
-  const snTag = cleanSn ? `SN: ${cleanSn}${pumpStr}` : '';
-  const cleanOld = String(oldRemark || '').trim();
+  let text = String(oldRemark || '').trim();
 
-  if (!cleanOld) {
-    return snTag;
+  // Remove all existing SN occurrences (supporting halfwidth SN: and fullwidth SN：)
+  text = text.replace(/SN[:：]\s*[^\s\r\n带泵]*/gi, ' ');
+  // Remove all existing "带泵" occurrences
+  text = text.replace(/带泵/g, ' ');
+  // Clean up extra whitespace
+  text = text.replace(/\s+/g, ' ').trim();
+
+  let tag = '';
+  if (cleanSn) {
+    tag = `SN: ${cleanSn}${hasPump ? '带泵' : ''}`;
+  } else if (hasPump) {
+    tag = '带泵';
   }
 
-  const snRegex = /SN:\s*[^\s\r\n]+/i;
-  if (snRegex.test(cleanOld)) {
-    if (snTag) {
-      return cleanOld.replace(snRegex, snTag);
-    } else {
-      return cleanOld.replace(snRegex, '').replace(/\s+/g, ' ').trim();
-    }
+  if (text && tag) {
+    return `${text} ${tag}`;
+  } else if (tag) {
+    return tag;
   } else {
-    if (snTag) {
-      return `${cleanOld} ${snTag}`.trim();
-    } else {
-      return cleanOld;
-    }
+    return text;
   }
 }
 
@@ -1171,6 +1210,22 @@ function syncDeviceSnToPackingList(render = true) {
   targetRow.remark = newRemark;
   if (render && changed) {
     renderPackingTable();
+  }
+}
+
+function onDeviceSnInput() {
+  syncDeviceSnToPackingList(true);
+  const tipEl = document.getElementById('sn-auto-fill-tip');
+  if (tipEl) {
+    const snInput = document.getElementById('device-sn');
+    const snVal = (snInput ? snInput.value : '').trim();
+    if (snVal) {
+      tipEl.style.display = 'block';
+      tipEl.style.color = '#64748b';
+      tipEl.innerHTML = `✏️ 用户已手工修改序列号为：<b>${escapeHtml(snVal)}</b>`;
+    } else {
+      tipEl.style.display = 'none';
+    }
   }
 }
 
@@ -1640,8 +1695,8 @@ function renderPreviewBox() {
     : '';
 
   const previews = targetFile.preview_images || [];
-  const isPreviewFailed = targetFile.status === 'PREVIEW_FAILED' || targetFile.status === 'PREVIEW_TIMEOUT' ||
-    (targetFile.status === 'FAILED' && !previews.length);
+  const isWorkerDocFailed = targetFile.status === 'FAILED';
+  const isPreviewFailed = targetFile.status === 'PREVIEW_FAILED' || targetFile.status === 'PREVIEW_TIMEOUT';
 
   if (targetFile.status === 'PREVIEW_READY' && previews.length > 0) {
     container.innerHTML = `
@@ -1660,12 +1715,27 @@ function renderPreviewBox() {
         <button type="button" class="btn btn-sm btn-secondary" onclick="retryPreview('${state.activePreviewType}')">🔄 仅重试预览转换</button>
       </div>
     `;
-  } else if (isPreviewFailed) {
+  } else if (isWorkerDocFailed) {
     container.innerHTML = `
       ${queryNoticeHtml}
       <div style="font-weight: 600; margin-bottom: 8px;">${escapeHtml(targetFile.official_filename)}</div>
       <div class="badge badge-danger" style="margin-top: 8px; padding: 8px 16px; display: block; text-align: left;">
-        ❌ 预览转换未就绪（原 Word 文档已生成并保存，可正常下载）
+        ❌ 执行端文档生成失败（未生成原件）
+      </div>
+      <div style="margin-top: 10px; font-size: 13px; color: #b91c1c; word-break: break-all;">
+        失败原因：${escapeHtml(targetFile.error_msg || '执行端处理文档时发生异常')}
+      </div>
+      <div style="margin-top: 12px; display: flex; gap: 8px; flex-wrap: wrap;">
+        <button type="button" class="btn btn-sm btn-primary" onclick="switchNavTab('task')">📝 返回发货任务重新提交</button>
+        ${refreshBtnHtml}
+      </div>
+    `;
+  } else if (isPreviewFailed) {
+    container.innerHTML = `
+      ${queryNoticeHtml}
+      <div style="font-weight: 600; margin-bottom: 8px;">${escapeHtml(targetFile.official_filename)}</div>
+      <div class="badge badge-warning" style="margin-top: 8px; padding: 8px 16px; display: block; text-align: left; background: #fff3cd; color: #856404;">
+        ⚠️ 预览转换未就绪（原 Word 文档已生成并保存，可正常下载）
       </div>
       <div style="margin-top: 10px; font-size: 13px; color: #b91c1c; word-break: break-all;">
         失败阶段与原因：${escapeHtml(targetFile.error_msg || '未能把 Word 转换为页图预览')}

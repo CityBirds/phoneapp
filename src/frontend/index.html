@@ -73,8 +73,9 @@
         <div class="card-title">共用单值字段 (同步到证书与清单)</div>
         <div class="form-group">
           <label>设备序列号 (Inst. SN.)</label>
-          <input type="text" id="device-sn" class="form-control" value="" placeholder="例如: EX10260902" onchange="syncDeviceSnToPackingList()" onblur="syncDeviceSnToPackingList()">
+          <input type="text" id="device-sn" class="form-control" value="" placeholder="例如: EX10260902" oninput="onDeviceSnInput()" onchange="onDeviceSnInput()" onblur="onDeviceSnInput()">
           <div id="sn-conflict-notice" class="status-tip warning" style="display: none; margin-top: 6px;"></div>
+          <div id="sn-auto-fill-tip" style="display: none; font-size: 11px; color: #0284c7; margin-top: 4px;"></div>
         </div>
         <div class="form-group" id="sales-person-group">
           <label>销售人员</label>

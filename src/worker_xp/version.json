@@ -1,0 +1,10 @@
+{
+  "version": "1.0.0",
+  "name": "phoneApp Windows XP (Win32) Execution Worker",
+  "targetOS": "Windows XP SP3 (x86)",
+  "arch": "x86 (32-bit)",
+  "protocolVersion": "20261007",
+  "gitCommit": "227b155b",
+  "buildBaseline": "Python 3.4.4 (x86) + PyInstaller 3.2.1 + pywin32 (x86)",
+  "buildDate": "2026-10-09"
+}

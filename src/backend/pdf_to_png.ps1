@@ -33,12 +33,13 @@ $result = [ordered]@{
 }
 
 function Write-Result($obj) { Write-Output ($obj | ConvertTo-Json -Compress -Depth 5) }
+function Exit-Script([int]$code) { [System.Environment]::Exit($code) }
 
 if (-not (Test-Path -LiteralPath $PdfPath)) {
     $result.stage = 'pdf-check'
     $result.error = "PDF 不存在: $PdfPath"
     Write-Result $result
-    exit 1
+    Exit-Script 1
 }
 
 $pdfItem = Get-Item -LiteralPath $PdfPath
@@ -46,7 +47,7 @@ if ($pdfItem.Length -le 0) {
     $result.stage = 'pdf-check'
     $result.error = "PDF 为空文件（0 字节），拒绝渲染页图: $PdfPath"
     Write-Result $result
-    exit 1
+    Exit-Script 1
 }
 
 $absPdf = $pdfItem.FullName
@@ -88,7 +89,7 @@ try {
         $result.stage = 'validate-pdf'
         $result.error = 'PDF 页数为 0，判定为不可用 PDF，拒绝生成页图'
         Write-Result $result
-        exit 1
+        Exit-Script 1
     }
 
     $result.stage = 'render-pages'
@@ -139,17 +140,17 @@ try {
         $result.stage = 'validate-pages'
         $result.error = "页图数量 ($($result.files.Count)) 与 PDF 页数 ($($pdf.PageCount)) 不一致"
         Write-Result $result
-        exit 1
+        Exit-Script 1
     }
 
     $result.pages = $pdf.PageCount
     $result.ok = $true
     $result.stage = 'done'
     Write-Result $result
-    exit 0
+    Exit-Script 0
 } catch {
     $result.error = $_.Exception.Message
     if ($_.Exception.InnerException) { $result.error += " / " + $_.Exception.InnerException.Message }
     Write-Result $result
-    exit 1
+    Exit-Script 1
 }

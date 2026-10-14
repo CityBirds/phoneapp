@@ -16,14 +16,17 @@ const ExecutionWorker = require('../src/worker/worker');
 let server;
 const PORT = 3001;
 
-test.before((done) => {
-  server = app.listen(PORT, () => {
-    console.log(`Test server running on port ${PORT}`);
+test.before(async () => {
+  await new Promise(resolve => {
+    server = app.listen(PORT, () => {
+      console.log(`Test server running on port ${PORT}`);
+      resolve();
+    });
   });
 });
 
-test.after(() => {
-  if (server) server.close();
+test.after(async () => {
+  if (server) await new Promise(resolve => server.close(resolve));
   try { if (fs.existsSync(testDbPath)) fs.unlinkSync(testDbPath); } catch (e) {}
 });
 

@@ -1564,10 +1564,110 @@ app.post('/api/templates/upload', requireAdminAccess, upload.single('templateFil
 
 app.get('/api/templates/:id/download', requireWorkerAuth, (req, res) => {
   const tmpl = db.prepare('SELECT * FROM templates WHERE id = ?').get(req.params.id);
-  if (!tmpl || !fs.existsSync(tmpl.filepath)) {
+  if (!tmpl || !tmpl.filepath || !fs.existsSync(tmpl.filepath)) {
     return res.status(404).json({ error: 'Template file not found' });
   }
-  res.download(tmpl.filepath, tmpl.filename);
+  const ext = path.extname(tmpl.filepath) || '.doc';
+  const safeAsciiFilename = `${tmpl.id}${ext}`;
+  const actualHash = getFileSha256(tmpl.filepath);
+  const fileSize = fs.statSync(tmpl.filepath).size;
+  res.setHeader('Content-Type', 'application/octet-stream');
+  res.setHeader('Content-Disposition', `attachment; filename="${safeAsciiFilename}"; filename*=UTF-8''${encodeURIComponent(tmpl.filename || safeAsciiFilename)}`);
+  res.setHeader('x-template-id', tmpl.id);
+  res.setHeader('x-template-hash', actualHash);
+  res.setHeader('x-template-version', tmpl.version || 'v1.0');
+  res.setHeader('Content-Length', fileSize);
+  res.sendFile(path.resolve(tmpl.filepath));
+});
+
+/**
+ * 任务专用执行端模板下载接口（跨机模板整改 C01 / X64-01 / XP-02 / §1）。
+ * 
+ * 路由：GET /api/worker/tasks/:id/templates/:fileType
+ * 保护机制：
+ * 1) 内部端口 / worker 凭据认证（requireWorkerAuth），自动豁免手机访问口令；
+ * 2) 任务归属校验：只允许领取该任务的 worker 终端下载（防串端）；
+ * 3) 模板文件哈希完整性校验：比对任务冻结快照哈希；
+ * 4) 响应携带 ASCII 与 UTF-8 文件名、x-template-id、x-template-hash、Content-Length。
+ */
+app.get('/api/worker/tasks/:id/templates/:fileType', requireWorkerAuth, (req, res) => {
+  const taskId = req.params.id;
+  const fileType = req.params.fileType;
+  const workerIdentity = req.workerIdentity || {};
+  const claimingWorker = workerIdentity.workerId;
+
+  const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId);
+  if (!task) {
+    logAudit(null, 'WORKER', claimingWorker || 'Worker', 'TEMPLATE_DOWNLOAD_REJECTED', { taskId, fileType, reason: 'TASK_NOT_FOUND' });
+    return res.status(404).json({ error: 'Task not found', code: 'TASK_NOT_FOUND' });
+  }
+
+  // 多执行端任务归属校验：只允许被派发该任务的执行端下载模板 (X64-02, XP-03)
+  if (claimingWorker && task.worker_id && task.worker_id !== claimingWorker) {
+    logAudit(null, 'WORKER', claimingWorker, 'TEMPLATE_DOWNLOAD_REJECTED', {
+      taskId, fileType, taskWorker: task.worker_id, claimingWorker, reason: 'TASK_WORKER_MISMATCH'
+    });
+    return res.status(403).json({
+      error: `该发货任务属于终端 [${task.worker_id}]，当前终端 [${claimingWorker}] 无权下载其模板文件`,
+      code: 'TASK_WORKER_MISMATCH'
+    });
+  }
+
+  const fileRec = db.prepare('SELECT * FROM task_files WHERE task_id = ? AND file_type = ?').get(taskId, fileType);
+  if (!fileRec) {
+    return res.status(404).json({ error: `未在任务 #${taskId} 中找到类型为 ${fileType} 的文件记录`, code: 'FILE_NOT_FOUND' });
+  }
+
+  let templateId = fileRec.template_id;
+  if (!templateId) {
+    // 历史或测试任务未固化 template_id 时的兼容回退
+    if (task.bundle_id) {
+      const bundle = db.prepare('SELECT * FROM published_bundles WHERE bundle_id = ?').get(task.bundle_id);
+      if (bundle) {
+        templateId = fileType === 'cert' ? bundle.cert_template_id : bundle.packing_template_id;
+      }
+    }
+    if (!templateId) {
+      const taskModel = resolveModelAlias(task.model);
+      const tmpl = db.prepare("SELECT * FROM templates WHERE (model = ? OR model = ?) AND type = ? AND published_at IS NOT NULL ORDER BY published_at DESC")
+        .get(task.model, taskModel.displayName, fileType);
+      if (tmpl) templateId = tmpl.id;
+    }
+  }
+
+  if (!templateId) {
+    return res.status(404).json({ error: `任务未关联有效的模板 ID (task=${taskId}, type=${fileType})`, code: 'NO_TEMPLATE_ASSOCIATED' });
+  }
+
+  const tmpl = db.prepare('SELECT * FROM templates WHERE id = ?').get(templateId);
+  if (!tmpl || !tmpl.filepath || !fs.existsSync(tmpl.filepath)) {
+    return res.status(404).json({ error: `协调端未找到模板文件 (id=${templateId})`, code: 'TEMPLATE_FILE_NOT_FOUND' });
+  }
+
+  const actualHash = getFileSha256(tmpl.filepath);
+  // 完整性校验：若任务已冻结快照哈希，则必须与当前模板文件哈希一致 (X64-06, XP-06)
+  if (fileRec.template_hash && /^[a-f0-9]{64}$/i.test(fileRec.template_hash) && actualHash && actualHash !== fileRec.template_hash) {
+    return res.status(409).json({
+      error: `模板文件哈希与任务冻结快照不一致 (实际=${actualHash}, 冻结=${fileRec.template_hash})，可能已被篡改或更新`,
+      code: 'TEMPLATE_HASH_MISMATCH'
+    });
+  }
+
+  const ext = path.extname(tmpl.filepath) || '.doc';
+  const safeAsciiFilename = `${tmpl.id}${ext}`;
+  const fileSize = fs.statSync(tmpl.filepath).size;
+
+  logAudit(task.req_id, 'WORKER', claimingWorker || 'Worker', 'DOWNLOAD_TASK_TEMPLATE', {
+    taskId, fileType, templateId, hash: actualHash, size: fileSize
+  });
+
+  res.setHeader('Content-Type', 'application/octet-stream');
+  res.setHeader('Content-Disposition', `attachment; filename="${safeAsciiFilename}"; filename*=UTF-8''${encodeURIComponent(tmpl.filename || safeAsciiFilename)}`);
+  res.setHeader('x-template-id', tmpl.id);
+  res.setHeader('x-template-hash', actualHash);
+  res.setHeader('x-template-version', tmpl.version || 'v1.0');
+  res.setHeader('Content-Length', fileSize);
+  res.sendFile(path.resolve(tmpl.filepath));
 });
 
 /**
@@ -2986,12 +3086,16 @@ app.post('/api/tasks/submit', (req, res) => {
 
   // J05: Validate Device Serial Number consistency across packing list if present
   if (Array.isArray(packingItems) && packingItems.length > 0) {
-    const mainRemark = packingItems[0].remark || '';
-    const match = mainRemark.match(/SN[:：]\s*([A-Za-z0-9_-]+)/i);
-    if (match && match[1] && match[1] !== deviceSn) {
-      return res.status(400).json({
-        error: `设备序列号数据冲突：顶层序列号 (${deviceSn}) 与清单主设备序列号 (${match[1]}) 不一致！(J05, Q13)`
-      });
+    const mainItem = packingItems.find(it => it.role === 'mainDevice' || it.isProtectedMain || /主设备|主机/.test(it.name || '')) || packingItems[0];
+    const mainRemark = mainItem ? (mainItem.remark || '') : '';
+    const match = mainRemark.match(/SN[:：]\s*([A-Za-z0-9_.-]+)/i);
+    if (match && match[1]) {
+      const extractedSn = match[1].replace(/带泵/g, '').trim();
+      if (extractedSn && extractedSn !== deviceSn) {
+        return res.status(400).json({
+          error: `设备序列号数据冲突：顶层序列号 (${deviceSn}) 与清单主设备序列号 (${extractedSn}) 不一致！(J05, Q13)`
+        });
+      }
     }
   }
 
@@ -3067,14 +3171,19 @@ app.post('/api/tasks/submit', (req, res) => {
   // Directory Configuration & Snapshotting (DIR-06, DIR-07, DIR-13, DIR-15)
   let certDirSnapshot = null;
   let packingDirSnapshot = null;
+  let certTmpl = null;
+  let certMappings = null;
+  let packTmpl = null;
+  let packMappings = null;
 
   if (createCert) {
-    const certTmpl = resolveModelTemplates({ bundle, model, displayName: resolvedModel.displayName, fileType: 'cert' });
+    certTmpl = resolveModelTemplates({ bundle, model, displayName: resolvedModel.displayName, fileType: 'cert' });
 
     if (!certTmpl) {
       return res.status(400).json({ error: `未找到 ${resolvedModel.displayName} 对应的发货证书模板` });
     }
 
+    certMappings = parseTemplateMappings(certTmpl);
     const certEval = evaluateWorkerTemplateFor(workerId, certTmpl, 'cert', { requireReady: true });
     if (!certEval.ok) {
       return res.status(400).json({ error: certEval.reason, docType: 'cert', enabled: certEval.enabled });
@@ -3093,12 +3202,13 @@ app.post('/api/tasks/submit', (req, res) => {
   }
 
   if (createPacking) {
-    const packTmpl = resolveModelTemplates({ bundle, model, displayName: resolvedModel.displayName, fileType: 'packing' });
+    packTmpl = resolveModelTemplates({ bundle, model, displayName: resolvedModel.displayName, fileType: 'packing' });
 
     if (!packTmpl) {
       return res.status(400).json({ error: `未找到 ${resolvedModel.displayName} 对应的装箱清单模板` });
     }
 
+    packMappings = parseTemplateMappings(packTmpl);
     const packEval = evaluateWorkerTemplateFor(workerId, packTmpl, 'packing', { requireReady: true });
     if (!packEval.ok) {
       return res.status(400).json({ error: packEval.reason, docType: 'packing', enabled: packEval.enabled });
@@ -3118,9 +3228,7 @@ app.post('/api/tasks/submit', (req, res) => {
 
   // 后端权威校验提交数据维度：绕过手机界面少一行/多一行/缺列/未知列一律拒绝 (整改 3.3, M12)
   // 仅在模板已发布有效测量表格区时生效；缺少表格区配置的模板由“未绑定/未发布”流程拦截。
-  if (createCert) {
-    const certTmplForDimension = resolveModelTemplates({ bundle, model, displayName: resolvedModel.displayName, fileType: 'cert' });
-    const certMappings = parseTemplateMappings(certTmplForDimension);
+  if (createCert && certMappings) {
     if (certMappings.tableConfig && Array.isArray(certMappings.tableConfig.columns) && certMappings.tableConfig.columns.length > 0) {
       const dim = validateSubmittedTestPoints(testPoints, certMappings);
       if (dim.errors.length > 0) {
@@ -3133,9 +3241,7 @@ app.post('/api/tasks/submit', (req, res) => {
     }
   }
 
-  if (createPacking) {
-    const packTmplForDimension = resolveModelTemplates({ bundle, model, displayName: resolvedModel.displayName, fileType: 'packing' });
-    const packMappings = parseTemplateMappings(packTmplForDimension);
+  if (createPacking && packMappings) {
     if (Array.isArray(packMappings.packingItems) && packMappings.packingItems.length > 0) {
       const packErrors = validateSubmittedPackingItems(packingItems, packMappings);
       if (packErrors.length > 0) {
@@ -3174,8 +3280,8 @@ app.post('/api/tasks/submit', (req, res) => {
     return res.status(500).json({ error: '数据库保存任务失败: ' + dbErr.message });
   }
 
-  // Create Task Files with Target Directory Snapshot (DIR-15)
-  if (createCert) {
+  // Create Task Files with Target Directory Snapshot & Frozen Template Snapshot (C08 / X64-06 / XP-06)
+  if (createCert && certTmpl) {
     const certOfficialName = generateCertFilename({
       model: resolvedModel.displayName,
       deviceSn: String(deviceSn),
@@ -3186,13 +3292,25 @@ app.post('/api/tasks/submit', (req, res) => {
       hasPump: resolvedModel.displayName === 'POA200' ? hasPump : false
     });
 
+    const certTemplateHash = certTmpl.file_hash;
+    const certTemplateVersion = certTmpl.version || 'v1.0';
+    const certTemplateSize = (certTmpl.filepath && fs.existsSync(certTmpl.filepath)) ? fs.statSync(certTmpl.filepath).size : null;
+    const certFieldMappingsJson = JSON.stringify(certMappings || {});
+
     db.prepare(`
-      INSERT INTO task_files (task_id, file_type, official_filename, status, target_dir, root_dir, subfolder_name, dir_config_id, dir_config_version)
-      VALUES (?, 'cert', ?, 'GENERATING', ?, ?, ?, ?, ?)
-    `).run(taskId, certOfficialName, certDirSnapshot.targetDir, certDirSnapshot.rootDir, certDirSnapshot.subfolderName, certDirSnapshot.configId, certDirSnapshot.version);
+      INSERT INTO task_files (
+        task_id, file_type, official_filename, status, target_dir, root_dir, subfolder_name,
+        dir_config_id, dir_config_version, template_id, template_hash, template_version, template_size, field_mappings
+      )
+      VALUES (?, 'cert', ?, 'GENERATING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      taskId, certOfficialName, certDirSnapshot.targetDir, certDirSnapshot.rootDir, certDirSnapshot.subfolderName,
+      certDirSnapshot.configId, certDirSnapshot.version,
+      certTmpl.id, certTemplateHash, certTemplateVersion, certTemplateSize, certFieldMappingsJson
+    );
   }
 
-  if (createPacking) {
+  if (createPacking && packTmpl) {
     const packingOfficialName = generatePackingListFilename({
       model: resolvedModel.displayName,
       deviceSn: String(deviceSn),
@@ -3201,10 +3319,22 @@ app.post('/api/tasks/submit', (req, res) => {
       hasPump: Boolean(hasPump)
     });
 
+    const packTemplateHash = packTmpl.file_hash;
+    const packTemplateVersion = packTmpl.version || 'v1.0';
+    const packTemplateSize = (packTmpl.filepath && fs.existsSync(packTmpl.filepath)) ? fs.statSync(packTmpl.filepath).size : null;
+    const packFieldMappingsJson = JSON.stringify(packMappings || {});
+
     db.prepare(`
-      INSERT INTO task_files (task_id, file_type, official_filename, status, target_dir, root_dir, subfolder_name, dir_config_id, dir_config_version)
-      VALUES (?, 'packing', ?, 'GENERATING', ?, ?, ?, ?, ?)
-    `).run(taskId, packingOfficialName, packingDirSnapshot.targetDir, packingDirSnapshot.rootDir, packingDirSnapshot.subfolderName, packingDirSnapshot.configId, packingDirSnapshot.version);
+      INSERT INTO task_files (
+        task_id, file_type, official_filename, status, target_dir, root_dir, subfolder_name,
+        dir_config_id, dir_config_version, template_id, template_hash, template_version, template_size, field_mappings
+      )
+      VALUES (?, 'packing', ?, 'GENERATING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      taskId, packingOfficialName, packingDirSnapshot.targetDir, packingDirSnapshot.rootDir, packingDirSnapshot.subfolderName,
+      packingDirSnapshot.configId, packingDirSnapshot.version,
+      packTmpl.id, packTemplateHash, packTemplateVersion, packTemplateSize, packFieldMappingsJson
+    );
   }
 
   logAudit(reqId, clientId, clientName, 'SUBMIT_TASK', { taskId, model: resolvedModel.displayName, deviceSn, workerId });
@@ -3346,42 +3476,77 @@ app.get('/api/worker/tasks/pending', requireWorkerAuth, (req, res) => {
       const taskModel = resolveModelAlias(task.model);
 
       const files = db.prepare('SELECT * FROM task_files WHERE task_id = ?').all(task.id).map(f => {
-        let templateId = null;
-        let fieldMappings = null;
-        if (bundle) {
-          if (f.file_type === 'cert') {
-            templateId = bundle.cert_template_id;
-            if (bundle.config_snapshot) {
-              try {
-                const snap = JSON.parse(bundle.config_snapshot);
-                if (snap.certTemplate && snap.certTemplate.field_mappings) {
-                  fieldMappings = snap.certTemplate.field_mappings;
-                }
-              } catch (e) {}
-            }
-          } else if (f.file_type === 'packing') {
-            templateId = bundle.packing_template_id;
-            if (bundle.config_snapshot) {
-              try {
-                const snap = JSON.parse(bundle.config_snapshot);
-                if (snap.packingTemplate && snap.packingTemplate.field_mappings) {
-                  fieldMappings = snap.packingTemplate.field_mappings;
-                }
-              } catch (e) {}
+        let templateId = f.template_id;
+        let templateHash = f.template_hash;
+        let templateVersion = f.template_version;
+        let templateSize = f.template_size;
+        let fieldMappings = f.field_mappings ? (typeof f.field_mappings === 'string' ? JSON.parse(f.field_mappings) : f.field_mappings) : null;
+
+        if (!templateId || !fieldMappings) {
+          if (bundle) {
+            if (f.file_type === 'cert') {
+              templateId = templateId || bundle.cert_template_id;
+              if (bundle.config_snapshot) {
+                try {
+                  const snap = JSON.parse(bundle.config_snapshot);
+                  if (snap.certTemplate && snap.certTemplate.field_mappings) {
+                    fieldMappings = fieldMappings || snap.certTemplate.field_mappings;
+                  }
+                } catch (e) {}
+              }
+            } else if (f.file_type === 'packing') {
+              templateId = templateId || bundle.packing_template_id;
+              if (bundle.config_snapshot) {
+                try {
+                  const snap = JSON.parse(bundle.config_snapshot);
+                  if (snap.packingTemplate && snap.packingTemplate.field_mappings) {
+                    fieldMappings = fieldMappings || snap.packingTemplate.field_mappings;
+                  }
+                } catch (e) {}
+              }
             }
           }
-        }
-        if (!templateId) {
-          const tmpl = db.prepare("SELECT * FROM templates WHERE (model = ? OR model = ?) AND type = ? AND published_at IS NOT NULL ORDER BY published_at DESC")
-            .get(task.model, taskModel.displayName, f.file_type);
-          if (tmpl) {
-            templateId = tmpl.id;
-            fieldMappings = JSON.parse(tmpl.draft_mappings || tmpl.field_mappings || '{}');
+          if (!templateId) {
+            const tmpl = db.prepare("SELECT * FROM templates WHERE (model = ? OR model = ?) AND type = ? AND published_at IS NOT NULL ORDER BY published_at DESC")
+              .get(task.model, taskModel.displayName, f.file_type);
+            if (tmpl) {
+              templateId = tmpl.id;
+              fieldMappings = fieldMappings || JSON.parse(tmpl.field_mappings || '{}');
+              templateHash = templateHash || tmpl.file_hash;
+              templateVersion = templateVersion || tmpl.version || 'v1.0';
+              if (tmpl.filepath && fs.existsSync(tmpl.filepath)) {
+                templateSize = templateSize || fs.statSync(tmpl.filepath).size;
+              }
+            }
+          } else if (!templateHash) {
+            const tmpl = db.prepare('SELECT * FROM templates WHERE id = ?').get(templateId);
+            if (tmpl) {
+              templateHash = tmpl.file_hash;
+              templateVersion = tmpl.version || 'v1.0';
+              fieldMappings = fieldMappings || JSON.parse(tmpl.field_mappings || '{}');
+              if (tmpl.filepath && fs.existsSync(tmpl.filepath)) {
+                templateSize = templateSize || fs.statSync(tmpl.filepath).size;
+              }
+            }
+          }
+          // 固化冻结快照，确保历史任务或测试直插任务后续重试也能使用同一快照 (C08 / X64-06)
+          if (templateId) {
+            try {
+              db.prepare(`
+                UPDATE task_files SET template_id = ?, template_hash = ?, template_version = ?, template_size = ?, field_mappings = ?
+                WHERE id = ?
+              `).run(templateId, templateHash, templateVersion, templateSize, JSON.stringify(fieldMappings || {}), f.id);
+            } catch (e) {}
           }
         }
+
         return {
           ...f,
           template_id: templateId,
+          template_hash: templateHash,
+          template_version: templateVersion,
+          template_size: templateSize,
+          template_url: `/api/worker/tasks/${task.id}/templates/${f.file_type}`,
           field_mappings: fieldMappings
         };
       });

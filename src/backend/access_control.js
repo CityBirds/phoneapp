@@ -141,6 +141,7 @@ function isWorkerOnlyPath(pathname, method) {
   if (!pathname) return false;
   if (pathname.startsWith('/api/worker/')) return true;
   if (WORKER_ONLY_PATHS.has(pathname)) return true;
+  if (/^\/api\/templates\/[^/]+\/download$/.test(pathname)) return true;
   // 执行端回报打印状态：POST /api/print/:id/status（手机侧只做只读查询）
   if ((method || 'GET').toUpperCase() === 'POST' && /^\/api\/print\/[^/]+\/status$/.test(pathname)) return true;
   return false;
@@ -151,6 +152,7 @@ function isWorkerPath(p) {
   if (!p) return false;
   if (p.startsWith('/api/worker/')) return true;
   if (WORKER_ONLY_PATHS.has(p)) return true;
+  if (/^\/api\/templates\/[^/]+\/download$/.test(p)) return true;
   return /^\/api\/print\/[^/]+\/status$/.test(p);
 }
 

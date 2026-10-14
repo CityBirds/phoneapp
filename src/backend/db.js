@@ -136,6 +136,11 @@ try { db.exec('ALTER TABLE task_files ADD COLUMN root_dir TEXT;'); } catch (e) {
 try { db.exec('ALTER TABLE task_files ADD COLUMN subfolder_name TEXT;'); } catch (e) {}
 try { db.exec('ALTER TABLE task_files ADD COLUMN dir_config_id INTEGER;'); } catch (e) {}
 try { db.exec('ALTER TABLE task_files ADD COLUMN dir_config_version INTEGER;'); } catch (e) {}
+try { db.exec('ALTER TABLE task_files ADD COLUMN template_id TEXT;'); } catch (e) {}
+try { db.exec('ALTER TABLE task_files ADD COLUMN template_hash TEXT;'); } catch (e) {}
+try { db.exec('ALTER TABLE task_files ADD COLUMN template_version TEXT;'); } catch (e) {}
+try { db.exec('ALTER TABLE task_files ADD COLUMN template_size INTEGER;'); } catch (e) {}
+try { db.exec('ALTER TABLE task_files ADD COLUMN field_mappings TEXT;'); } catch (e) {}
 
 
 try { db.exec('ALTER TABLE worker_allowed_paths ADD COLUMN allow_create INTEGER NOT NULL DEFAULT 0;'); } catch (e) {}

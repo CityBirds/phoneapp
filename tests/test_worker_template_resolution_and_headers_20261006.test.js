@@ -55,6 +55,13 @@ test('worker.js fetchTemplateForTask does not throw API_BASE ReferenceError and 
   assert.ok(resById, 'Template found by ID');
   assert.equal(resById.id, 'tmpl_poa3500_cert');
   assert.equal(downloadedId, 'tmpl_poa3500_cert', 'Downloaded template file from coordinator');
+  assert.ok(resById.filepath.endsWith('tmpl_poa3500_cert.doc'), 'Must use safe ASCII cache filename without Chinese');
+
+  // Test 1b: Second call must reuse local cache without re-downloading
+  downloadedId = null;
+  const resCached = await worker.fetchTemplateForTask('POA3500', 'cert', 'tmpl_poa3500_cert');
+  assert.equal(downloadedId, null, 'Must reuse local cache file without repeating download');
+  assert.equal(resCached.filepath, resById.filepath);
 
   // Test 2: Fetch by model '3500' (fuzzy matches 'POA3500')
   const resFuzzy = await worker.fetchTemplateForTask('3500', 'cert');
@@ -62,7 +69,7 @@ test('worker.js fetchTemplateForTask does not throw API_BASE ReferenceError and 
   assert.equal(resFuzzy.id, 'tmpl_poa3500_cert');
 
   // Clean up
-  try { fs.rmSync('/tmp/test_worker_dir', { recursive: true, force: true }); } catch (e) {}
+  try { fs.rmSync(worker.workingDir, { recursive: true, force: true }); } catch (e) {}
 });
 
 test('doc_processor.ps1 and doc_processor.py include table header syncing logic for dynamic columns', () => {

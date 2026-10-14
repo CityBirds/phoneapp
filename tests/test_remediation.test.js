@@ -1,4 +1,4 @@
-﻿const path = require('path');
+const path = require('path');
 const fs = require('fs');
 
 const testDbPath = path.resolve(__dirname, `../data/phoneapp_remediation_test_${Date.now()}.db`);
@@ -19,14 +19,17 @@ const db = require('../src/backend/db');
 let server;
 const PORT = 3002;
 
-test.before((done) => {
-  server = app.listen(PORT, () => {
-    console.log(`Remediation test server running on port ${PORT}`);
+test.before(async () => {
+  await new Promise(resolve => {
+    server = app.listen(PORT, () => {
+      console.log(`Remediation test server running on port ${PORT}`);
+      resolve();
+    });
   });
 });
 
-test.after(() => {
-  if (server) server.close();
+test.after(async () => {
+  if (server) await new Promise(resolve => server.close(resolve));
   try { if (fs.existsSync(testDbPath)) fs.unlinkSync(testDbPath); } catch (e) {}
 });
 

@@ -1,0 +1,7 @@
+# Windows XP SP3 (x86) Offline Build Requirements
+# Target Interpreter: Python 3.4.4 (32-bit x86)
+# Note: pywin32 is installed via pywin32-221.win32-py3.4.exe before running pip.
+
+future==0.16.0
+pefile==2017.11.5
+PyInstaller==3.2.1

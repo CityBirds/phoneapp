@@ -115,44 +115,82 @@ def process_word_document(template_path, output_path, data):
                         ambient_temp = str(form_data.get('ambientTemp', '')) if form_data.get('ambientTemp') is not None else ''
                         relative_humidity = str(form_data.get('relativeHumidity', '')) if form_data.get('relativeHumidity') is not None else ''
 
-                        if cert_date and table.Rows.Count >= 4 and table.Columns.Count >= 6:
-                            table.Cell(4, 6).Range.Text = cert_date
+                        field_mappings = data.get('fieldMappings')
+                        if not field_mappings:
+                            field_mappings = data.get('field_mappings') or {}
+                        tc = field_mappings.get('tableConfig')
+                        if not tc:
+                            tc = data.get('tableConfig') or {}
+                        target_t_idx = (int(tc.get('tableIdx')) + 1) if (tc.get('tableIdx') is not None) else 1
 
-                        if device_sn and table.Rows.Count >= 7 and table.Columns.Count >= 2:
-                            table.Cell(7, 2).Range.Text = device_sn
+                        if target_t_idx <= doc.Tables.Count:
+                            target_table = doc.Tables.Item(target_t_idx)
+                        else:
+                            target_table = doc.Tables.Item(1)
 
+                        # 1. Smart label scanning for single fields across tables (XP-07, XP-08, X64-08)
+                        for t_i in range(1, doc.Tables.Count + 1):
+                            tbl = doc.Tables.Item(t_i)
+                            cell_count = tbl.Range.Cells.Count
+                            for c_i in range(1, cell_count):
+                                try:
+                                    c_txt = tbl.Range.Cells.Item(c_i).Range.Text.replace('\r', '').replace('\x07', '').replace('\n', '').strip()
+                                    if cert_date and (c_txt == "Date:" or c_txt == "Date" or c_txt.endswith("Date:") or c_txt == "日期:"):
+                                        next_cell = tbl.Range.Cells.Item(c_i + 1)
+                                        rng = next_cell.Range
+                                        try: rng.MoveEnd(1, -1)
+                                        except Exception: pass
+                                        rng.Text = cert_date
+                                    elif device_sn and (c_txt == "Inst. SN." or c_txt == "Inst. SN" or c_txt == "SN." or c_txt == "序列号:"):
+                                        next_cell = tbl.Range.Cells.Item(c_i + 1)
+                                        rng = next_cell.Range
+                                        try: rng.MoveEnd(1, -1)
+                                        except Exception: pass
+                                        rng.Text = device_sn
+                                    elif model and (c_txt == "Instrument" or c_txt == "仪器型号:" or c_txt == "型号:"):
+                                        next_cell = tbl.Range.Cells.Item(c_i + 1)
+                                        rng = next_cell.Range
+                                        try: rng.MoveEnd(1, -1)
+                                        except Exception: pass
+                                        rng.Text = model
+                                    elif ambient_temp and ("Ambient Temperature" in c_txt or "环境温度" in c_txt):
+                                        next_cell = tbl.Range.Cells.Item(c_i + 1)
+                                        rng = next_cell.Range
+                                        try: rng.MoveEnd(1, -1)
+                                        except Exception: pass
+                                        rng.Text = f"{ambient_temp} ℃" if "℃" not in ambient_temp else ambient_temp
+                                    elif relative_humidity and ("Relative Humidity" in c_txt or "相对湿度" in c_txt):
+                                        next_cell = tbl.Range.Cells.Item(c_i + 1)
+                                        rng = next_cell.Range
+                                        try: rng.MoveEnd(1, -1)
+                                        except Exception: pass
+                                        rng.Text = f"{relative_humidity} %RH" if "%RH" not in relative_humidity else relative_humidity
+                                except Exception:
+                                    continue
+
+                        # 2. Measurement Points in Certificate (X64-09, XP-09)
                         test_points = form_data.get('testPoints', [])
-                        field_mappings = data.get('fieldMappings') or data.get('field_mappings') or {}
-                        if not field_mappings and cert_template:
-                            field_mappings = cert_template.get('field_mappings') or {}
-                        tc = field_mappings.get('tableConfig') or data.get('tableConfig') or (cert_template.get('field_mappings', {}).get('tableConfig') if cert_template else None)
                         columns = tc.get('columns', []) if tc else []
                         start_r = tc.get('startRow', 12) + 1 if tc and tc.get('startRow') is not None else 13
-
-                        needed_rows = start_r + len(test_points) - 1
-                        while table.Rows.Count < needed_rows:
-                            try: table.Rows.Add()
-                            except: break
-                        while table.Rows.Count > needed_rows and table.Rows.Count > start_r:
-                            try: table.Rows.Item(table.Rows.Count).Delete()
-                            except: break
+                        end_r = tc.get('endRow', start_r + len(test_points) - 2) + 1 if tc and tc.get('endRow') is not None else (start_r + len(test_points) - 1)
+                        template_data_rows = (end_r - start_r + 1) if (end_r >= start_r) else 0
 
                         if columns and start_r > 1:
                             header_r = tc.get('headerRow', start_r - 2) + 1 if 'headerRow' in tc else start_r - 1
-                            if 1 <= header_r <= table.Rows.Count:
+                            if 1 <= header_r <= target_table.Rows.Count:
                                 for col_def in columns:
                                     c_idx = col_def.get('colIdx', 0) + 1
                                     c_lbl = col_def.get('label')
                                     if c_lbl:
                                         try:
-                                            table.Cell(header_r, c_idx).Range.Text = str(c_lbl)
+                                            target_table.Cell(header_r, c_idx).Range.Text = str(c_lbl)
                                         except Exception:
-                                            try: table.Rows.Item(header_r).Cells.Item(c_idx).Range.Text = str(c_lbl)
+                                            try: table.Cell(header_r, c_idx).Range.Text = str(c_lbl)
                                             except Exception: pass
 
                         for idx, tp in enumerate(test_points):
                             r_idx = start_r + idx
-                            if table.Rows.Count >= r_idx:
+                            if target_table.Rows.Count >= r_idx:
                                 if columns:
                                     for col_def in columns:
                                         c_idx = col_def.get('colIdx', 0) + 1
@@ -166,50 +204,68 @@ def process_word_document(template_path, output_path, data):
                                         elif col_def.get('isStd') and tp.get('std') is not None: val = tp.get('std')
                                         elif col_def.get('isAct') and tp.get('act') is not None: val = tp.get('act')
                                         if val is not None:
-                                            try:
-                                                table.Cell(r_idx, c_idx).Range.Text = str(val)
-                                            except Exception:
-                                                try: table.Rows.Item(r_idx).Cells.Item(c_idx).Range.Text = str(val)
-                                                except Exception: pass
+                                            set_cell_text(target_table, r_idx, c_idx, str(val))
                                 else:
                                     std_val = tp.get('std') if tp.get('std') is not None else tp.get('standard')
                                     act_val = tp.get('act') if tp.get('act') is not None else tp.get('actual')
-                                    if std_val is not None and table.Columns.Count >= 2:
-                                        table.Cell(r_idx, 2).Range.Text = str(std_val)
-                                    if act_val is not None and table.Columns.Count >= 3:
-                                        table.Cell(r_idx, 3).Range.Text = str(act_val)
+                                    pt_name = tp.get('name') if tp.get('name') is not None else tp.get('label')
+                                    if pt_name is not None and target_table.Columns.Count >= 1:
+                                        set_cell_text(target_table, r_idx, 1, str(pt_name))
+                                    if std_val is not None and target_table.Columns.Count >= 2:
+                                        set_cell_text(target_table, r_idx, 2, str(std_val))
+                                    if act_val is not None and target_table.Columns.Count >= 3:
+                                        set_cell_text(target_table, r_idx, 3, str(act_val))
+
                     elif doc_type == 'packing':
+                        clean_sn = device_sn[3:].strip() if (device_sn.startswith("SN:") or device_sn.startswith("SN：")) else device_sn.strip()
+                        clean_sensor_sn = sensor_sn[3:].strip() if (sensor_sn.startswith("SN:") or sensor_sn.startswith("SN：")) else sensor_sn.strip()
                         pump_str = "带泵" if (is_pump_model and has_pump) else ""
-                        main_remark = f"SN: {device_sn} {pump_str}".strip() if pump_str else f"SN: {device_sn}"
-                        sensor_remark_str = f"SN: {sensor_sn}" if sensor_sn else ""
+                        main_remark = f"SN: {clean_sn} {pump_str}".strip() if pump_str else f"SN: {clean_sn}"
+                        sensor_remark_str = f"SN: {clean_sensor_sn}" if clean_sensor_sn else ""
                         packing_items = form_data.get('packingItems', [])
                         first_data_row = 2
 
-                        # 按行名称识别真实存在的保护行，不假设“第二行就是传感器行” (整改 B.5/B.6)
+                        # Dynamic column detection (XP-10, X64-10)
+                        col_seq, col_name, col_spec, col_count, col_unit, col_std, col_remark = 1, 2, 3, 4, 5, 6, 7
+                        try:
+                            for c in range(1, table.Columns.Count + 1):
+                                hdr_txt = str(table.Cell(1, c).Range.Text).replace('\r', '').replace('\x07', '').replace('\n', '').strip()
+                                if "序号" in hdr_txt or hdr_txt.lower() in ("no", "seq"): col_seq = c
+                                elif "名称" in hdr_txt or "物料" in hdr_txt or hdr_txt.lower() == "name": col_name = c
+                                elif "规格" in hdr_txt or "型号" in hdr_txt or hdr_txt.lower() == "spec": col_spec = c
+                                elif "数量" in hdr_txt or hdr_txt.lower() in ("qty", "count"): col_count = c
+                                elif "单位" in hdr_txt or hdr_txt.lower() == "unit": col_unit = c
+                                elif "标配" in hdr_txt or "标准" in hdr_txt or hdr_txt.lower() == "standard": col_std = c
+                                elif "备注" in hdr_txt or hdr_txt.lower() == "remark": col_remark = c
+                        except Exception: pass
+
+                        # Locate main device index and sensor index (supports non-first main row, XP-10)
+                        main_data_index = -1
+                        for _i, _it in enumerate(packing_items):
+                            it_name = str(_it.get('name') or '').strip()
+                            if main_data_index < 0 and (it_name.startswith('主设备') or _it.get('isProtectedMain') or _it.get('isProtected') or _it.get('isMain')):
+                                main_data_index = _i
+                            if has_sensor_row_configured and sensor_data_index < 0 and (it_name == sensor_row_name or _it.get('isProtectedSensor')):
+                                sensor_data_index = _i
+                        if main_data_index < 0 and len(packing_items) > 0:
+                            main_data_index = 0
+
+                        # 按行名称识别真实存在的保护行 (整改 B.5/B.6)
                         for _r in range(2, table.Rows.Count + 1):
                             try:
-                                _name = str(table.Cell(_r, 2).Range.Text).strip()
+                                _name = str(table.Cell(_r, col_name).Range.Text).strip()
                             except Exception:
                                 continue
                             if _name.startswith('主设备'):
                                 if model:
-                                    set_cell_text(table, _r, 3, model)
-                                set_cell_text(table, _r, 7, main_remark)
+                                    set_cell_text(table, _r, col_spec, model)
+                                set_cell_text(table, _r, col_remark, main_remark)
                             elif has_sensor_row_configured and _name == sensor_row_name:
                                 if sensor_model:
-                                    set_cell_text(table, _r, 3, sensor_model)
-                                set_cell_text(table, _r, 7, sensor_remark_str)
+                                    set_cell_text(table, _r, col_spec, sensor_model)
+                                set_cell_text(table, _r, col_remark, sensor_remark_str)
 
                         if packing_items:
-                            # 若模板配置未指明传感器行，则按条目名称/标记推断（仅当模板确实配置了传感器行时才生效）
-                            if sensor_data_index < 0 and has_sensor_row_configured:
-                                for _i, _it in enumerate(packing_items):
-                                    if str(_it.get('name') or '') == sensor_row_name or _it.get('isProtectedSensor'):
-                                        sensor_data_index = _i
-                                        break
-
-                            # 只在数据区增删行：在最后一行数据行的某个单元格上 Range.Rows.Add()，
-                            # 新行会插入到该数据行之后、表格下方内容之前 (整改 C.6)
                             template_data_rows = max(0, table.Rows.Count - first_data_row + 1)
                             current_data_rows = template_data_rows
                             guard = 0
@@ -232,29 +288,27 @@ def process_word_document(template_path, output_path, data):
                                 r = first_data_row + idx
                                 if r < first_data_row or r > table.Rows.Count:
                                     break
-                                set_cell_text(table, r, 1, str(idx + 1))
+                                set_cell_text(table, r, col_seq, str(idx + 1))
                                 if item.get('name') is not None:
-                                    set_cell_text(table, r, 2, str(item.get('name')))
-                                # 规格：主设备用型号；只有真实传感器行才用传感器型号，其余保留用户填写值 (整改 B.6)
-                                if idx == 0 and model:
-                                    set_cell_text(table, r, 3, model)
+                                    set_cell_text(table, r, col_name, str(item.get('name')))
+                                if idx == main_data_index and model:
+                                    set_cell_text(table, r, col_spec, model)
                                 elif sensor_data_index >= 0 and idx == sensor_data_index and sensor_model:
-                                    set_cell_text(table, r, 3, sensor_model)
+                                    set_cell_text(table, r, col_spec, sensor_model)
                                 elif item.get('spec') is not None:
-                                    set_cell_text(table, r, 3, str(item.get('spec')))
+                                    set_cell_text(table, r, col_spec, str(item.get('spec')))
                                 if item.get('count') is not None:
-                                    set_cell_text(table, r, 4, str(item.get('count')))
+                                    set_cell_text(table, r, col_count, str(item.get('count')))
                                 if item.get('unit') is not None:
-                                    set_cell_text(table, r, 5, str(item.get('unit')))
+                                    set_cell_text(table, r, col_unit, str(item.get('unit')))
                                 if item.get('standard') is not None:
-                                    set_cell_text(table, r, 6, str(item.get('standard')))
-                                # 备注：仅主设备行与真实传感器行使用自动备注 (整改 B.6)
-                                if idx == 0:
-                                    set_cell_text(table, r, 7, main_remark)
+                                    set_cell_text(table, r, col_std, str(item.get('standard')))
+                                if idx == main_data_index:
+                                    set_cell_text(table, r, col_remark, main_remark)
                                 elif sensor_data_index >= 0 and idx == sensor_data_index:
-                                    set_cell_text(table, r, 7, sensor_remark_str)
+                                    set_cell_text(table, r, col_remark, sensor_remark_str)
                                 elif item.get('remark') is not None:
-                                    set_cell_text(table, r, 7, str(item.get('remark')))
+                                    set_cell_text(table, r, col_remark, str(item.get('remark')))
 
                 doc.Save()
                 doc.Close(False)

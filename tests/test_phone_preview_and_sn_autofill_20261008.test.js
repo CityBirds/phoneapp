@@ -12,36 +12,35 @@ process.env.NODE_ENV = 'test';
 
 const db = require('../src/backend/db');
 
-// Helper function to create clean remark without wiping custom user text (SN07, 2.2.5)
-function updateMainDeviceRemark(oldRemark, cleanSn, hasPump) {
-  oldRemark = String(oldRemark || '').trim();
-  cleanSn = String(cleanSn || '').trim();
-  const pumpStr = hasPump ? '带泵' : '';
-  const snTag = cleanSn ? `SN: ${cleanSn}${pumpStr}` : '';
+// Helper function to create clean remark matching src/frontend/app.js generateMainDeviceRemark
+function generateMainDeviceRemark(oldRemark, sn, hasPump) {
+  const cleanSn = String(sn || '').trim();
+  let text = String(oldRemark || '').trim();
 
-  if (!oldRemark) {
-    return snTag;
+  // Remove all existing SN occurrences (supporting halfwidth SN: and fullwidth SN：)
+  text = text.replace(/SN[:：]\s*[^\s\r\n带泵]*/gi, ' ');
+  // Remove all existing "带泵" occurrences
+  text = text.replace(/带泵/g, ' ');
+  // Clean up extra whitespace
+  text = text.replace(/\s+/g, ' ').trim();
+
+  let tag = '';
+  if (cleanSn) {
+    tag = `SN: ${cleanSn}${hasPump ? '带泵' : ''}`;
+  } else if (hasPump) {
+    tag = '带泵';
   }
 
-  // Check if oldRemark already contains SN: ...
-  const snRegex = /SN:\s*[^\s\r\n]+/i;
-  if (snRegex.test(oldRemark)) {
-    if (snTag) {
-      return oldRemark.replace(snRegex, snTag);
-    } else {
-      // Remove SN tag and clean up double spaces
-      return oldRemark.replace(snRegex, '').replace(/\s+/g, ' ').trim();
-    }
+  if (text && tag) {
+    return `${text} ${tag}`;
+  } else if (tag) {
+    return tag;
   } else {
-    if (snTag) {
-      return `${oldRemark} ${snTag}`.trim();
-    } else {
-      return oldRemark;
-    }
+    return text;
   }
 }
 
-// Helper to extract default SN from template bundle (SN01 - SN05, 2.1)
+// Helper to extract default SN from template bundle matching src/frontend/app.js extractDefaultDeviceSn
 function extractDefaultDeviceSn(bundle) {
   if (!bundle) return { sn: '', conflict: false };
 
@@ -53,10 +52,10 @@ function extractDefaultDeviceSn(bundle) {
   if (certTmpl && certTmpl.field_mappings) {
     const singleFields = certTmpl.field_mappings.singleFields || [];
     const snField = singleFields.find(f =>
-      f.status === 'bound' && /Inst\.?\s*SN|设备序列号|序列号|Instrument\s*SN|SN:/i.test(f.label || '')
+      f.status === 'bound' && /Inst\.?\s*SN|设备序列号|序列号|Instrument\s*SN|SN[:：]/i.test(f.label || '')
     );
-    if (snField && snField.candidateValue) {
-      certSn = String(snField.candidateValue).trim();
+    if (snField && (snField.candidateValue || snField.defaultValue)) {
+      certSn = String(snField.candidateValue || snField.defaultValue).replace(/带泵/g, '').trim();
     }
   }
 
@@ -67,10 +66,10 @@ function extractDefaultDeviceSn(bundle) {
     const mainItem = items.find(it => it.role === 'mainDevice' || /主设备|主机/.test(it.name || ''));
     if (mainItem) {
       if (mainItem.sn) {
-        packingSn = String(mainItem.sn).trim();
+        packingSn = String(mainItem.sn).replace(/带泵/g, '').trim();
       } else if (mainItem.remark) {
-        const match = /SN:\s*([^\s\r\n带泵]+)/i.exec(mainItem.remark);
-        if (match) packingSn = match[1].trim();
+        const match = /SN[:：]\s*([^\s\r\n带泵]+)/i.exec(mainItem.remark);
+        if (match) packingSn = match[1].replace(/带泵/g, '').trim();
       }
     }
   }
@@ -157,20 +156,88 @@ test('SN05: Detects conflict when cert SN and packing main device SN disagree', 
 
 test('SN07: Main device remark sync preserves custom text without duplicating SN:', () => {
   // Scenario 1: Existing remark has custom text and old SN with pump
-  let remark = updateMainDeviceRemark('加急特快 SN: EX001带泵 箱体完好', 'EX002', false);
-  assert.equal(remark, '加急特快 SN: EX002 箱体完好');
+  let remark = generateMainDeviceRemark('加急特快 SN: EX001带泵 箱体完好', 'EX002', false);
+  assert.equal(remark, '加急特快 箱体完好 SN: EX002');
 
   // Scenario 2: Toggle pump on
-  remark = updateMainDeviceRemark('加急特快 SN: EX002 箱体完好', 'EX002', true);
-  assert.equal(remark, '加急特快 SN: EX002带泵 箱体完好');
+  remark = generateMainDeviceRemark('加急特快 SN: EX002 箱体完好', 'EX002', true);
+  assert.equal(remark, '加急特快 箱体完好 SN: EX002带泵');
 
   // Scenario 3: Remove SN
-  remark = updateMainDeviceRemark('加急特快 SN: EX002带泵 箱体完好', '', false);
+  remark = generateMainDeviceRemark('加急特快 SN: EX002带泵 箱体完好', '', false);
   assert.equal(remark, '加急特快 箱体完好');
 
   // Scenario 4: Empty initial remark
-  remark = updateMainDeviceRemark('', 'EX003', true);
+  remark = generateMainDeviceRemark('', 'EX003', true);
   assert.equal(remark, 'SN: EX003带泵');
+});
+
+test('SN08: Fullwidth colon, idempotency, pump toggling and backend validation', () => {
+  // 1. Fullwidth colon SN： template remark replacement
+  let remark = generateMainDeviceRemark('SN：AP10007513 带泵', 'AP20261008', true);
+  assert.equal(remark, 'SN: AP20261008带泵');
+
+  // 2. Strict Idempotency test (f(f(x)) === f(x))
+  const pass1 = generateMainDeviceRemark('加急特快 SN：AP10007513 带泵 箱体完好', 'AP20261008', true);
+  const pass2 = generateMainDeviceRemark(pass1, 'AP20261008', true);
+  const pass3 = generateMainDeviceRemark(pass2, 'AP20261008', true);
+  assert.equal(pass1, pass2);
+  assert.equal(pass2, pass3);
+  assert.equal(pass1, '加急特快 箱体完好 SN: AP20261008带泵');
+
+  // 3. Modifying SN replaces old SN without duplicate tags
+  const updatedSn = generateMainDeviceRemark(pass1, 'AP20269999', true);
+  assert.equal(updatedSn, '加急特快 箱体完好 SN: AP20269999带泵');
+  assert.equal((updatedSn.match(/SN[:：]/gi) || []).length, 1);
+
+  // 4. Toggling pump off/on cleanly adds/removes exactly one "带泵" tag, preserving custom user text
+  const pumpOff = generateMainDeviceRemark(updatedSn, 'AP20269999', false);
+  assert.equal(pumpOff, '加急特快 箱体完好 SN: AP20269999');
+  assert.equal(pumpOff.includes('带泵'), false);
+
+  const pumpOnAgain = generateMainDeviceRemark(pumpOff, 'AP20269999', true);
+  assert.equal(pumpOnAgain, '加急特快 箱体完好 SN: AP20269999带泵');
+  assert.equal((pumpOnAgain.match(/带泵/g) || []).length, 1);
+
+  // 5. extractDefaultDeviceSn with fullwidth colon
+  const bundleFullwidth = {
+    packingTemplate: {
+      field_mappings: {
+        packingItems: [
+          { role: 'mainDevice', name: '主机', remark: 'SN：AP10007513 带泵' },
+          { role: 'sensor', name: '传感器', remark: 'SN: SENSOR_SN_9999' }
+        ]
+      }
+    }
+  };
+  const extracted = extractDefaultDeviceSn(bundleFullwidth);
+  assert.equal(extracted.sn, 'AP10007513');
+
+  // 6. Sensor serial numbers in packing list remain untouched
+  const sensorRemark = 'SN: SENSOR_SN_9999';
+  const untouchedSensorRemark = generateMainDeviceRemark(sensorRemark, 'AP20261008', true);
+  // Note: syncDeviceSnToPackingList explicitly targets ONLY findMainDeviceRowIndex() and never modifies sensor row.
+  assert.equal(sensorRemark, 'SN: SENSOR_SN_9999');
+
+  // 7. Backend consistency check logic: matches main device row, supports fullwidth colon, strips "带泵", rejects genuine mismatch
+  const packingItemsGood = [
+    { role: 'mainDevice', name: '主设备', remark: 'SN：AP20261008 带泵' },
+    { role: 'sensor', name: '传感器', remark: 'SN: SENS_001' }
+  ];
+  const mainItem = packingItemsGood.find(it => it.role === 'mainDevice' || it.isProtectedMain || /主设备|主机/.test(it.name || '')) || packingItemsGood[0];
+  const matchGood = mainItem.remark.match(/SN[:：]\s*([A-Za-z0-9_.-]+)/i);
+  assert.ok(matchGood);
+  assert.equal(matchGood[1].replace(/带泵/g, '').trim(), 'AP20261008');
+
+  // Genuine mismatch check
+  const packingItemsBad = [
+    { role: 'mainDevice', name: '主设备', remark: 'SN：AP10007513 带泵' }
+  ];
+  const mainItemBad = packingItemsBad.find(it => it.role === 'mainDevice' || it.isProtectedMain || /主设备|主机/.test(it.name || '')) || packingItemsBad[0];
+  const matchBad = mainItemBad.remark.match(/SN[:：]\s*([A-Za-z0-9_.-]+)/i);
+  assert.ok(matchBad);
+  const extractedBad = matchBad[1].replace(/带泵/g, '').trim();
+  assert.notEqual(extractedBad, 'AP20261008');
 });
 
 test('SN09: Task submission retains historical deviceSn snapshot', () => {

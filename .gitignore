@@ -1,6 +1,9 @@
 *.zip
 *.exe
+!src/worker_xp/build_kit/*.exe
 node_modules/
+cached_templates/
+*.bck
 __pycache__/
 *.pyc
 .vscode/

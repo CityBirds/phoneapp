@@ -359,6 +359,7 @@ try {
                         if ($startRowIdx -gt 0) {
                             # 模板数据行数由 tableConfig 的 startRow/endRow 推导，用于界定测量数据区
                             $templateDataRows = if ($endRowIdx -ge $startRowIdx) { $endRowIdx - $startRowIdx + 1 } else { 0 }
+
                             # 只在测量数据区增删行，保留表头与表格下方的声明/签字内容
                             [void](Set-MeasurementRowCount -Table $targetTable -FirstDataRow $startRowIdx -TargetRows $testPoints.Count -TemplateDataRows $templateDataRows)
                             Write-Dbg ("cert rowsAfterResize=" + $targetTable.Rows.Count + " templateDataRows=" + $templateDataRows)
@@ -461,162 +462,98 @@ try {
 
 
 
+            $cleanSn = if ($deviceSn -like "SN:*") { $deviceSn.Substring(3).Trim() } elseif ($deviceSn -like "SN：*") { $deviceSn.Substring(3).Trim() } else { $deviceSn }
             $pumpStr = if ($isPumpModel -and $hasPump) { "带泵" } else { "" }
+            $mainRemark = if ($pumpStr) { "SN: $cleanSn $pumpStr" } else { "SN: $cleanSn" }
 
-            $mainRemark = if ($pumpStr) { "SN: $deviceSn $pumpStr" } else { "SN: $deviceSn" }
+            $cleanSensorSn = if ($sensorSn -like "SN:*") { $sensorSn.Substring(3).Trim() } elseif ($sensorSn -like "SN：*") { $sensorSn.Substring(3).Trim() } else { $sensorSn }
+            $sensorRemarkStr = if ($cleanSensorSn) { "SN: $cleanSensorSn" } else { "" }
 
-            $sensorRemarkStr = if ($sensorSn) { "SN: $sensorSn" } else { "" }
-
-
-
-            # 更新模板中真实存在的保护行：按行名称识别，不假设"第二行就是传感器行" (2.B.5, 2.B.6)
-
-            for ($r = 2; $r -le $table.Rows.Count; $r++) {
-
-                try {
-
-                    $cName = $table.Cell($r, 2).Range.Text.Trim("`r", "`a", "`n", " ")
-
-                    if ($cName -eq "主设备" -or $cName -like "*主设备*") {
-
-                        if ($model) { [void](Set-CellText -Table $table -Row $r -Col 3 -Value $model) }
-
-                        [void](Set-CellText -Table $table -Row $r -Col 7 -Value $mainRemark)
-
-                    } elseif ($hasSensorRowConfigured -and $cName -eq $sensorRowName) {
-
-                        if ($sensorModel) { [void](Set-CellText -Table $table -Row $r -Col 3 -Value $sensorModel) }
-
-                        [void](Set-CellText -Table $table -Row $r -Col 7 -Value $sensorRemarkStr)
-
-                    }
-
-                } catch {}
-
-            }
-
-
-
-            # Update full packingItems array
-
-            $packingItems = $formData.packingItems
-
-            # 表头行数：默认第一行为表头，数据从第 2 行开始
-
-            $firstDataRow = 2
-
-            # 传感器行在数据区中的相对位置（只有模板确实配置了传感器行时才存在）
-
-            $sensorDataIdx = -1
-
+            # Dynamically detect packing column indices from header row (Row 1) (XP-10, X64-10)
+            $colSeq = 1; $colName = 2; $colSpec = 3; $colCount = 4; $colUnit = 5; $colStd = 6; $colRemark = 7
             try {
-
-                if ($fieldMappings -and $fieldMappings.packingItems) {
-
-                    $cfgIdx = 0
-
-                    foreach ($cfgItem in $fieldMappings.packingItems) {
-
-                        if ($cfgItem.isProtectedSensor -or "$($cfgItem.name)" -eq $sensorRowName) { $sensorDataIdx = $cfgIdx; break }
-
-                        $cfgIdx++
-
-                    }
-
+                for ($c = 1; $c -le $table.Columns.Count; $c++) {
+                    $hdrTxt = $table.Cell(1, $c).Range.Text.Trim("`r", "`a", "`n", " ")
+                    if ($hdrTxt -like "*序号*" -or $hdrTxt -eq "No" -or $hdrTxt -eq "Seq") { $colSeq = $c }
+                    elseif ($hdrTxt -like "*名称*" -or $hdrTxt -like "*物料*" -or $hdrTxt -eq "Name") { $colName = $c }
+                    elseif ($hdrTxt -like "*规格*" -or $hdrTxt -like "*型号*" -or $hdrTxt -eq "Spec") { $colSpec = $c }
+                    elseif ($hdrTxt -like "*数量*" -or $hdrTxt -eq "Qty" -or $hdrTxt -eq "Count") { $colCount = $c }
+                    elseif ($hdrTxt -like "*单位*" -or $hdrTxt -eq "Unit") { $colUnit = $c }
+                    elseif ($hdrTxt -like "*标配*" -or $hdrTxt -like "*标准*" -or $hdrTxt -eq "Standard") { $colStd = $c }
+                    elseif ($hdrTxt -like "*备注*" -or $hdrTxt -eq "Remark") { $colRemark = $c }
                 }
-
             } catch {}
 
-            if ($sensorDataIdx -lt 0 -and $hasSensorRowConfigured -and $packingItems -and $packingItems.Count -gt 1) {
-
-                $probeIdx = 0
-
-                foreach ($probeItem in $packingItems) {
-
-                    if ("$($probeItem.name)" -eq $sensorRowName -or $probeItem.isProtectedSensor) { $sensorDataIdx = $probeIdx; break }
-
-                    $probeIdx++
-
-                }
-
+            # 更新模板中真实存在的保护行：按行名称识别，不假设"第二行就是传感器行" (2.B.5, 2.B.6)
+            for ($r = 2; $r -le $table.Rows.Count; $r++) {
+                try {
+                    $cName = $table.Cell($r, $colName).Range.Text.Trim("`r", "`a", "`n", " ")
+                    if ($cName -eq "主设备" -or $cName -like "*主设备*") {
+                        if ($model) { [void](Set-CellText -Table $table -Row $r -Col $colSpec -Value $model) }
+                        [void](Set-CellText -Table $table -Row $r -Col $colRemark -Value $mainRemark)
+                    } elseif ($hasSensorRowConfigured -and $cName -eq $sensorRowName) {
+                        if ($sensorModel) { [void](Set-CellText -Table $table -Row $r -Col $colSpec -Value $sensorModel) }
+                        [void](Set-CellText -Table $table -Row $r -Col $colRemark -Value $sensorRemarkStr)
+                    }
+                } catch {}
             }
 
+            # Update full packingItems array
+            $packingItems = $formData.packingItems
+            $firstDataRow = 2
 
+            # Locate main device index and sensor index (supports non-first main row, XP-10)
+            $mainDataIdx = -1
+            $sensorDataIdx = -1
+            if ($packingItems -and $packingItems.Count -gt 0) {
+                for ($i = 0; $i -lt $packingItems.Count; $i++) {
+                    $itName = [string]$packingItems[$i].name
+                    if ($mainDataIdx -lt 0 -and ($itName -like "*主设备*" -or $packingItems[$i].isProtectedMain -or $packingItems[$i].isProtected -or $packingItems[$i].isMain)) {
+                        $mainDataIdx = $i
+                    }
+                    if ($hasSensorRowConfigured -and $sensorDataIdx -lt 0 -and ($itName -eq $sensorRowName -or $packingItems[$i].isProtectedSensor)) {
+                        $sensorDataIdx = $i
+                    }
+                }
+            }
+            if ($mainDataIdx -lt 0 -and $packingItems -and $packingItems.Count -gt 0) { $mainDataIdx = 0 }
 
             if ($packingItems -and $packingItems.Count -gt 0) {
-
                 # 只在数据区增删行，保留表格下方的签字/说明内容 (3.C.6)
-
                 [void](Set-MeasurementRowCount -Table $table -FirstDataRow $firstDataRow -TargetRows $packingItems.Count -TemplateDataRows $packingTemplateDataRows)
-
                 Write-Dbg ("packing rowsAfterResize=" + $table.Rows.Count)
 
-
-
                 for ($idx = 0; $idx -lt $packingItems.Count; $idx++) {
-
                     $r = $firstDataRow + $idx
-
                     if ($r -ge $firstDataRow -and $r -le $table.Rows.Count) {
-
                         $item = $packingItems[$idx]
 
-                        if ($table.Columns.Count -ge 7) {
+                        [void](Set-CellText -Table $table -Row $r -Col $colSeq -Value ([string]($idx + 1)))
+                        if ($null -ne $item.name) { [void](Set-CellText -Table $table -Row $r -Col $colName -Value ([string]$item.name)) }
 
-                            [void](Set-CellText -Table $table -Row $r -Col 1 -Value ([string]($idx + 1)))
-
-                            if ($null -ne $item.name) { [void](Set-CellText -Table $table -Row $r -Col 2 -Value ([string]$item.name)) }
-
-
-
-                            # 规格：主设备用型号；仅当该行确实是传感器行时用传感器型号，其余保留用户填写值
-
-                            if ($idx -eq 0 -and $model) {
-
-                                [void](Set-CellText -Table $table -Row $r -Col 3 -Value $model)
-
-                            } elseif ($sensorDataIdx -ge 0 -and $idx -eq $sensorDataIdx -and $sensorModel) {
-
-                                [void](Set-CellText -Table $table -Row $r -Col 3 -Value $sensorModel)
-
-                            } elseif ($null -ne $item.spec) {
-
-                                [void](Set-CellText -Table $table -Row $r -Col 3 -Value ([string]$item.spec))
-
-                            }
-
-
-
-                            if ($null -ne $item.count) { [void](Set-CellText -Table $table -Row $r -Col 4 -Value ([string]$item.count)) }
-
-                            if ($null -ne $item.unit) { [void](Set-CellText -Table $table -Row $r -Col 5 -Value ([string]$item.unit)) }
-
-                            if ($null -ne $item.standard) { [void](Set-CellText -Table $table -Row $r -Col 6 -Value ([string]$item.standard)) }
-
-
-
-                            # 备注：只有主设备行与真实传感器行使用自动备注，其余保留用户填写值 (2.B.6)
-
-                            if ($idx -eq 0) {
-
-                                [void](Set-CellText -Table $table -Row $r -Col 7 -Value $mainRemark)
-
-                            } elseif ($sensorDataIdx -ge 0 -and $idx -eq $sensorDataIdx) {
-
-                                [void](Set-CellText -Table $table -Row $r -Col 7 -Value $sensorRemarkStr)
-
-                            } elseif ($null -ne $item.remark) {
-
-                                [void](Set-CellText -Table $table -Row $r -Col 7 -Value ([string]$item.remark))
-
-                            }
-
+                        # 规格：主设备用型号；仅当该行确实是传感器行时用传感器型号，其余保留用户填写值
+                        if ($idx -eq $mainDataIdx -and $model) {
+                            [void](Set-CellText -Table $table -Row $r -Col $colSpec -Value $model)
+                        } elseif ($sensorDataIdx -ge 0 -and $idx -eq $sensorDataIdx -and $sensorModel) {
+                            [void](Set-CellText -Table $table -Row $r -Col $colSpec -Value $sensorModel)
+                        } elseif ($null -ne $item.spec) {
+                            [void](Set-CellText -Table $table -Row $r -Col $colSpec -Value ([string]$item.spec))
                         }
 
+                        if ($null -ne $item.count) { [void](Set-CellText -Table $table -Row $r -Col $colCount -Value ([string]$item.count)) }
+                        if ($null -ne $item.unit) { [void](Set-CellText -Table $table -Row $r -Col $colUnit -Value ([string]$item.unit)) }
+                        if ($null -ne $item.standard) { [void](Set-CellText -Table $table -Row $r -Col $colStd -Value ([string]$item.standard)) }
+
+                        # 备注：只有主设备行与真实传感器行使用自动备注，其余保留用户填写值 (2.B.6, XP-10)
+                        if ($idx -eq $mainDataIdx) {
+                            [void](Set-CellText -Table $table -Row $r -Col $colRemark -Value $mainRemark)
+                        } elseif ($sensorDataIdx -ge 0 -and $idx -eq $sensorDataIdx) {
+                            [void](Set-CellText -Table $table -Row $r -Col $colRemark -Value $sensorRemarkStr)
+                        } elseif ($null -ne $item.remark) {
+                            [void](Set-CellText -Table $table -Row $r -Col $colRemark -Value ([string]$item.remark))
+                        }
                     }
-
                 }
-
             }
 
         }
