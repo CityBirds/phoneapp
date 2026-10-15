@@ -2060,6 +2060,8 @@ function switchNavTab(tabName) {
     loadWorkers();
   } else if (tabName === 'create') {
     loadSensorConfigs();
+  } else if (tabName === 'serial') {
+    initSerialTab();
   }
 }
 
@@ -2120,5 +2122,479 @@ function onPrinterSelectChange() {
     tip.innerText = 'ℹ️ 当前选择为虚拟打印机，打印操作将导出至文件/系统队列，不会实际出纸。推荐选用物理硬件打印机。';
   } else {
     tip.innerText = '✅ 当前已就绪，打印任务将发送至执行端物理打印机出纸。';
+  }
+}
+
+// ==================== W610 SERIAL COMMUNICATION (R06, W610整改20261014) ====================
+let serialState = {
+  activeWorkerId: null,
+  activeW610Id: null,
+  activeModel: 'POA200',
+  commConfig: null,
+  deviceInfo: null,
+  probing: false,
+  reading: false,
+  submitting: false
+};
+
+async function initSerialTab() {
+  const workerSelect = document.getElementById('serial-worker-select');
+  if (!workerSelect) return;
+
+  try {
+    const res = await fetch(`${API_BASE}/api/workers`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const workers = await res.json();
+
+    const currentVal = workerSelect.value;
+    workerSelect.innerHTML = '<option value="">-- 请选择在线执行端 --</option>';
+
+    workers.forEach(w => {
+      const opt = document.createElement('option');
+      opt.value = w.id;
+      opt.innerText = `${w.name || w.id} (${w.ip || '在线'})`;
+      workerSelect.appendChild(opt);
+    });
+
+    if (state.selectedWorker && workers.some(w => w.id === state.selectedWorker.id)) {
+      workerSelect.value = state.selectedWorker.id;
+    } else if (currentVal && workers.some(w => w.id === currentVal)) {
+      workerSelect.value = currentVal;
+    }
+
+    if (workerSelect.value) {
+      await handleSerialWorkerChange();
+    } else {
+      resetSerialUI();
+    }
+  } catch (err) {
+    console.error('Failed to load workers for serial tab:', err);
+  }
+}
+
+function resetSerialUI() {
+  serialState.deviceInfo = null;
+  serialState.commConfig = null;
+
+  const banner = document.getElementById('serial-worker-config-banner');
+  if (banner) {
+    banner.style.display = 'none';
+    banner.innerHTML = '';
+  }
+
+  const w610Select = document.getElementById('serial-w610-select');
+  if (w610Select) {
+    w610Select.innerHTML = '<option value="">-- 请先选择在线执行端 --</option>';
+    w610Select.disabled = true;
+  }
+
+  const readBtn = document.getElementById('btn-serial-read');
+  if (readBtn) readBtn.disabled = true;
+
+  const deviceCard = document.getElementById('serial-device-card');
+  if (deviceCard) deviceCard.style.display = 'none';
+
+  const resultCard = document.getElementById('serial-result-card');
+  if (resultCard) resultCard.style.display = 'none';
+
+  const notice = document.getElementById('serial-w610-probe-notice');
+  if (notice) notice.innerText = '';
+}
+
+async function handleSerialWorkerChange() {
+  resetSerialUI();
+
+  const workerId = document.getElementById('serial-worker-select').value;
+  serialState.activeWorkerId = workerId;
+  if (!workerId) return;
+
+  const model = document.getElementById('serial-model-select').value || 'POA200';
+  serialState.activeModel = model;
+
+  const banner = document.getElementById('serial-worker-config-banner');
+
+  try {
+    const res = await fetch(`${API_BASE}/api/w610/comm-config?workerId=${encodeURIComponent(workerId)}&model=${encodeURIComponent(model)}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+
+    if (!data.configured) {
+      const workerOpt = document.querySelector(`#serial-worker-select option[value="${workerId}"]`);
+      const workerName = workerOpt ? workerOpt.innerText : workerId;
+
+      banner.style.display = 'block';
+      banner.style.background = '#fef2f2';
+      banner.style.border = '1px solid #fca5a5';
+      banner.style.color = '#991b1b';
+      banner.innerHTML = `
+        <strong>⚠️ 目标执行端未配置通信保存目录</strong><br>
+        执行端 [${escapeHtml(workerName)}] 尚未配置或启用 [${model}] 型号的通信文件保存目录！<br>
+        <span style="font-size: 12px; color: #7f1d1d;">请提示管理员前往<b>【协调服务控制台 -> 执行终端 -> 配置目录】</b>中增加设备通信保存目录并启用。</span>
+      `;
+      return;
+    }
+
+    banner.style.display = 'block';
+    banner.style.background = '#f0fdf4';
+    banner.style.border = '1px solid #86efac';
+    banner.style.color = '#166534';
+    banner.innerHTML = `
+      <strong>✅ 执行端通信目录就绪</strong><br>
+      保存路径: <code style="background: #dcfce7; padding: 2px 6px; border-radius: 4px;">${escapeHtml(data.config.root_dir)}</code>
+      (${data.config.save_mode === 'subfolder' ? '按序列号建子文件夹' : '直接保存根目录'})
+    `;
+
+    serialState.commConfig = data.config;
+    await probeW610Devices();
+
+  } catch (err) {
+    banner.style.display = 'block';
+    banner.style.background = '#fef2f2';
+    banner.style.color = '#991b1b';
+    banner.innerText = '检查执行端保存配置失败: ' + err.message;
+  }
+}
+
+async function probeW610Devices() {
+  const workerId = serialState.activeWorkerId;
+  if (!workerId) return;
+
+  const w610Select = document.getElementById('serial-w610-select');
+  const notice = document.getElementById('serial-w610-probe-notice');
+  const readBtn = document.getElementById('btn-serial-read');
+
+  w610Select.disabled = true;
+  w610Select.innerHTML = '<option value="">正在由执行端探测 W610 设备...</option>';
+  if (notice) notice.innerText = '正在由所选执行端发起 HTTP 探测...';
+
+  try {
+    const taskRes = await fetch(`${API_BASE}/api/w610/tasks`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        clientId: state.clientId || 'client_mobile',
+        clientName: state.clientName || '手机用户',
+        workerId,
+        action: 'probe',
+        model: serialState.activeModel
+      })
+    });
+
+    const taskData = await taskRes.json();
+    if (!taskRes.ok) throw new Error(taskData.error || '创建探测任务失败');
+
+    const taskId = taskData.task.id;
+    let completed = false;
+    let attempts = 0;
+
+    while (!completed && attempts < 15) {
+      await new Promise(r => setTimeout(r, 1000));
+      attempts++;
+
+      const pollRes = await fetch(`${API_BASE}/api/w610/tasks/${taskId}`);
+      if (!pollRes.ok) continue;
+
+      const task = await pollRes.json();
+      if (task.status === 'SUCCESS') {
+        completed = true;
+        const probeResults = task.result ? (task.result.probeResults || []) : [];
+
+        w610Select.innerHTML = '<option value="">-- 请选择在线 W610 设备 --</option>';
+
+        if (probeResults.length === 0) {
+          w610Select.innerHTML = '<option value="">无可用 W610 串口服务器</option>';
+          if (notice) notice.innerText = '未找到系统配置的 W610 服务器，请在管理控制台中添加 W610';
+          if (readBtn) readBtn.disabled = true;
+          return;
+        }
+
+        let firstOnlineId = null;
+        probeResults.forEach(dev => {
+          const opt = document.createElement('option');
+          opt.value = dev.id;
+
+          let statusText = ' (离线)';
+          if (dev.status === 'ONLINE') {
+            statusText = ' (在线可通信)';
+            if (!firstOnlineId) firstOnlineId = dev.id;
+          } else if (dev.status === 'W610_ONLY') {
+            statusText = ' (W610接口响应/设备未应答)';
+            if (!firstOnlineId) firstOnlineId = dev.id;
+          }
+
+          opt.innerText = `${dev.name} [${dev.ip}:${dev.port}]${statusText}`;
+          w610Select.appendChild(opt);
+        });
+
+        w610Select.disabled = false;
+        if (firstOnlineId) {
+          w610Select.value = firstOnlineId;
+          serialState.activeW610Id = firstOnlineId;
+          if (readBtn) readBtn.disabled = false;
+          if (notice) notice.innerText = '探测完成，已自动选中在线设备';
+        } else {
+          if (readBtn) readBtn.disabled = true;
+          if (notice) notice.innerText = '所有配置的 W610 均处于离线状态，请检查网络或串口连接';
+        }
+
+      } else if (task.status === 'FAILED') {
+        completed = true;
+        w610Select.innerHTML = '<option value="">探测失败</option>';
+        if (notice) notice.innerText = '探测失败: ' + (task.error_msg || '未知错误');
+      }
+    }
+
+    if (!completed) {
+      w610Select.innerHTML = '<option value="">探测超时</option>';
+      if (notice) notice.innerText = '执行端响应超时，请检查执行端运行状态';
+    }
+
+  } catch (err) {
+    w610Select.innerHTML = '<option value="">探测异常</option>';
+    if (notice) notice.innerText = '探测失败: ' + err.message;
+  }
+}
+
+function handleSerialW610Change() {
+  const w610Id = document.getElementById('serial-w610-select').value;
+  serialState.activeW610Id = w610Id;
+
+  document.getElementById('serial-device-card').style.display = 'none';
+  document.getElementById('serial-result-card').style.display = 'none';
+
+  const readBtn = document.getElementById('btn-serial-read');
+  if (readBtn) readBtn.disabled = !w610Id;
+}
+
+function handleSerialModelChange() {
+  handleSerialWorkerChange();
+}
+
+async function readSerialDeviceInfo() {
+  const workerId = serialState.activeWorkerId;
+  const w610Id = serialState.activeW610Id;
+  const model = serialState.activeModel;
+
+  if (!workerId || !w610Id) {
+    alert('请先选择执行端与 W610 串口服务器！');
+    return;
+  }
+
+  const resultCard = document.getElementById('serial-result-card');
+  const resultTitle = document.getElementById('serial-result-title');
+  const resultBody = document.getElementById('serial-result-body');
+  const readBtn = document.getElementById('btn-serial-read');
+
+  readBtn.disabled = true;
+  readBtn.innerText = '⏳ 正在读取设备信息...';
+
+  resultCard.style.display = 'block';
+  resultTitle.innerText = '📖 正在读取设备信息';
+  resultTitle.style.color = '#0284c7';
+  resultBody.innerHTML = '<div style="color: #64748b;">通过所选执行端与 W610 发起读取请求中，请稍候...</div>';
+
+  try {
+    const taskRes = await fetch(`${API_BASE}/api/w610/tasks`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        clientId: state.clientId || 'client_mobile',
+        clientName: state.clientName || '手机用户',
+        workerId,
+        w610Id,
+        action: 'read_device',
+        model
+      })
+    });
+
+    const taskData = await taskRes.json();
+    if (!taskRes.ok) throw new Error(taskData.error || '创建读取任务失败');
+
+    const taskId = taskData.task.id;
+    let completed = false;
+    let attempts = 0;
+
+    while (!completed && attempts < 20) {
+      await new Promise(r => setTimeout(r, 1000));
+      attempts++;
+
+      const pollRes = await fetch(`${API_BASE}/api/w610/tasks/${taskId}`);
+      if (!pollRes.ok) continue;
+
+      const task = await pollRes.json();
+      if (task.status === 'SUCCESS') {
+        completed = true;
+        const info = task.result ? task.result.info : null;
+        if (!info) throw new Error('未获取到有效的设备信息数据');
+
+        serialState.deviceInfo = info;
+
+        const infoContainer = document.getElementById('serial-device-read-info');
+        infoContainer.innerHTML = `
+          <div><b>设备名称:</b> ${escapeHtml(info.Name || info.typeName || 'POA200')}</div>
+          <div><b>序列号 (SN):</b> <code style="font-family: monospace; background: #e0f2fe; padding: 2px 4px; border-radius: 4px;">${escapeHtml(info.SnNo || '-')}</code></div>
+          <div><b>生产日期:</b> <code style="font-family: monospace; background: #e0f2fe; padding: 2px 4px; border-radius: 4px;">${escapeHtml(info.OutDate || '-')}</code></div>
+          <div><b>固件版本:</b> ${escapeHtml(info.VerNo || '-')}</div>
+          <div><b>传感器日期:</b> ${escapeHtml(info.SensorData || '-')}</div>
+          <div><b>语言:</b> ${info.Language === 1 ? '中文' : '英文'}</div>
+        `;
+
+        document.getElementById('serial-edit-sn').value = info.SnNo || '';
+        document.getElementById('serial-edit-outdate').value = info.OutDate || '';
+
+        document.getElementById('serial-device-card').style.display = 'block';
+
+        resultTitle.innerText = '✅ 设备信息读取成功';
+        resultTitle.style.color = '#166534';
+        resultBody.innerHTML = `
+          <div style="color: #15803d; font-weight: bold; margin-bottom: 6px;">已从设备成功读取真实参数！</div>
+          <div>请在下方编辑框核对并修正<b>序列号</b>与<b>生产日期</b>，确认无误后点击“提交写入并保存文件”。</div>
+        `;
+
+      } else if (task.status === 'FAILED') {
+        completed = true;
+        document.getElementById('serial-device-card').style.display = 'none';
+
+        resultTitle.innerText = '❌ 读取设备信息失败';
+        resultTitle.style.color = '#991b1b';
+        resultBody.innerHTML = `
+          <div style="color: #b91c1c; font-weight: bold; margin-bottom: 6px;">读取中断与错误原因:</div>
+          <div style="color: #7f1d1d; word-break: break-all; background: #fef2f2; padding: 8px; border-radius: 4px; font-family: monospace;">${escapeHtml(task.error_msg || '未知错误')}</div>
+        `;
+      }
+    }
+
+    if (!completed) {
+      document.getElementById('serial-device-card').style.display = 'none';
+      resultTitle.innerText = '⚠️ 读取超时';
+      resultTitle.style.color = '#92400e';
+      resultBody.innerHTML = '<div style="color: #b45309;">执行端响应超时，请确认执行端程序正在运行。</div>';
+    }
+
+  } catch (err) {
+    document.getElementById('serial-device-card').style.display = 'none';
+    resultTitle.innerText = '❌ 读取异常';
+    resultTitle.style.color = '#991b1b';
+    resultBody.innerHTML = `<div style="color: #b91c1c;">${escapeHtml(err.message)}</div>`;
+  } finally {
+    readBtn.disabled = false;
+    readBtn.innerText = '📖 读取设备信息';
+  }
+}
+
+async function submitSerialWriteAndSave() {
+  const workerId = serialState.activeWorkerId;
+  const w610Id = serialState.activeW610Id;
+  const model = serialState.activeModel;
+
+  const newSn = document.getElementById('serial-edit-sn').value.trim();
+  const newOutDate = document.getElementById('serial-edit-outdate').value.trim();
+
+  if (!newSn || !newOutDate) {
+    alert('设备序列号与生产日期均不能为空！');
+    return;
+  }
+
+  const resultCard = document.getElementById('serial-result-card');
+  const resultTitle = document.getElementById('serial-result-title');
+  const resultBody = document.getElementById('serial-result-body');
+  const submitBtn = document.getElementById('btn-serial-submit');
+
+  submitBtn.disabled = true;
+  submitBtn.innerText = '⏳ 正在提交写入并保存...';
+
+  resultCard.style.display = 'block';
+  resultTitle.innerText = '💾 正在写入设备并生成保存文件';
+  resultTitle.style.color = '#0284c7';
+  resultBody.innerHTML = `
+    <div style="color: #0369a1; font-weight: bold; margin-bottom: 8px;">1/4. 向设备下发写入指令 (0x0101)...</div>
+    <div style="color: #64748b; font-size: 12px;">写入 SN: ${escapeHtml(newSn)}, 日期: ${escapeHtml(newOutDate)}</div>
+  `;
+
+  try {
+    const taskRes = await fetch(`${API_BASE}/api/w610/tasks`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        clientId: state.clientId || 'client_mobile',
+        clientName: state.clientName || '手机用户',
+        workerId,
+        w610Id,
+        action: 'write_and_save',
+        model,
+        payload: { deviceSn: newSn, outDate: newOutDate }
+      })
+    });
+
+    const taskData = await taskRes.json();
+    if (!taskRes.ok) throw new Error(taskData.error || '创建写入任务失败');
+
+    const taskId = taskData.task.id;
+    let completed = false;
+    let attempts = 0;
+
+    while (!completed && attempts < 30) {
+      await new Promise(r => setTimeout(r, 1000));
+      attempts++;
+
+      const pollRes = await fetch(`${API_BASE}/api/w610/tasks/${taskId}`);
+      if (!pollRes.ok) continue;
+
+      const task = await pollRes.json();
+
+      if (task.status === 'PROCESSING') {
+        resultBody.innerHTML = `
+          <div style="color: #0369a1; font-weight: bold; margin-bottom: 8px;">2/4. 自动重新读取并与提交值核对 (0x0102)...</div>
+          <div style="color: #64748b; font-size: 12px;">正在执行端核验回读一致性...</div>
+        `;
+      } else if (task.status === 'SUCCESS') {
+        completed = true;
+        const resObj = task.result || {};
+
+        resultTitle.innerText = '🎉 写入与文件归档成功';
+        resultTitle.style.color = '#166534';
+
+        const savedFilesHtml = (resObj.filesSaved || []).map(f => `
+          <div style="background: #f0fdf4; border: 1px solid #bbf7d0; padding: 8px 12px; border-radius: 6px; margin-top: 6px;">
+            <div style="font-weight: bold; color: #166534;">📄 ${escapeHtml(f.name)}</div>
+            <div style="font-size: 11px; color: #15803d; word-break: break-all; font-family: monospace;">路径: ${escapeHtml(f.path)}</div>
+          </div>
+        `).join('');
+
+        resultBody.innerHTML = `
+          <div style="color: #15803d; font-weight: bold; font-size: 14px; margin-bottom: 8px;">设备写入与回读核验完全一致！</div>
+          <div style="font-size: 12px; color: #334155; margin-bottom: 10px; background: #fff; padding: 8px; border-radius: 4px; border: 1px solid #e2e8f0;">
+            <div>• 核验通过序列号: <code style="font-family: monospace;">${escapeHtml(resObj.verifiedSn || newSn)}</code></div>
+            <div>• 核验通过生产日期: <code style="font-family: monospace;">${escapeHtml(resObj.verifiedOutDate || newOutDate)}</code></div>
+          </div>
+          <div style="font-weight: bold; margin-bottom: 4px; color: #1e293b;">所选执行端生成文件:</div>
+          ${savedFilesHtml}
+        `;
+
+      } else if (task.status === 'FAILED') {
+        completed = true;
+
+        resultTitle.innerText = '❌ 写入或保存失败';
+        resultTitle.style.color = '#991b1b';
+        resultBody.innerHTML = `
+          <div style="color: #b91c1c; font-weight: bold; margin-bottom: 6px;">错误阶段与具体原因:</div>
+          <div style="color: #7f1d1d; word-break: break-all; background: #fef2f2; padding: 10px; border-radius: 6px; font-family: monospace; border: 1px solid #fca5a5;">${escapeHtml(task.error_msg || '未知错误')}</div>
+        `;
+      }
+    }
+
+    if (!completed) {
+      resultTitle.innerText = '⚠️ 写入超时';
+      resultTitle.style.color = '#92400e';
+      resultBody.innerHTML = '<div style="color: #b45309;">执行端处理超时，请前往执行端查看实际写入与保存结果，切勿盲目重复点击！</div>';
+    }
+
+  } catch (err) {
+    resultTitle.innerText = '❌ 提交异常';
+    resultTitle.style.color = '#991b1b';
+    resultBody.innerHTML = `<div style="color: #b91c1c;">${escapeHtml(err.message)}</div>`;
+  } finally {
+    submitBtn.disabled = false;
+    submitBtn.innerText = '💾 提交写入并保存文件';
   }
 }

@@ -2602,6 +2602,331 @@ app.post('/api/worker/authorizations/sync', (req, res) => {
   res.json({ success: true });
 });
 
+// --- W610 Address Management APIs ---
+app.get('/api/admin/w610', (req, res) => {
+  const devices = db.prepare('SELECT * FROM w610_devices ORDER BY id DESC').all();
+  res.json(devices);
+});
+
+app.post('/api/admin/w610', requireAdminAccess, (req, res) => {
+  const { id, name, ip, port = 80, isEnabled = 1 } = req.body;
+  const cleanName = (name || '').trim();
+  const cleanIp = (ip || '').trim();
+  const portNum = Number(port) || 80;
+
+  if (!cleanName || !cleanIp) {
+    return res.status(400).json({ error: 'W610 名称与 IP 地址为必填项' });
+  }
+
+  const now = new Date().toISOString();
+  let savedId = id;
+
+  if (id) {
+    const existing = db.prepare('SELECT * FROM w610_devices WHERE id = ?').get(id);
+    if (!existing) return res.status(404).json({ error: '记录不存在' });
+    db.prepare(`
+      UPDATE w610_devices
+      SET name = ?, ip = ?, port = ?, is_enabled = ?, updated_at = ?
+      WHERE id = ?
+    `).run(cleanName, cleanIp, portNum, isEnabled ? 1 : 0, now, id);
+  } else {
+    const ins = db.prepare(`
+      INSERT INTO w610_devices (name, ip, port, is_enabled, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(cleanName, cleanIp, portNum, isEnabled ? 1 : 0, now, now);
+    savedId = ins.lastInsertRowid;
+  }
+
+  const record = db.prepare('SELECT * FROM w610_devices WHERE id = ?').get(savedId);
+  logAudit(null, 'ADMIN', 'System', 'SAVE_W610_DEVICE', { id: savedId, name: cleanName, ip: cleanIp, port: portNum });
+  res.json({ success: true, device: record });
+});
+
+app.delete('/api/admin/w610/:id', requireAdminAccess, (req, res) => {
+  const { id } = req.params;
+  const existing = db.prepare('SELECT * FROM w610_devices WHERE id = ?').get(id);
+  if (!existing) return res.status(404).json({ error: '记录不存在' });
+
+  db.prepare('DELETE FROM w610_devices WHERE id = ?').run(id);
+  logAudit(null, 'ADMIN', 'System', 'DELETE_W610_DEVICE', { id, name: existing.name });
+  res.json({ success: true, id });
+});
+
+// --- Worker Comm Config APIs ---
+app.get('/api/admin/workers/:workerId/comm-configs', (req, res) => {
+  const { workerId } = req.params;
+  const configs = db.prepare("SELECT * FROM worker_save_configs WHERE worker_id = ? AND doc_type = 'comm'").all(workerId);
+  res.json(configs);
+});
+
+app.post('/api/admin/workers/:workerId/comm-configs', requireAdminAccess, (req, res) => {
+  const { workerId } = req.params;
+  const {
+    id,
+    model = 'POA200',
+    rootDir = '',
+    saveMode = 'direct',
+    subfolderRule = 'deviceSn',
+    allowCreate = 0,
+    isEnabled = 0
+  } = req.body;
+
+  const docType = 'comm';
+  const templateId = `comm_${model}`;
+  const cleanRootDir = (rootDir || '').trim();
+
+  if (isEnabled && !cleanRootDir) {
+    return res.status(400).json({ error: '启用通信文件保存功能前必须先配置保存根目录' });
+  }
+
+  if (cleanRootDir) {
+    const isAbs = path.isAbsolute(cleanRootDir) || /^[a-zA-Z]:[\\/]/.test(cleanRootDir);
+    if (!isAbs) return res.status(400).json({ error: `保存根目录必须是合法的绝对路径: ${cleanRootDir}` });
+    if (/[<>"|?*]/.test(cleanRootDir.replace(/^[a-zA-Z]:/, ''))) {
+      return res.status(400).json({ error: `保存根目录包含系统非法字符: ${cleanRootDir}` });
+    }
+
+    const authCheck = isPathInWorkerAllowedPathsDetailed(workerId, cleanRootDir, { requireWrite: true });
+    if (!authCheck.allowed) {
+      return res.status(400).json({ error: authCheck.reason, authState: authCheck.authState });
+    }
+  }
+
+  const now = new Date().toISOString();
+  const isEnabledInt = isEnabled ? 1 : 0;
+  const allowCreateInt = allowCreate ? 1 : 0;
+
+  let existing = id ? db.prepare('SELECT * FROM worker_save_configs WHERE id = ?').get(id) :
+                      db.prepare('SELECT * FROM worker_save_configs WHERE worker_id = ? AND template_id = ? AND doc_type = ?').get(workerId, templateId, docType);
+  let configId;
+  let version = 1;
+
+  if (existing) {
+    version = (existing.version || 1) + 1;
+    db.prepare(`
+      UPDATE worker_save_configs
+      SET root_dir = ?, save_mode = ?, subfolder_rule = ?, allow_create = ?,
+          is_enabled = ?, version = ?, check_status = 'PENDING',
+          check_message = '配置已更新，待重新检查', checked_at = NULL, updated_at = ?
+      WHERE id = ?
+    `).run(cleanRootDir, saveMode, subfolderRule, allowCreateInt, isEnabledInt, version, now, existing.id);
+    configId = existing.id;
+  } else {
+    const ins = db.prepare(`
+      INSERT INTO worker_save_configs (
+        worker_id, template_id, doc_type, root_dir, save_mode, subfolder_rule,
+        allow_create, is_enabled, version, check_status, check_message, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 'PENDING', '待检查', ?, ?)
+    `).run(workerId, templateId, docType, cleanRootDir, saveMode, subfolderRule, allowCreateInt, isEnabledInt, now, now);
+    configId = ins.lastInsertRowid;
+  }
+
+  const worker = db.prepare('SELECT * FROM workers WHERE id = ?').get(workerId);
+  const isOnline = worker && worker.last_heartbeat && (Date.now() - new Date(worker.last_heartbeat).getTime() < 15000);
+  if (isOnline && cleanRootDir) {
+    db.prepare(`
+      INSERT INTO worker_directory_checks (check_type, target_id, config_id, worker_id, version, root_dir, allow_create, status, created_at)
+      VALUES ('save_config', ?, ?, ?, ?, ?, ?, 'PENDING', ?)
+    `).run(configId, configId, workerId, version, cleanRootDir, allowCreateInt, now);
+  }
+
+  const saved = db.prepare('SELECT * FROM worker_save_configs WHERE id = ?').get(configId);
+  confirmWorkerAuthScope(workerId, `管理员配置通信保存目录 [${cleanRootDir || '未配置'}]`);
+  logAudit(null, 'ADMIN', 'System', 'SAVE_WORKER_COMM_CONFIG', {
+    workerId, model, rootDir: cleanRootDir, isEnabled: isEnabledInt, version
+  });
+
+  res.json({ success: true, config: saved, authState: getWorkerAuthState(workerId) });
+});
+
+app.delete('/api/admin/workers/:workerId/comm-configs/:id', requireAdminAccess, (req, res) => {
+  const { workerId, id } = req.params;
+  const config = db.prepare("SELECT * FROM worker_save_configs WHERE id = ? AND worker_id = ? AND doc_type = 'comm'").get(id, workerId);
+  if (!config) return res.status(404).json({ error: '通信保存配置不存在' });
+
+  db.prepare('DELETE FROM worker_save_configs WHERE id = ?').run(id);
+  db.prepare('DELETE FROM worker_directory_checks WHERE (target_id = ? OR config_id = ?)').run(id, id);
+  logAudit(null, 'ADMIN', 'System', 'DELETE_WORKER_COMM_CONFIG', { workerId, configId: id });
+  res.json({ success: true, id });
+});
+
+app.post('/api/admin/workers/:workerId/comm-configs/:id/check', requireAdminAccess, (req, res) => {
+  const { workerId, id } = req.params;
+  const config = db.prepare("SELECT * FROM worker_save_configs WHERE id = ? AND worker_id = ? AND doc_type = 'comm'").get(id, workerId);
+  if (!config) return res.status(404).json({ error: '通信保存配置不存在' });
+
+  const worker = db.prepare('SELECT * FROM workers WHERE id = ?').get(workerId);
+  const isOnline = worker && worker.last_heartbeat && (Date.now() - new Date(worker.last_heartbeat).getTime() < 15000);
+
+  if (!isOnline) {
+    db.prepare(`
+      UPDATE worker_save_configs
+      SET check_status = 'PENDING', check_message = '执行端当前离线，已重置为待检查，待上线后重新探测'
+      WHERE id = ?
+    `).run(id);
+    return res.status(400).json({ success: false, offline: true, error: `执行端 (${workerId}) 当前处于离线状态` });
+  }
+
+  const version = config.version || 1;
+  db.prepare("UPDATE worker_save_configs SET check_status = 'CHECKING', check_message = '正在请求执行端检查...' WHERE id = ?").run(id);
+  db.prepare(`
+    INSERT INTO worker_directory_checks (check_type, target_id, config_id, worker_id, version, root_dir, allow_create, status, created_at)
+    VALUES ('save_config', ?, ?, ?, ?, ?, ?, 'PENDING', ?)
+  `).run(id, id, workerId, version, config.root_dir, config.allow_create, new Date().toISOString());
+
+  res.json({ success: true, id, message: '已下发检查任务' });
+});
+
+// --- W610 Task & Comm Endpoints ---
+app.get('/api/w610/devices', (req, res) => {
+  const devices = db.prepare('SELECT * FROM w610_devices WHERE is_enabled = 1 ORDER BY id DESC').all();
+  res.json(devices);
+});
+
+app.get('/api/w610/comm-config', (req, res) => {
+  const { workerId, model = 'POA200' } = req.query;
+  if (!workerId) return res.status(400).json({ error: '缺少 workerId' });
+
+  const templateId = `comm_${model}`;
+  const config = db.prepare("SELECT * FROM worker_save_configs WHERE worker_id = ? AND template_id = ? AND doc_type = 'comm'").get(workerId, templateId);
+
+  const isConfigured = !!(config && config.is_enabled === 1 && config.root_dir && config.check_status === 'PASSED');
+  res.json({
+    configured: isConfigured,
+    config: config || null
+  });
+});
+
+app.post('/api/w610/tasks', (req, res) => {
+  const {
+    reqId = `req_w610_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+    clientId = 'client_w610',
+    clientName = '手机端操作员',
+    workerId,
+    w610Id = null,
+    action, // 'probe', 'read_device', 'write_and_save'
+    model = 'POA200',
+    payload = {}
+  } = req.body;
+
+  if (!workerId || !action) {
+    return res.status(400).json({ error: 'workerId 与 action 为必填项' });
+  }
+
+  // Verify worker is online
+  const targetWorker = db.prepare('SELECT * FROM workers WHERE id = ?').get(workerId);
+  const isOnline = targetWorker && targetWorker.last_heartbeat && (Date.now() - new Date(targetWorker.last_heartbeat).getTime() < 15000);
+  if (!isOnline) {
+    return res.status(400).json({ error: `选中的执行端 [${targetWorker ? targetWorker.name : workerId}] 当前处于离线状态` });
+  }
+
+  // If action is write_and_save, verify comm save directory configuration
+  if (action === 'write_and_save') {
+    const templateId = `comm_${model}`;
+    const commCfg = db.prepare("SELECT * FROM worker_save_configs WHERE worker_id = ? AND template_id = ? AND doc_type = 'comm'").get(workerId, templateId);
+    if (!commCfg || !commCfg.is_enabled || !commCfg.root_dir) {
+      return res.status(400).json({
+        error: `选中的执行端 [${targetWorker.name}] 尚未配置或启用 [${model}] 型号的设备通信保存目录！`,
+        unconfigured: true,
+        workerId
+      });
+    }
+    if (commCfg.check_status !== 'PASSED') {
+      return res.status(400).json({
+        error: `选中的执行端 [${targetWorker.name}] 的通信保存目录检查未通过 (${commCfg.check_message || '待检查'})`,
+        checkFailed: true,
+        workerId
+      });
+    }
+  }
+
+  const now = new Date().toISOString();
+  // Attach comm save config details to payload if write_and_save
+  let fullPayload = { ...payload };
+  if (action === 'write_and_save') {
+    const commCfg = db.prepare("SELECT * FROM worker_save_configs WHERE worker_id = ? AND template_id = ? AND doc_type = 'comm'").get(workerId, `comm_${model}`);
+    fullPayload.rootDir = commCfg.root_dir;
+    fullPayload.saveMode = commCfg.save_mode;
+    fullPayload.subfolderRule = commCfg.subfolder_rule;
+  }
+
+  // Insert w610 task
+  const ins = db.prepare(`
+    INSERT INTO w610_tasks (
+      req_id, client_id, client_name, worker_id, w610_id, action, model,
+      payload, status, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)
+  `).run(reqId, clientId, clientName, workerId, w610Id, action, model, JSON.stringify(fullPayload), now, now);
+
+  const task = db.prepare('SELECT * FROM w610_tasks WHERE id = ?').get(ins.lastInsertRowid);
+  logAudit(reqId, clientId, clientName, 'SUBMIT_W610_TASK', { taskId: task.id, action, workerId, w610Id, model });
+
+  res.json({ success: true, task });
+});
+
+app.get('/api/w610/tasks/:taskId', (req, res) => {
+  const { taskId } = req.params;
+  const task = db.prepare('SELECT * FROM w610_tasks WHERE id = ?').get(taskId);
+  if (!task) return res.status(404).json({ error: '任务不存在' });
+
+  let result = {};
+  let payload = {};
+  try { result = JSON.parse(task.result || '{}'); } catch (e) {}
+  try { payload = JSON.parse(task.payload || '{}'); } catch (e) {}
+
+  res.json({
+    ...task,
+    result,
+    payload
+  });
+});
+
+app.get('/api/worker/w610-tasks/pending', (req, res) => {
+  const workerId = req.headers['x-worker-id'] || req.query.workerId;
+  if (!workerId) return res.status(400).json({ error: '缺少 workerId' });
+
+  const tasks = db.prepare("SELECT * FROM w610_tasks WHERE worker_id = ? AND status = 'PENDING'").all(workerId);
+  const now = new Date().toISOString();
+
+  for (const t of tasks) {
+    db.prepare("UPDATE w610_tasks SET status = 'PROCESSING', updated_at = ? WHERE id = ?").run(now, t.id);
+  }
+
+  const parsedTasks = tasks.map(t => {
+    let payload = {};
+    try { payload = JSON.parse(t.payload || '{}'); } catch (e) {}
+    let w610Device = null;
+    if (t.w610_id) {
+      w610Device = db.prepare('SELECT * FROM w610_devices WHERE id = ?').get(t.w610_id);
+    }
+    return {
+      ...t,
+      payload,
+      w610Device
+    };
+  });
+
+  res.json(parsedTasks);
+});
+
+app.post('/api/worker/w610-tasks/:taskId/result', requireWorkerAuth, (req, res) => {
+  const { taskId } = req.params;
+  const { status, result = {}, errorMsg = null } = req.body;
+
+  const task = db.prepare('SELECT * FROM w610_tasks WHERE id = ?').get(taskId);
+  if (!task) return res.status(404).json({ error: '任务不存在' });
+
+  const now = new Date().toISOString();
+  db.prepare(`
+    UPDATE w610_tasks
+    SET status = ?, result = ?, error_msg = ?, updated_at = ?
+    WHERE id = ?
+  `).run(status === 'SUCCESS' ? 'SUCCESS' : 'FAILED', JSON.stringify(result), errorMsg || null, now, taskId);
+
+  logAudit(task.req_id, task.client_id, task.client_name, 'W610_TASK_RESULT', { taskId, status, errorMsg });
+  res.json({ success: true, id: taskId });
+});
+
 // --- 5. Validate Directories for Tasks (DIR-06, DIR-07, E03, E04) ---
 app.post('/api/tasks/validate-directories', (req, res) => {
   const { workerId, model, bundleId, docCombo } = req.body;

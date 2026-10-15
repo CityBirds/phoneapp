@@ -154,7 +154,7 @@ async function switchTab(tabId) {
   const isDirectories = tabId === 'directories';
   const effectiveTab = isDirectories ? 'workers' : tabId;
 
-  ['clients', 'workers', 'worker-detail', 'templates', 'sales-persons', 'sensor-configs', 'matcher', 'audit'].forEach(t => {
+  ['clients', 'workers', 'worker-detail', 'w610', 'templates', 'sales-persons', 'sensor-configs', 'matcher', 'audit'].forEach(t => {
     const sec = document.getElementById(`sec-${t}`);
     const side = document.getElementById(`side-${t}`);
     if (sec) sec.style.display = t === effectiveTab ? 'block' : 'none';
@@ -177,6 +177,7 @@ async function switchTab(tabId) {
 
   if (effectiveTab === 'clients') await loadClients();
   if (effectiveTab === 'workers') await loadWorkers();
+  if (effectiveTab === 'w610') loadW610Devices();
   if (effectiveTab === 'templates') await loadTemplates();
   if (effectiveTab === 'sales-persons') await loadSalesPersons();
   if (effectiveTab === 'sensor-configs') await loadSensorConfigs();
@@ -345,6 +346,7 @@ async function showWorkerDetail(workerId) {
 
   await loadWorkerAllowedPaths(workerId);
   await loadWorkerTemplateConfigs(workerId);
+  await loadWorkerCommConfigs(workerId);
 }
 
 function backToWorkersList() {
@@ -2239,6 +2241,242 @@ async function triggerDirectoryCheck(id) {
     await loadWorkerDirectories();
   } catch (err) {
     alert('请求异常: ' + err.message);
+  }
+}
+
+// ==================== W610 SERIAL SERVER MANAGEMENT ====================
+async function loadW610Devices() {
+  const tbody = document.getElementById('w610-tbody');
+  if (!tbody) return;
+
+  try {
+    const res = await fetch(`${API_BASE}/api/admin/w610`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const devices = await res.json();
+
+    if (devices.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; padding: 16px; color: #94a3b8;">暂无配置 W610 串口服务器，点击“新增 W610 设备”进行添加</td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = devices.map(d => {
+      const statusTag = d.is_enabled ? '<span class="badge badge-success">已启用</span>' : '<span class="badge badge-disabled">已停用</span>';
+      return `
+        <tr style="border-bottom: 1px solid #f1f5f9;">
+          <td style="padding: 10px; text-align: left;">#${d.id}</td>
+          <td style="padding: 10px; text-align: left;"><strong>${escapeHtml(d.name)}</strong></td>
+          <td style="padding: 10px; text-align: left; font-family: monospace;">${escapeHtml(d.ip)}</td>
+          <td style="padding: 10px; text-align: center; font-family: monospace;">${d.port || 80}</td>
+          <td style="padding: 10px; text-align: center;">${statusTag}</td>
+          <td style="padding: 10px; text-align: center;">
+            <button type="button" class="btn btn-secondary btn-sm" onclick='openEditW610Modal(${JSON.stringify(d)})'>编辑</button>
+            <button type="button" class="btn btn-danger btn-sm" onclick="deleteW610Device(${d.id})">删除</button>
+          </td>
+        </tr>
+      `;
+    }).join('');
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="6" style="color: #ef4444; text-align: center; padding: 16px;">加载 W610 列表失败: ${escapeHtml(err.message)}</td></tr>`;
+  }
+}
+
+function openAddW610Modal() {
+  document.getElementById('modal-w610-title').innerText = '➕ 新增 W610 串口服务器';
+  document.getElementById('w610-id').value = '';
+  document.getElementById('w610-name').value = '';
+  document.getElementById('w610-ip').value = '';
+  document.getElementById('w610-port').value = '80';
+  document.getElementById('w610-is-enabled').checked = true;
+  document.getElementById('modal-w610').style.display = 'flex';
+}
+
+function openEditW610Modal(d) {
+  document.getElementById('modal-w610-title').innerText = '✏️ 编辑 W610 串口服务器';
+  document.getElementById('w610-id').value = d.id;
+  document.getElementById('w610-name').value = d.name || '';
+  document.getElementById('w610-ip').value = d.ip || '';
+  document.getElementById('w610-port').value = d.port || 80;
+  document.getElementById('w610-is-enabled').checked = !!d.is_enabled;
+  document.getElementById('modal-w610').style.display = 'flex';
+}
+
+function closeW610Modal() {
+  document.getElementById('modal-w610').style.display = 'none';
+}
+
+async function handleW610Submit(e) {
+  e.preventDefault();
+  const id = document.getElementById('w610-id').value;
+  const name = document.getElementById('w610-name').value.trim();
+  const ip = document.getElementById('w610-ip').value.trim();
+  const port = Number(document.getElementById('w610-port').value) || 80;
+  const isEnabled = document.getElementById('w610-is-enabled').checked ? 1 : 0;
+
+  if (!name || !ip) {
+    alert('名称与 IP 地址为必填项');
+    return;
+  }
+
+  try {
+    const res = await fetch(`${API_BASE}/api/admin/w610`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-admin-token': 'phoneapp-admin-secret'
+      },
+      body: JSON.stringify({ id: id || undefined, name, ip, port, isEnabled })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || '保存失败');
+
+    closeW610Modal();
+    await loadW610Devices();
+  } catch (err) {
+    alert('保存失败: ' + err.message);
+  }
+}
+
+async function deleteW610Device(id) {
+  if (!confirm('确定要删除此 W610 设备记录吗？')) return;
+  try {
+    const res = await fetch(`${API_BASE}/api/admin/w610/${id}`, {
+      method: 'DELETE',
+      headers: {
+        'x-admin-token': 'phoneapp-admin-secret'
+      }
+    });
+    if (!res.ok) {
+      const data = await res.json();
+      throw new Error(data.error || '删除失败');
+    }
+    await loadW610Devices();
+  } catch (err) {
+    alert('删除失败: ' + err.message);
+  }
+}
+
+// ==================== WORKER COMM SAVE CONFIG MANAGEMENT ====================
+async function loadWorkerCommConfigs(workerId) {
+  const tbody = document.getElementById('worker-comm-tbody');
+  if (!tbody) return;
+
+  try {
+    const res = await fetch(`${API_BASE}/api/admin/workers/${encodeURIComponent(workerId)}/comm-configs`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const configs = await res.json();
+
+    const supportedModels = ['POA200'];
+
+    tbody.innerHTML = supportedModels.map(model => {
+      const templateId = `comm_${model}`;
+      const cfg = configs.find(c => c.template_id === templateId || c.template_id === model);
+
+      const isEnabled = cfg && cfg.is_enabled === 1;
+      const rootDir = cfg ? (cfg.root_dir || '') : '';
+      const saveMode = cfg ? cfg.save_mode : 'direct';
+      const checkStatus = cfg ? cfg.check_status : 'PENDING';
+      const checkMsg = cfg ? (cfg.check_message || '') : '';
+
+      const modeText = saveMode === 'subfolder' ? '按序列号建子文件夹' : '直接保存根目录';
+      const statusBadge = isEnabled
+        ? '<span class="badge badge-success">已启用</span>'
+        : '<span class="badge badge-disabled">未启用</span>';
+
+      let checkBadge = '<span class="badge badge-disabled">未检验</span>';
+      if (checkStatus === 'PASSED') checkBadge = '<span class="badge badge-success">已通过</span>';
+      if (checkStatus === 'FAILED') checkBadge = '<span class="badge badge-danger">检查失败</span>';
+      if (checkStatus === 'CHECKING') checkBadge = '<span class="badge badge-warning">探测中...</span>';
+
+      return `
+        <tr style="border-bottom: 1px solid #f1f5f9;">
+          <td style="padding: 10px; text-align: left;"><strong>${model}</strong></td>
+          <td style="padding: 10px; text-align: center;">${statusBadge}</td>
+          <td style="padding: 10px; text-align: left; font-family: monospace;">${escapeHtml(rootDir) || '<span style="color: #cbd5e1;">未配置</span>'}</td>
+          <td style="padding: 10px; text-align: center;">${modeText}</td>
+          <td style="padding: 10px; text-align: center;">${cfg && cfg.allow_create ? '是' : '否'}</td>
+          <td style="padding: 10px; text-align: center;">${checkBadge}</td>
+          <td style="padding: 10px; text-align: left; font-size: 12px; color: #64748b;">${escapeHtml(checkMsg) || '-'}</td>
+          <td style="padding: 10px; text-align: center;">
+            <button type="button" class="btn btn-primary btn-sm" onclick='openEditWorkerCommModal("${model}", ${JSON.stringify(cfg || null)})'>配置目录</button>
+            ${cfg ? `<button type="button" class="btn btn-secondary btn-sm" onclick="triggerWorkerCommCheck(${cfg.id})">探测</button>` : ''}
+          </td>
+        </tr>
+      `;
+    }).join('');
+
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="8" style="color: #ef4444; text-align: center; padding: 16px;">加载通信保存配置失败: ${escapeHtml(err.message)}</td></tr>`;
+  }
+}
+
+function openEditWorkerCommModal(model, cfg) {
+  document.getElementById('worker-comm-id').value = cfg ? cfg.id : '';
+  document.getElementById('worker-comm-model').value = model;
+  document.getElementById('worker-comm-model-display').innerText = model;
+  document.getElementById('worker-comm-is-enabled').checked = cfg ? !!cfg.is_enabled : false;
+  document.getElementById('worker-comm-root-dir').value = cfg ? (cfg.root_dir || '') : '';
+  document.getElementById('worker-comm-save-mode').value = cfg ? (cfg.save_mode || 'direct') : 'direct';
+  document.getElementById('worker-comm-allow-create').checked = cfg ? (cfg.allow_create !== 0) : true;
+
+  toggleCommRootDirRequired();
+  document.getElementById('modal-worker-comm').style.display = 'flex';
+}
+
+function toggleCommRootDirRequired() {
+  const isEnabled = document.getElementById('worker-comm-is-enabled').checked;
+  document.getElementById('worker-comm-root-req').style.display = isEnabled ? 'inline' : 'none';
+}
+
+function closeWorkerCommModal() {
+  document.getElementById('modal-worker-comm').style.display = 'none';
+}
+
+async function handleWorkerCommConfigSubmit(e) {
+  e.preventDefault();
+  const id = document.getElementById('worker-comm-id').value;
+  const model = document.getElementById('worker-comm-model').value;
+  const isEnabled = document.getElementById('worker-comm-is-enabled').checked ? 1 : 0;
+  const rootDir = document.getElementById('worker-comm-root-dir').value.trim();
+  const saveMode = document.getElementById('worker-comm-save-mode').value;
+  const allowCreate = document.getElementById('worker-comm-allow-create').checked ? 1 : 0;
+
+  if (isEnabled && !rootDir) {
+    alert('启用通信保存功能前必须先配置保存根目录！');
+    return;
+  }
+
+  try {
+    const res = await fetch(`${API_BASE}/api/admin/workers/${encodeURIComponent(currentDetailWorkerId)}/comm-configs`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-admin-token': 'phoneapp-admin-secret'
+      },
+      body: JSON.stringify({ id: id || undefined, model, isEnabled, rootDir, saveMode, allowCreate })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || '保存失败');
+
+    closeWorkerCommModal();
+    await loadWorkerCommConfigs(currentDetailWorkerId);
+  } catch (err) {
+    alert('保存失败: ' + err.message);
+  }
+}
+
+async function triggerWorkerCommCheck(id) {
+  try {
+    const res = await fetch(`${API_BASE}/api/admin/workers/${encodeURIComponent(currentDetailWorkerId)}/comm-configs/${id}/check`, {
+      method: 'POST',
+      headers: {
+        'x-admin-token': 'phoneapp-admin-secret'
+      }
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || '探测请求失败');
+    await loadWorkerCommConfigs(currentDetailWorkerId);
+  } catch (err) {
+    alert('发起探测失败: ' + err.message);
   }
 }
 

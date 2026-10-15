@@ -28,6 +28,7 @@ from config_manager_xp import (
     load_worker_config, generate_random_hex, to_unicode, safe_str,
     parse_cli_args, run_diagnose_checks, run_interactive_configure
 )
+import poa200_protocol_xp as poa200_xp
 
 string_types = (str, unicode) if sys.version_info[0] < 3 else (str,)
 
@@ -626,9 +627,224 @@ class ExecutionWorkerXP(object):
         for job in jobs:
             self.process_print_job(job)
 
+    def poll_and_execute_w610_tasks(self):
+        url = self.server_url + "/api/worker/w610-tasks/pending?workerId=" + urllib_parse.quote(safe_str(self.worker_id))
+        status_code, headers, content, err = http_request(url, method="GET", headers=self.auth_headers())
+        if status_code != 200 or not content:
+            return
+
+        try:
+            tasks = json.loads(content.decode('utf-8'))
+        except Exception:
+            return
+
+        for task in tasks:
+            self.process_w610_task(task)
+
+    def process_w610_task(self, task):
+        task_id = task.get("id")
+        action = task.get("action")
+        payload = task.get("payload") or {}
+        w610_device = task.get("w610Device") or payload.get("w610Device")
+
+        is_mock = bool(payload.get("isMock") or (w610_device and w610_device.get("ip") == "127.0.0.1"))
+
+        try:
+            if action == "probe":
+                devices = payload.get("devices") or []
+                if not devices:
+                    url = self.server_url + "/api/w610/devices"
+                    sc, h, cnt, e = http_request(url, method="GET")
+                    if sc == 200 and cnt:
+                        try:
+                            devices = json.loads(cnt.decode('utf-8'))
+                        except Exception:
+                            pass
+
+                probe_results = []
+                for dev in devices:
+                    http_ok = False
+                    device_ok = False
+
+                    if is_mock or dev.get("ip") == "127.0.0.1" or dev.get("mock"):
+                        http_ok = dev.get("ip") != "0.0.0.0" and dev.get("ip") != "invalid_host"
+                        device_ok = http_ok and not dev.get("no_device")
+                    else:
+                        req_res = poa200_xp.send_w610_request(dev, poa200_xp.CMD_READ_DATA, poa200_xp.ADDR_INFO_DEVICE, timeout_sec=3)
+                        if req_res.get("ok"):
+                            http_ok = True
+                            try:
+                                info = poa200_xp.unpack_device_info(req_res.get("dataBuffer"))
+                                if info and info.get("SnNo"):
+                                    device_ok = True
+                            except Exception:
+                                pass
+
+                    probe_results.append({
+                        "id": dev.get("id"),
+                        "name": dev.get("name"),
+                        "ip": dev.get("ip"),
+                        "port": dev.get("port", 80),
+                        "http_ok": http_ok,
+                        "device_ok": device_ok,
+                        "status": "ONLINE" if device_ok else ("W610_ONLY" if http_ok else "OFFLINE")
+                    })
+
+                self.report_w610_task_result(task_id, "SUCCESS", {"probeResults": probe_results})
+                return
+
+            if not w610_device:
+                raise ValueError("缺少目标 W610 设备配置信息")
+
+            if action == "read_device":
+                if is_mock or w610_device.get("ip") == "127.0.0.1" or w610_device.get("mock"):
+                    if w610_device.get("ip") == "0.0.0.0" or payload.get("mockFailStage") == "w610_http":
+                        raise ValueError("W610 HTTP 连接失败: 无法连接到目标 IP 地址")
+                    if payload.get("mockFailStage") == "device_no_response":
+                        raise ValueError("W610 后端设备无应答 (超时)")
+                    mock_buf = poa200_xp.create_mock_device_info(payload.get("mockDeviceInfo") or {})
+                    info = poa200_xp.unpack_device_info(mock_buf)
+                else:
+                    req_res = poa200_xp.send_w610_request(w610_device, poa200_xp.CMD_READ_DATA, poa200_xp.ADDR_INFO_DEVICE, timeout_sec=5)
+                    if not req_res.get("ok"):
+                        raise ValueError(req_res.get("error") or "读取设备信息失败")
+                    info = poa200_xp.unpack_device_info(req_res.get("dataBuffer"))
+
+                self.report_w610_task_result(task_id, "SUCCESS", {
+                    "info": info,
+                    "deviceSn": info.get("SnNo"),
+                    "outDate": info.get("OutDate")
+                })
+                return
+
+            if action == "write_and_save":
+                new_sn = safe_str(payload.get("deviceSn") or "").strip()
+                new_out_date = safe_str(payload.get("outDate") or "").strip()
+                root_dir = safe_str(payload.get("rootDir") or "").strip()
+                save_mode = payload.get("saveMode") or "direct"
+
+                if not new_sn or not new_out_date:
+                    raise ValueError("待写入的序列号与日期不能为空")
+                if not root_dir:
+                    raise ValueError("未配置设备通信保存根目录 (WC-21)")
+
+                auth = self.fetch_authorizations()
+                if not auth.get("ok"):
+                    raise ValueError("无法确认执行端有效授权，暂停写入")
+
+                if not os.path.exists(root_dir):
+                    try:
+                        os.makedirs(root_dir)
+                    except Exception as me:
+                        raise ValueError("通信保存根目录创建失败 [%s]: %s" % (root_dir, str(me)))
+
+                # Write SN and OutDate
+                if is_mock or w610_device.get("ip") == "127.0.0.1" or w610_device.get("mock"):
+                    if payload.get("mockFailStage") == "write_timeout":
+                        raise ValueError("写入设备数据超时: W610 无响应")
+                else:
+                    pack_buf = poa200_xp.pack_device_info({"SnNo": new_sn, "OutDate": new_out_date, "ChangeParFlag": 1})
+                    write_res = poa200_xp.send_w610_request(w610_device, poa200_xp.CMD_WRITE_DATA, poa200_xp.ADDR_INFO_DEVICE, pack_buf, timeout_sec=5)
+                    if not write_res.get("ok"):
+                        raise ValueError("写入设备序列号和日期失败: %s" % write_res.get("error"))
+
+                # Re-read and verify
+                if is_mock or w610_device.get("ip") == "127.0.0.1" or w610_device.get("mock"):
+                    if payload.get("mockFailStage") == "reread_mismatch":
+                        reread_info = poa200_xp.unpack_device_info(poa200_xp.create_mock_device_info({"SnNo": "WRONG_SN", "OutDate": new_out_date}))
+                    elif payload.get("mockFailStage") == "reread_timeout":
+                        raise ValueError("写入后回读核验超时: 设备未在规定时间内返回数据")
+                    else:
+                        reread_info = poa200_xp.unpack_device_info(poa200_xp.create_mock_device_info({"SnNo": new_sn, "OutDate": new_out_date}))
+                else:
+                    reread_res = poa200_xp.send_w610_request(w610_device, poa200_xp.CMD_READ_DATA, poa200_xp.ADDR_INFO_DEVICE, timeout_sec=5)
+                    if not reread_res.get("ok"):
+                        raise ValueError("写入后回读读取失败: %s" % reread_res.get("error"))
+                    reread_info = poa200_xp.unpack_device_info(reread_res.get("dataBuffer"))
+
+                if reread_info.get("SnNo") != new_sn or reread_info.get("OutDate") != new_out_date:
+                    raise ValueError("回读核验失败！设备中读取到的序列号/日期与提交值不一致！禁止归档结果！")
+
+                # Read full info and O2 calib
+                if is_mock or w610_device.get("ip") == "127.0.0.1" or w610_device.get("mock"):
+                    mock_o2 = poa200_xp.create_mock_o2_cal_file()
+                    o2_cal_data = poa200_xp.unpack_o2_cal_file(mock_o2)
+                else:
+                    o2_res = poa200_xp.send_w610_request(w610_device, poa200_xp.CMD_READ_DATA, poa200_xp.ADDR_O2CALFILE, timeout_sec=5)
+                    if o2_res.get("ok"):
+                        o2_cal_data = poa200_xp.unpack_o2_cal_file(o2_res.get("dataBuffer"))
+                    else:
+                        o2_cal_data = {"error": o2_res.get("error")}
+
+                # Save directory
+                save_dir = root_dir
+                if save_mode == "subfolder":
+                    save_dir = os.path.join(root_dir, reread_info.get("SnNo"))
+                    if not os.path.exists(save_dir):
+                        os.makedirs(save_dir)
+
+                import datetime
+                date_str = datetime.datetime.now().strftime("%Y%m%d")
+                dev_info_name = "POA200_%s_DeviceInfo_%s.json" % (reread_info.get("SnNo"), date_str)
+                o2_calib_name = "POA200_%s_O2Calib_%s.json" % (reread_info.get("SnNo"), date_str)
+
+                if payload.get("mockFailStage") == "save_file_fail":
+                    raise ValueError("文件保存失败: 目标磁盘空间不足或无写入权限")
+
+                dev_path = self.save_json_with_conflict_handling(save_dir, dev_info_name, reread_info)
+                o2_path = self.save_json_with_conflict_handling(save_dir, o2_calib_name, o2_cal_data)
+
+                self.report_w610_task_result(task_id, "SUCCESS", {
+                    "writeOk": True,
+                    "rereadOk": True,
+                    "verifiedSn": reread_info.get("SnNo"),
+                    "verifiedOutDate": reread_info.get("OutDate"),
+                    "filesSaved": [
+                        {"name": dev_info_name, "path": dev_path},
+                        {"name": o2_calib_name, "path": o2_path}
+                    ]
+                })
+                return
+
+            raise ValueError("未知的 W610 任务动作: %s" % action)
+
+        except Exception as e:
+            self.report_w610_task_result(task_id, "FAILED", None, str(e))
+
+    def save_json_with_conflict_handling(self, target_dir, filename, data):
+        filepath = os.path.join(target_dir, filename)
+        if os.path.exists(filepath):
+            base_name, ext = os.path.splitext(filename)
+            copy_idx = 1
+            copy_path = os.path.join(target_dir, "%s-副本(%d)%s" % (base_name, copy_idx, ext))
+            while os.path.exists(copy_path):
+                copy_idx += 1
+                copy_path = os.path.join(target_dir, "%s-副本(%d)%s" % (base_name, copy_idx, ext))
+            os.rename(filepath, copy_path)
+
+        content = json.dumps(data, indent=2, ensure_ascii=False)
+        if sys.version_info[0] < 3 and isinstance(content, unicode):
+            content = content.encode('utf-8')
+        elif sys.version_info[0] >= 3:
+            content = content.encode('utf-8')
+
+        with open(filepath, 'wb') as f:
+            f.write(content)
+        return filepath
+
+    def report_w610_task_result(self, task_id, status, result=None, error_msg=None):
+        url = self.server_url + "/api/worker/w610-tasks/%s/result" % str(task_id)
+        post_body = json.dumps({
+            "status": status,
+            "result": result or {},
+            "errorMsg": error_msg
+        }).encode('utf-8')
+        http_request(url, method="POST", headers=self.auth_headers({'Content-Type': 'application/json'}), data=post_body)
+
     def run_cycle(self):
         self.send_heartbeat()
         self.poll_and_execute_directory_checks()
+        self.poll_and_execute_w610_tasks()
         self.poll_and_execute_tasks()
         self.poll_and_execute_print_jobs()
 

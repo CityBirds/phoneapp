@@ -40,6 +40,11 @@
           <span>执行端保存目录</span>
         </a>
 
+        <a href="#w610" id="side-w610" class="nav-item" onclick="switchTab('w610')">
+          <span class="nav-icon">📡</span>
+          <span>W610 串口服务器</span>
+        </a>
+
         <a href="#templates" id="side-templates" class="nav-item" onclick="switchTab('templates')">
           <span class="nav-icon">📑</span>
           <span>模板库集中管理</span>
@@ -208,6 +213,66 @@
                 </tbody>
               </table>
             </div>
+          </div>
+
+          <!-- Panel 3: Device Communication Save Directories -->
+          <div class="card" style="margin-bottom: 20px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+              <div>
+                <h3 style="margin: 0; font-size: 16px;">📡 设备通信保存目录 (Device Comm Save Directories)</h3>
+                <p style="font-size: 13px; color: #64748b; margin: 4px 0 0 0;">配置按“执行端＋设备型号”保存设备信息与标定文件（POA200_{SN}_DeviceInfo与O2Calib）的根目录与归档规则。</p>
+              </div>
+            </div>
+            <div class="table-responsive">
+              <table class="table admin-table" style="width: 100%; border-collapse: collapse;">
+                <thead>
+                  <tr style="background: #f8fafc; border-bottom: 1px solid #e2e8f0;">
+                    <th style="padding: 10px; text-align: left;">设备型号</th>
+                    <th style="padding: 10px; text-align: center; width: 100px;">是否启用</th>
+                    <th style="padding: 10px; text-align: left;">保存根目录</th>
+                    <th style="padding: 10px; text-align: center; width: 130px;">保存方式</th>
+                    <th style="padding: 10px; text-align: center; width: 90px;">允许创建</th>
+                    <th style="padding: 10px; text-align: center; width: 100px;">探测状态</th>
+                    <th style="padding: 10px; text-align: left;">探测详情</th>
+                    <th style="padding: 10px; text-align: center; width: 150px;">操作</th>
+                  </tr>
+                </thead>
+                <tbody id="worker-comm-tbody">
+                  <tr><td colspan="8" style="text-align: center; padding: 16px; color: #94a3b8;">正在加载通信保存配置...</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB: W610 MANAGEMENT -->
+      <section id="sec-w610" class="admin-panel" style="display: none;">
+        <div class="panel-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+          <div>
+            <h2>📡 W610 串口服务器管理</h2>
+            <p style="font-size: 13px; color: #64748b; margin-top: 4px;">集中维护车间 W610 串口服务器清单（IP地址与通信端口）。通信时由选中的执行端主动连接 W610 并与设备交互。</p>
+          </div>
+          <button type="button" class="btn btn-primary btn-sm" onclick="openAddW610Modal()">➕ 新增 W610 设备</button>
+        </div>
+
+        <div class="card">
+          <div class="table-responsive">
+            <table class="table admin-table" style="width: 100%; border-collapse: collapse;">
+              <thead>
+                <tr style="background: #f8fafc; border-bottom: 1px solid #e2e8f0;">
+                  <th style="padding: 10px; text-align: left;">ID</th>
+                  <th style="padding: 10px; text-align: left;">设备名称/标识</th>
+                  <th style="padding: 10px; text-align: left;">IP 地址</th>
+                  <th style="padding: 10px; text-align: center; width: 90px;">端口</th>
+                  <th style="padding: 10px; text-align: center; width: 100px;">状态</th>
+                  <th style="padding: 10px; text-align: center; width: 160px;">操作</th>
+                </tr>
+              </thead>
+              <tbody id="w610-tbody">
+                <tr><td colspan="6" style="text-align: center; padding: 16px; color: #94a3b8;">正在加载 W610 设备列表...</td></tr>
+              </tbody>
+            </table>
           </div>
         </div>
       </section>
@@ -615,6 +680,103 @@
         <div style="display: flex; justify-content: flex-end; gap: 10px; border-top: 1px solid #e2e8f0; padding-top: 14px;">
           <button type="button" class="btn btn-secondary" onclick="closeAllowedPathModal()">取消</button>
           <button type="submit" class="btn btn-primary">保存授权路径</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Modal: W610 Add/Edit -->
+  <div id="modal-w610" class="modal-overlay" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 1000; align-items: center; justify-content: center;">
+    <div class="modal-content" style="background: #fff; border-radius: 8px; width: 90%; max-width: 520px; padding: 24px; box-shadow: 0 10px 25px rgba(0,0,0,0.2);">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+        <h3 id="modal-w610-title" style="margin: 0; font-size: 18px;">➕ 新增 W610 串口服务器</h3>
+        <button type="button" style="border: none; background: none; font-size: 20px; cursor: pointer;" onclick="closeW610Modal()">✕</button>
+      </div>
+
+      <form id="form-w610" onsubmit="handleW610Submit(event)">
+        <input type="hidden" id="w610-id" value="">
+
+        <div style="margin-bottom: 14px;">
+          <label style="display: block; font-size: 13px; font-weight: bold; margin-bottom: 6px;">W610 名称/标识 <span style="color: red;">*</span></label>
+          <input type="text" id="w610-name" class="form-control" style="width: 100%; padding: 8px; border: 1px solid #cbd5e1; border-radius: 4px;" placeholder="例如: 1号楼W610服务器" required>
+        </div>
+
+        <div style="margin-bottom: 14px;">
+          <label style="display: block; font-size: 13px; font-weight: bold; margin-bottom: 6px;">IP 地址 <span style="color: red;">*</span></label>
+          <input type="text" id="w610-ip" class="form-control" style="width: 100%; padding: 8px; border: 1px solid #cbd5e1; border-radius: 4px;" placeholder="例如: 192.168.1.120" required>
+        </div>
+
+        <div style="margin-bottom: 14px;">
+          <label style="display: block; font-size: 13px; font-weight: bold; margin-bottom: 6px;">HTTP 通信端口</label>
+          <input type="number" id="w610-port" class="form-control" style="width: 100%; padding: 8px; border: 1px solid #cbd5e1; border-radius: 4px;" value="80" required>
+        </div>
+
+        <div style="margin-bottom: 20px;">
+          <label style="display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer;">
+            <input type="checkbox" id="w610-is-enabled" checked style="width: 16px; height: 16px;">
+            <span>启用此 W610 服务器</span>
+          </label>
+        </div>
+
+        <div style="display: flex; justify-content: flex-end; gap: 10px;">
+          <button type="button" class="btn btn-secondary" onclick="closeW610Modal()">取消</button>
+          <button type="submit" class="btn btn-primary">保存配置</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Modal: Worker Comm Save Config -->
+  <div id="modal-worker-comm" class="modal-overlay" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 1000; align-items: center; justify-content: center;">
+    <div class="modal-content" style="background: #fff; border-radius: 8px; width: 90%; max-width: 580px; padding: 24px; box-shadow: 0 10px 25px rgba(0,0,0,0.2);">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+        <h3 id="modal-worker-comm-title" style="margin: 0; font-size: 18px;">⚙️ 配置设备通信保存目录</h3>
+        <button type="button" style="border: none; background: none; font-size: 20px; cursor: pointer;" onclick="closeWorkerCommModal()">✕</button>
+      </div>
+
+      <form id="form-worker-comm" onsubmit="handleWorkerCommConfigSubmit(event)">
+        <input type="hidden" id="worker-comm-id" value="">
+        <input type="hidden" id="worker-comm-model" value="POA200">
+
+        <div style="margin-bottom: 14px; background: #f8fafc; padding: 10px; border-radius: 6px; font-size: 13px; color: #334155;">
+          设备型号: <strong id="worker-comm-model-display">POA200</strong>
+        </div>
+
+        <div style="margin-bottom: 14px;">
+          <label style="display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: bold; cursor: pointer;">
+            <input type="checkbox" id="worker-comm-is-enabled" style="width: 16px; height: 16px;" onchange="toggleCommRootDirRequired()">
+            <span>启用此型号通信结果保存功能</span>
+          </label>
+        </div>
+
+        <div style="margin-bottom: 14px;">
+          <label style="display: block; font-size: 13px; font-weight: bold; margin-bottom: 6px;">
+            保存根目录 (Root Directory on Worker) <span id="worker-comm-root-req" style="color: red; display: none;">*</span>
+          </label>
+          <input type="text" id="worker-comm-root-dir" class="form-control" style="width: 100%; padding: 8px; border: 1px solid #cbd5e1; border-radius: 4px;" placeholder="例如: D:\DeviceRecords\POA200">
+          <p style="font-size: 12px; color: #64748b; margin: 4px 0 0 0;">
+            必须指向目标执行电脑的绝对路径，且必须包含在上方允许访问的业务路径范围内。
+          </p>
+        </div>
+
+        <div style="margin-bottom: 14px;">
+          <label style="display: block; font-size: 13px; font-weight: bold; margin-bottom: 6px;">文件保存与子文件夹创建规则</label>
+          <select id="worker-comm-save-mode" class="form-control" style="width: 100%; padding: 8px; border: 1px solid #cbd5e1; border-radius: 4px;">
+            <option value="direct">直接保存到根目录 (Direct in Root Dir)</option>
+            <option value="subfolder">按设备序列号创建子文件夹 (Subfolder by Device Serial No)</option>
+          </select>
+        </div>
+
+        <div style="margin-bottom: 20px;">
+          <label style="display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer;">
+            <input type="checkbox" id="worker-comm-allow-create" checked style="width: 16px; height: 16px;">
+            <span>允许执行端自动创建不存在的子目录/根目录</span>
+          </label>
+        </div>
+
+        <div style="display: flex; justify-content: flex-end; gap: 10px;">
+          <button type="button" class="btn btn-secondary" onclick="closeWorkerCommModal()">取消</button>
+          <button type="submit" class="btn btn-primary">保存配置</button>
         </div>
       </form>
     </div>

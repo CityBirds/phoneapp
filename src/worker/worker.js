@@ -7,6 +7,7 @@ const { generateWordDocument } = require('./word_engine');
 const { isPathInWhitelist, isPrinterAllowed, isSubpath, safeRealPath } = require('./security');
 const { handleFileConflictAndOverwrite } = require('./conflict');
 const { getFileSha256 } = require('../common/utils');
+const poa200 = require('./poa200_protocol');
 const {
   loadWorkerConfig,
   classifyConnectionError,
@@ -391,6 +392,7 @@ class ExecutionWorker {
   async pollAndExecuteTasks() {
     try {
       await this.pollAndExecuteDirectoryChecks();
+      await this.pollAndExecuteW610Tasks();
       const res = await fetch(`${this.serverUrl}/api/worker/tasks/pending?workerId=${this.workerId}`, { headers: this.workerAuthHeaders() });
       if (!res.ok) return;
 
@@ -401,6 +403,235 @@ class ExecutionWorker {
     } catch (err) {
       // Silently handle poll disconnect
     }
+  }
+
+  async pollAndExecuteW610Tasks() {
+    try {
+      const res = await fetch(`${this.serverUrl}/api/worker/w610-tasks/pending?workerId=${this.workerId}`, { headers: this.workerAuthHeaders() });
+      if (!res.ok) return;
+
+      const tasks = await res.json();
+      for (const task of tasks) {
+        await this.processW610Task(task);
+      }
+    } catch (err) {}
+  }
+
+  async processW610Task(task) {
+    console.log(`[${this.name}] 正在处理 W610 串口通信任务 #${task.id} (${task.action})`);
+
+    try {
+      const payload = task.payload || {};
+      const action = task.action;
+      let w610Device = task.w610Device || payload.w610Device;
+
+      const isMock = !!(payload.isMock || process.env.NODE_ENV === 'test' || (w610Device && w610Device.ip === '127.0.0.1'));
+
+      if (action === 'probe') {
+        let devices = [];
+        if (payload.devices && Array.isArray(payload.devices) && payload.devices.length > 0) {
+          devices = payload.devices;
+        } else {
+          try {
+            const dRes = await fetch(`${this.serverUrl}/api/w610/devices`);
+            if (dRes.ok) devices = await dRes.json();
+          } catch (e) {}
+        }
+
+        const probeResults = [];
+        for (const dev of devices) {
+          let http_ok = false;
+          let device_ok = false;
+
+          if (isMock || dev.ip === '127.0.0.1' || dev.mock) {
+            http_ok = dev.ip !== '0.0.0.0' && dev.ip !== 'invalid_host';
+            device_ok = http_ok && !dev.no_device;
+          } else {
+            const reqRes = await poa200.sendW610Request(dev, poa200.CMD_READ_DATA, poa200.ADDR_INFO_DEVICE, null, 3000);
+            if (reqRes.ok) {
+              http_ok = true;
+              try {
+                const info = poa200.unpackDeviceInfo(reqRes.dataBuffer);
+                if (info && info.SnNo) device_ok = true;
+              } catch (e) {}
+            }
+          }
+
+          probeResults.push({
+            id: dev.id,
+            name: dev.name,
+            ip: dev.ip,
+            port: dev.port || 80,
+            http_ok,
+            device_ok,
+            status: device_ok ? 'ONLINE' : (http_ok ? 'W610_ONLY' : 'OFFLINE')
+          });
+        }
+
+        await this.reportW610TaskResult(task.id, 'SUCCESS', { probeResults });
+        return;
+      }
+
+      if (!w610Device) {
+        throw new Error('缺少目标 W610 设备配置信息');
+      }
+
+      if (action === 'read_device') {
+        let info = null;
+        if (isMock || w610Device.ip === '127.0.0.1' || w610Device.mock) {
+          if (w610Device.ip === '0.0.0.0' || payload.mockFailStage === 'w610_http') {
+            throw new Error('W610 HTTP 连接失败: 无法连接到目标 IP 地址');
+          }
+          if (payload.mockFailStage === 'device_no_response') {
+            throw new Error('W610 后端设备无应答 (超时)');
+          }
+          const mockBuf = poa200.createMockDeviceInfo(payload.mockDeviceInfo || {});
+          info = poa200.unpackDeviceInfo(mockBuf);
+        } else {
+          const reqRes = await poa200.sendW610Request(w610Device, poa200.CMD_READ_DATA, poa200.ADDR_INFO_DEVICE, null, 5000);
+          if (!reqRes.ok) {
+            throw new Error(reqRes.error || '读取设备信息失败');
+          }
+          info = poa200.unpackDeviceInfo(reqRes.dataBuffer);
+        }
+
+        await this.reportW610TaskResult(task.id, 'SUCCESS', {
+          info,
+          deviceSn: info.SnNo,
+          outDate: info.OutDate
+        });
+        return;
+      }
+
+      if (action === 'write_and_save') {
+        const newSn = (payload.deviceSn || '').trim();
+        const newOutDate = (payload.outDate || '').trim();
+        const rootDir = (payload.rootDir || '').trim();
+        const saveMode = payload.saveMode || 'direct';
+
+        if (!newSn || !newOutDate) {
+          throw new Error('待写入的序列号与日期不能为空');
+        }
+        if (!rootDir) {
+          throw new Error('未配置设备通信保存根目录 (WC-21)');
+        }
+
+        await this.ensureWriteAuthorized(rootDir, rootDir);
+
+        if (!fs.existsSync(rootDir)) {
+          try {
+            fs.mkdirSync(rootDir, { recursive: true });
+          } catch (mErr) {
+            throw new Error(`通信保存根目录创建失败 [${rootDir}]: ${mErr.message}`);
+          }
+        }
+
+        // Write SN and OutDate (cmd 0x0101)
+        if (isMock || w610Device.ip === '127.0.0.1' || w610Device.mock) {
+          if (payload.mockFailStage === 'write_timeout') {
+            throw new Error('写入设备数据超时: W610 无响应');
+          }
+        } else {
+          const packBuf = poa200.packDeviceInfo({ SnNo: newSn, OutDate: newOutDate, ChangeParFlag: 1 });
+          const writeRes = await poa200.sendW610Request(w610Device, poa200.CMD_WRITE_DATA, poa200.ADDR_INFO_DEVICE, packBuf, 5000);
+          if (!writeRes.ok) {
+            throw new Error(`写入设备序列号和日期失败: ${writeRes.error}`);
+          }
+        }
+
+        // Re-read and verify (cmd 0x0102)
+        let rereadInfo = null;
+        if (isMock || w610Device.ip === '127.0.0.1' || w610Device.mock) {
+          if (payload.mockFailStage === 'reread_mismatch') {
+            rereadInfo = poa200.unpackDeviceInfo(poa200.createMockDeviceInfo({ SnNo: 'WRONG_SN', OutDate: newOutDate }));
+          } else if (payload.mockFailStage === 'reread_timeout') {
+            throw new Error('写入后回读核验超时: 设备未在规定时间内返回数据');
+          } else {
+            rereadInfo = poa200.unpackDeviceInfo(poa200.createMockDeviceInfo({ SnNo: newSn, OutDate: newOutDate }));
+          }
+        } else {
+          const rereadRes = await poa200.sendW610Request(w610Device, poa200.CMD_READ_DATA, poa200.ADDR_INFO_DEVICE, null, 5000);
+          if (!rereadRes.ok) {
+            throw new Error(`写入后回读读取失败: ${rereadRes.error}`);
+          }
+          rereadInfo = poa200.unpackDeviceInfo(rereadRes.dataBuffer);
+        }
+
+        if (rereadInfo.SnNo !== newSn || rereadInfo.OutDate !== newOutDate) {
+          throw new Error(`回读核验失败！设备中读取到的序列号/日期 [SN=${rereadInfo.SnNo}, Date=${rereadInfo.OutDate}] 与提交值 [SN=${newSn}, Date=${newOutDate}] 不一致！禁止归档结果！`);
+        }
+
+        // Read full info and O2 calibration
+        let o2CalData = null;
+        if (isMock || w610Device.ip === '127.0.0.1' || w610Device.mock) {
+          const mockO2Buf = poa200.createMockO2CalFile();
+          o2CalData = poa200.unpackO2CalFile(mockO2Buf);
+        } else {
+          const o2Res = await poa200.sendW610Request(w610Device, poa200.CMD_READ_DATA, poa200.ADDR_O2CALFILE, null, 5000);
+          if (o2Res.ok) {
+            o2CalData = poa200.unpackO2CalFile(o2Res.dataBuffer);
+          } else {
+            o2CalData = { error: o2Res.error };
+          }
+        }
+
+        // Target directory determination
+        let saveDir = rootDir;
+        if (saveMode === 'subfolder') {
+          saveDir = path.join(rootDir, rereadInfo.SnNo);
+          if (!fs.existsSync(saveDir)) {
+            fs.mkdirSync(saveDir, { recursive: true });
+          }
+        }
+
+        const nowObj = new Date();
+        const yyyy = nowObj.getFullYear();
+        const mm = String(nowObj.getMonth() + 1).padStart(2, '0');
+        const dd = String(nowObj.getDate()).padStart(2, '0');
+        const dateStr = `${yyyy}${mm}${dd}`;
+
+        const devInfoName = `POA200_${rereadInfo.SnNo}_DeviceInfo_${dateStr}.json`;
+        const o2CalibName = `POA200_${rereadInfo.SnNo}_O2Calib_${dateStr}.json`;
+
+        if (payload.mockFailStage === 'save_file_fail') {
+          throw new Error('文件保存失败: 目标磁盘空间不足或无写入权限');
+        }
+
+        const devInfoTarget = handleFileConflictAndOverwrite(saveDir, devInfoName, true);
+        const o2CalibTarget = handleFileConflictAndOverwrite(saveDir, o2CalibName, true);
+
+        fs.writeFileSync(devInfoTarget.officialFilePath, JSON.stringify(rereadInfo, null, 2), 'utf-8');
+        fs.writeFileSync(o2CalibTarget.officialFilePath, JSON.stringify(o2CalData, null, 2), 'utf-8');
+
+        await this.reportW610TaskResult(task.id, 'SUCCESS', {
+          writeOk: true,
+          rereadOk: true,
+          verifiedSn: rereadInfo.SnNo,
+          verifiedOutDate: rereadInfo.OutDate,
+          filesSaved: [
+            { name: devInfoName, path: devInfoTarget.officialFilePath },
+            { name: o2CalibName, path: o2CalibTarget.officialFilePath }
+          ]
+        });
+        return;
+      }
+
+      throw new Error(`未知的 W610 任务动作: ${action}`);
+
+    } catch (err) {
+      console.error(`W610 Task #${task.id} failed:`, err.message);
+      await this.reportW610TaskResult(task.id, 'FAILED', null, err.message);
+    }
+  }
+
+  async reportW610TaskResult(taskId, status, result = null, errorMsg = null) {
+    try {
+      await fetch(`${this.serverUrl}/api/worker/w610-tasks/${taskId}/result`, {
+        method: 'POST',
+        headers: this.workerHeaders(),
+        body: JSON.stringify({ status, result, errorMsg })
+      });
+    } catch (e) {}
   }
 
   async fetchTemplateForTask(model, fileType, templateId = null, expectedHash = null, taskContext = null) {

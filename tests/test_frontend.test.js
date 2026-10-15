@@ -20,7 +20,7 @@ test('Mobile Web Frontend Assets and Structure (M01-M15)', () => {
   assert.ok(htmlContent.includes('id="test-points-table"'), 'Test points table must exist (M06)');
   assert.ok(htmlContent.includes('id="packing-items-body"'), 'Packing items table must exist (M07)');
   assert.ok(htmlContent.includes('id="tab-serial-view"'), 'Serial port tab must exist (M15)');
-  assert.ok(htmlContent.includes('暂未开放'), 'Serial port must explicitly state 暂未开放 (M15, R06)');
+  assert.ok(htmlContent.includes('W610') || htmlContent.includes('串口设备通信'), 'Serial port tab must provide W610 communication interface (W610-20261014)');
 
   // Verify mobile view does NOT expose admin configuration tabs (separation of roles)
   assert.ok(!htmlContent.includes('id="tmpl-file-input"'), 'Mobile app must not allow uploading templates');

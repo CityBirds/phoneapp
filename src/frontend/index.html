@@ -224,16 +224,99 @@
       </div>
     </div>
 
-    <!-- TAB 4: SERIAL PORT -->
+    <!-- TAB 4: SERIAL / W610 COMM (R06, W610整改20261014) -->
     <div id="tab-serial-view" class="tab-view" style="display: none;">
-      <div class="card" style="text-align: center; padding: 32px 16px;">
-        <div style="font-size: 48px; margin-bottom: 12px;">🔌</div>
-        <h3 style="margin-bottom: 8px;">串口硬件直连通信</h3>
-        <span class="badge badge-disabled" style="font-size: 14px; padding: 6px 16px;">暂未开放</span>
-        <p style="margin-top: 16px; font-size: 13px; color: #64748b;">
-          基线规则 R06 / M15: 首版串口仅作占位展示，不发送真实串口通信指令。
+      <div class="card" style="margin-bottom: 16px;">
+        <h3 style="margin-bottom: 12px; font-size: 18px; display: flex; align-items: center; gap: 8px;">
+          <span>📡</span>
+          <span>W610 串口设备通信</span>
+        </h3>
+        <p style="font-size: 13px; color: #64748b; margin-bottom: 16px;">
+          手机发起读写指令，由所选执行端通过 HTTP 与 W610 通信，读取或修改设备序列号与日期，核验无误后自动在执行端生成并保存 JSON 文件。
         </p>
+
+        <!-- Step 1: Worker Selection -->
+        <div class="form-group" style="margin-bottom: 14px;">
+          <label style="font-weight: bold; font-size: 13px; display: block; margin-bottom: 6px;">
+            1. 选择在线执行端 <span style="color: red;">*</span>
+          </label>
+          <select id="serial-worker-select" class="form-control" style="width: 100%; padding: 10px; border: 1px solid #cbd5e1; border-radius: 6px;" onchange="handleSerialWorkerChange()">
+            <option value="">-- 请选择在线执行端 --</option>
+          </select>
+        </div>
+
+        <!-- Worker Comm Config Status Notice Banner -->
+        <div id="serial-worker-config-banner" style="display: none; margin-bottom: 14px; padding: 12px; border-radius: 6px; font-size: 13px;"></div>
+
+        <!-- Step 2: W610 Selection -->
+        <div class="form-group" style="margin-bottom: 14px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+            <label style="font-weight: bold; font-size: 13px; margin: 0;">
+              2. 选择 W610 串口服务器 <span style="color: red;">*</span>
+            </label>
+            <button type="button" class="btn btn-secondary btn-sm" onclick="probeW610Devices()" style="padding: 4px 10px; font-size: 12px;">🔄 刷新探测</button>
+          </div>
+          <select id="serial-w610-select" class="form-control" style="width: 100%; padding: 10px; border: 1px solid #cbd5e1; border-radius: 6px;" onchange="handleSerialW610Change()" disabled>
+            <option value="">-- 请先选择在线执行端 --</option>
+          </select>
+          <div id="serial-w610-probe-notice" style="font-size: 12px; color: #64748b; margin-top: 4px;"></div>
+        </div>
+
+        <!-- Step 3: Equipment Model Selection -->
+        <div class="form-group" style="margin-bottom: 16px;">
+          <label style="font-weight: bold; font-size: 13px; display: block; margin-bottom: 6px;">
+            3. 设备型号 <span style="color: red;">*</span>
+          </label>
+          <select id="serial-model-select" class="form-control" style="width: 100%; padding: 10px; border: 1px solid #cbd5e1; border-radius: 6px;" onchange="handleSerialModelChange()">
+            <option value="POA200" selected>POA200 (在线手持分析仪)</option>
+          </select>
+        </div>
+
+        <!-- Read Device Info Button -->
+        <div style="margin-bottom: 16px;">
+          <button type="button" id="btn-serial-read" class="btn btn-primary" style="width: 100%; padding: 12px; font-size: 15px; font-weight: bold;" onclick="readSerialDeviceInfo()" disabled>
+            📖 读取设备信息
+          </button>
+        </div>
       </div>
+
+      <!-- Device Details & Editable Form Card (Shown after successful read) -->
+      <div id="serial-device-card" class="card" style="display: none; margin-bottom: 16px; background: #f8fafc; border: 1px solid #e2e8f0;">
+        <h4 style="margin-top: 0; margin-bottom: 12px; font-size: 15px; color: #1e293b; display: flex; justify-content: space-between; align-items: center;">
+          <span>📟 本次从设备读取到的真实数据</span>
+          <span id="serial-device-status-badge" class="badge badge-success">读取成功</span>
+        </h4>
+
+        <div id="serial-device-read-info" style="font-size: 13px; color: #334155; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 14px; background: #fff; padding: 10px; border-radius: 6px; border: 1px solid #e2e8f0;">
+          <!-- Populated dynamically -->
+        </div>
+
+        <!-- Editable Form -->
+        <div style="background: #fff; padding: 14px; border-radius: 6px; border: 1px solid #cbd5e1;">
+          <h4 style="margin-top: 0; margin-bottom: 10px; font-size: 14px; color: #0284c7;">✏️ 修改序列号与生产日期并提交保存</h4>
+
+          <div class="form-group" style="margin-bottom: 12px;">
+            <label style="font-weight: bold; font-size: 13px; display: block; margin-bottom: 4px;">设备序列号 (SnNo) <span style="color: red;">*</span></label>
+            <input type="text" id="serial-edit-sn" class="form-control" style="width: 100%; padding: 8px; border: 1px solid #cbd5e1; border-radius: 4px; font-family: monospace;" placeholder="如: AP10007513" required>
+          </div>
+
+          <div class="form-group" style="margin-bottom: 16px;">
+            <label style="font-weight: bold; font-size: 13px; display: block; margin-bottom: 4px;">生产日期 (OutDate) <span style="color: red;">*</span></label>
+            <input type="text" id="serial-edit-outdate" class="form-control" style="width: 100%; padding: 8px; border: 1px solid #cbd5e1; border-radius: 4px; font-family: monospace;" placeholder="如: 2026/10/14" required>
+          </div>
+
+          <button type="button" id="btn-serial-submit" class="btn btn-success" style="width: 100%; padding: 12px; font-size: 15px; font-weight: bold;" onclick="submitSerialWriteAndSave()">
+            💾 提交写入并保存文件
+          </button>
+        </div>
+      </div>
+
+      <!-- Execution Progress & Result Banner -->
+      <div id="serial-result-card" class="card" style="display: none; margin-bottom: 16px;">
+        <h4 id="serial-result-title" style="margin-top: 0; margin-bottom: 10px; font-size: 15px;"></h4>
+        <div id="serial-result-body" style="font-size: 13px;"></div>
+      </div>
+
     </div>
 
   </div>

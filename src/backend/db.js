@@ -94,6 +94,31 @@ const schema = [
     updated_at TEXT,
     created_at TEXT NOT NULL,
     FOREIGN KEY(print_job_id) REFERENCES print_jobs(id)
+  );`,
+  `CREATE TABLE IF NOT EXISTS w610_devices (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    ip TEXT NOT NULL,
+    port INTEGER NOT NULL DEFAULT 80,
+    is_enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );`,
+  `CREATE TABLE IF NOT EXISTS w610_tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    req_id TEXT UNIQUE NOT NULL,
+    client_id TEXT NOT NULL,
+    client_name TEXT NOT NULL,
+    worker_id TEXT NOT NULL,
+    w610_id INTEGER,
+    action TEXT NOT NULL,
+    model TEXT NOT NULL DEFAULT 'POA200',
+    payload TEXT DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'PENDING',
+    result TEXT DEFAULT '{}',
+    error_msg TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
   );`
 ].join('\n');
 
