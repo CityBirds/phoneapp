@@ -89,6 +89,7 @@ class ExecutionWorkerXP(object):
         self.allowed_printers = self.config["allowedPrinters"] or get_installed_printers_xp()
         self.once = self.config["once"]
         self.interval = self.config["interval"]
+        self.enable_test_mock = bool(self.config.get("enableTestMock") or os.environ.get("W610_TEST_MOCK") == "1")
 
         if not os.path.exists(self.working_dir):
             try:
@@ -647,8 +648,8 @@ class ExecutionWorkerXP(object):
         payload = task.get("payload") or {}
         w610_device = task.get("w610Device") or payload.get("w610Device")
 
-        # COMM-15: Mock mode is ONLY triggered when explicitly enabled
-        is_mock = bool(payload.get("isMock") or payload.get("enableMock") or payload.get("isTestMock"))
+        # COMM-15: Mock mode is ONLY triggered when process-level explicit test switch is ON
+        is_mock = bool(self.enable_test_mock or os.environ.get("W610_TEST_MOCK") == "1")
 
         try:
             if action == "probe":
@@ -702,7 +703,7 @@ class ExecutionWorkerXP(object):
                         "id": dev.get("id"),
                         "name": dev.get("name"),
                         "ip": dev.get("ip"),
-                        "port": dev.get("port", 80),
+                        "port": dev.get("port", 8899),
                         "http_ok": http_ok,
                         "device_ok": device_ok,
                         "status": "ONLINE" if device_ok else ("W610_ONLY" if http_ok else "OFFLINE"),
@@ -775,13 +776,25 @@ class ExecutionWorkerXP(object):
                 pack_buf = poa200_xp.pack_device_info({"SnNo": new_sn, "OutDate": new_out_date, "ChangeParFlag": 1, "isMock": is_mock}, original_buf)
 
                 # Write SN and OutDate
+                self.renew_w610_task_lease(task_id)
                 if is_mock:
                     if payload.get("mockFailStage") == "write_timeout":
-                        raise ValueError("写入设备数据超时: W610 无响应 (RESULT_UNKNOWN)")
+                        self.report_w610_task_result(task_id, "RESULT_UNKNOWN", {
+                            "stage": "WRITE_SENT",
+                            "verifiedSn": None
+                        }, "写入设备数据超时: W610 无响应 (RESULT_UNKNOWN)")
+                        return
                 else:
                     write_res = poa200_xp.send_w610_request(w610_device, poa200_xp.CMD_WRITE_DATA, poa200_xp.ADDR_INFO_DEVICE, pack_buf, timeout_sec=5)
                     if not write_res.get("ok"):
+                        if write_res.get("stage") == "DEVICE_NO_RESPONSE":
+                            self.report_w610_task_result(task_id, "RESULT_UNKNOWN", {
+                                "stage": "WRITE_SENT",
+                                "verifiedSn": None
+                            }, "写入发送后设备超时无响应: %s (RESULT_UNKNOWN)" % str(write_res.get("error")))
+                            return
                         raise ValueError("写入设备序列号和日期失败: %s" % write_res.get("error"))
+                self.renew_w610_task_lease(task_id)
 
                 # Re-read and verify
                 reread_buf = None
@@ -904,6 +917,13 @@ class ExecutionWorkerXP(object):
         with open(filepath, 'wb') as f:
             f.write(content)
         return filepath
+
+    def renew_w610_task_lease(self, task_id):
+        try:
+            url = self.server_url + "/api/worker/w610-tasks/%s/renew-lease" % str(task_id)
+            http_request(url, method="POST", headers=self.auth_headers())
+        except Exception:
+            pass
 
     def report_w610_task_result(self, task_id, status, result=None, error_msg=None):
         url = self.server_url + "/api/worker/w610-tasks/%s/result" % str(task_id)

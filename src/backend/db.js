@@ -99,7 +99,7 @@ const schema = [
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     ip TEXT NOT NULL,
-    port INTEGER NOT NULL DEFAULT 80,
+    port INTEGER NOT NULL DEFAULT 8899,
     is_enabled INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL

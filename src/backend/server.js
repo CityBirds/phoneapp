@@ -2614,10 +2614,10 @@ app.get('/api/admin/w610', (req, res) => {
 });
 
 app.post('/api/admin/w610', requireAdminAccess, (req, res) => {
-  const { id, name, ip, port = 80, isEnabled = 1 } = req.body;
+  const { id, name, ip, port = 8899, isEnabled = 1 } = req.body;
   const cleanName = (name || '').trim();
   const cleanIp = (ip || '').trim();
-  const portNum = Number(port) || 80;
+  const portNum = Number(port) || 8899;
 
   if (!cleanName || !cleanIp) {
     return res.status(400).json({ error: 'W610 名称与 IP 地址为必填项' });
@@ -2846,13 +2846,31 @@ app.post('/api/w610/tasks', (req, res) => {
   }
 
   const now = new Date().toISOString();
+
+  // Strip client payload of all mock-related fields (Rule COMM-15, Issue A)
+  // And strictly enforce w610Device from database record when w610Id is given.
+  const cleanPayload = { ...payload };
+  delete cleanPayload.isMock;
+  delete cleanPayload.enableMock;
+  delete cleanPayload.isTestMock;
+  delete cleanPayload.mockDeviceInfo;
+  delete cleanPayload.mockFailStage;
+  delete cleanPayload.mock;
+  delete cleanPayload.w610Device;
+
+  if (w610Id) {
+    const dbDevice = db.prepare('SELECT * FROM w610_devices WHERE id = ?').get(w610Id);
+    if (dbDevice) {
+      cleanPayload.w610Device = dbDevice;
+    }
+  }
+
   // Attach comm save config details to payload if write_and_save
-  let fullPayload = { ...payload };
   if (action === 'write_and_save') {
     const commCfg = db.prepare("SELECT * FROM worker_save_configs WHERE worker_id = ? AND template_id = ? AND doc_type = 'comm'").get(workerId, `comm_${model}`);
-    fullPayload.rootDir = commCfg.root_dir;
-    fullPayload.saveMode = commCfg.save_mode;
-    fullPayload.subfolderRule = commCfg.subfolder_rule;
+    cleanPayload.rootDir = commCfg.root_dir;
+    cleanPayload.saveMode = commCfg.save_mode;
+    cleanPayload.subfolderRule = commCfg.subfolder_rule;
   }
 
   // Insert w610 task
@@ -2861,7 +2879,7 @@ app.post('/api/w610/tasks', (req, res) => {
       req_id, client_id, client_name, worker_id, w610_id, action, model,
       payload, status, created_at, updated_at
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)
-  `).run(reqId, clientId, clientName, workerId, w610Id, action, model, JSON.stringify(fullPayload), now, now);
+  `).run(reqId, clientId, clientName, workerId, w610Id, action, model, JSON.stringify(cleanPayload), now, now);
 
   const task = db.prepare('SELECT * FROM w610_tasks WHERE id = ?').get(ins.lastInsertRowid);
   logAudit(reqId, clientId, clientName, 'SUBMIT_W610_TASK', { taskId: task.id, action, workerId, w610Id, model });
@@ -2890,12 +2908,21 @@ app.get('/api/worker/w610-tasks/pending', requireWorkerAuth, (req, res) => {
   const workerId = req.headers['x-worker-id'] || req.query.workerId;
   if (!workerId) return res.status(400).json({ error: '缺少 workerId' });
 
-  // Lease recovery: recover stuck PROCESSING tasks if updated_at is older than 60s
+  // Lease recovery (Rule COMM-12/18, Issue B):
+  // 1. Read-only tasks (probe, read_device) can be reset to PENDING on lease timeout (>60s).
+  // 2. Write tasks (write_and_save) MUST NOT be reset to PENDING on lease timeout; they are marked as RESULT_UNKNOWN to prevent duplicate writes.
   const cutoff = new Date(Date.now() - 60000).toISOString();
-  db.prepare("UPDATE w610_tasks SET status = 'PENDING' WHERE worker_id = ? AND status = 'PROCESSING' AND updated_at < ?").run(workerId, cutoff);
+  db.prepare("UPDATE w610_tasks SET status = 'PENDING' WHERE worker_id = ? AND status = 'PROCESSING' AND action != 'write_and_save' AND updated_at < ?").run(workerId, cutoff);
+
+  const expiredWriteTasks = db.prepare("SELECT * FROM w610_tasks WHERE worker_id = ? AND status = 'PROCESSING' AND action = 'write_and_save' AND updated_at < ?").all(workerId, cutoff);
+  const now = new Date().toISOString();
+  for (const wt of expiredWriteTasks) {
+    db.prepare("UPDATE w610_tasks SET status = 'RESULT_UNKNOWN', error_msg = ?, updated_at = ? WHERE id = ?").run(
+      '写入任务租约过期，写操作结果未知，拒绝重发以防重复写设备 (COMM-12/18)', now, wt.id
+    );
+  }
 
   const tasks = db.prepare("SELECT * FROM w610_tasks WHERE worker_id = ? AND status = 'PENDING'").all(workerId);
-  const now = new Date().toISOString();
 
   for (const t of tasks) {
     db.prepare("UPDATE w610_tasks SET status = 'PROCESSING', updated_at = ? WHERE id = ?").run(now, t.id);
@@ -2918,6 +2945,17 @@ app.get('/api/worker/w610-tasks/pending', requireWorkerAuth, (req, res) => {
   res.json(parsedTasks);
 });
 
+// Task lease renewal endpoint (Rule COMM-18 / Issue B)
+app.post('/api/worker/w610-tasks/:taskId/renew-lease', requireWorkerAuth, (req, res) => {
+  const { taskId } = req.params;
+  const task = db.prepare('SELECT * FROM w610_tasks WHERE id = ?').get(taskId);
+  if (!task) return res.status(404).json({ error: '任务不存在' });
+
+  const now = new Date().toISOString();
+  db.prepare("UPDATE w610_tasks SET updated_at = ? WHERE id = ? AND status = 'PROCESSING'").run(now, taskId);
+  res.json({ success: true, id: taskId, renewedAt: now });
+});
+
 app.post('/api/worker/w610-tasks/:taskId/result', requireWorkerAuth, (req, res) => {
   const { taskId } = req.params;
   const { status, result = {}, errorMsg = null } = req.body;
@@ -2925,14 +2963,20 @@ app.post('/api/worker/w610-tasks/:taskId/result', requireWorkerAuth, (req, res) 
   const task = db.prepare('SELECT * FROM w610_tasks WHERE id = ?').get(taskId);
   if (!task) return res.status(404).json({ error: '任务不存在' });
 
+  // Idempotent result reporting: if task is already in final state (SUCCESS / FAILED), duplicate reports do not regress state
+  if (task.status === 'SUCCESS' || task.status === 'FAILED') {
+    return res.json({ success: true, id: taskId, idempotent: true, status: task.status });
+  }
+
   const now = new Date().toISOString();
+  const targetStatus = (status === 'SUCCESS' || status === 'FAILED' || status === 'RESULT_UNKNOWN') ? status : 'FAILED';
   db.prepare(`
     UPDATE w610_tasks
     SET status = ?, result = ?, error_msg = ?, updated_at = ?
     WHERE id = ?
-  `).run(status === 'SUCCESS' ? 'SUCCESS' : 'FAILED', JSON.stringify(result), errorMsg || null, now, taskId);
+  `).run(targetStatus, JSON.stringify(result), errorMsg || null, now, taskId);
 
-  logAudit(task.req_id, task.client_id, task.client_name, 'W610_TASK_RESULT', { taskId, status, errorMsg });
+  logAudit(task.req_id, task.client_id, task.client_name, 'W610_TASK_RESULT', { taskId, status: targetStatus, errorMsg });
   res.json({ success: true, id: taskId });
 });
 
