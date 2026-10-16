@@ -1,8 +1,9 @@
 /**
- * POA200 Binary Protocol & W610 HTTP Client (Node.js 64-bit)
- * Protocol Spec: W610串口服务器与POA200设备通信整改要求_20261014.md
+ * POA200 Binary Protocol & Communication Transports (Node.js 64-bit)
+ * Protocol Spec: W610_POA200通信协议与程序整改执行规范_20261016.md
  */
 
+const net = require('net');
 const http = require('http');
 
 // Command constants
@@ -14,6 +15,9 @@ const CMD_READ_DATA = 0x0102;
 const ADDR_INFO_DEVICE = 0xE000;
 const ADDR_O2CALFILE = 0xE200;
 const ADDR_CALFILE = 0xE400;
+
+// Frame Start
+const FRAME_START = 0xFE6B; // 0x6B, 0xFE in bytes
 
 /**
  * Calculate CRC16 (MODBUS)
@@ -40,7 +44,7 @@ function calcCrc16(buf, length) {
  */
 function writeString(buf, str, offset, length) {
   buf.fill(0, offset, offset + length);
-  if (str) {
+  if (str !== undefined && str !== null) {
     const strBuf = Buffer.from(String(str), 'utf-8');
     strBuf.copy(buf, offset, 0, Math.min(strBuf.length, length));
   }
@@ -55,6 +59,142 @@ function readString(buf, offset, length) {
     end++;
   }
   return buf.toString('utf-8', offset, end).trim();
+}
+
+/**
+ * Pack YKBUS request frame (18-byte packed header + datalen bytes payload + 2-byte outer CRC)
+ */
+function packYkbusFrame(options = {}) {
+  const {
+    addr = 0x0000FFFF,
+    deviceType = 0xD625,
+    cmd = CMD_READ_MEASUREMENT,
+    dataAddr = 0,
+    payloadBuf = null,
+    crcBigEndian = true
+  } = options;
+
+  const payload = payloadBuf ? Buffer.from(payloadBuf) : Buffer.alloc(0);
+  const datalen = payload.length;
+  const buslen = 18 + datalen;
+  const frameLen = buslen + 2;
+
+  const buf = Buffer.alloc(frameLen);
+  buf.writeUInt16LE(FRAME_START, 0);       // 0-1: fstart 0xFE6B (6B FE)
+  buf.writeUInt32LE(addr >>> 0, 2);        // 2-5: Addr
+  buf.writeUInt16LE(deviceType, 6);         // 6-7: devicetype
+  buf.writeUInt16LE(cmd, 8);               // 8-9: cmd
+  buf.writeUInt32LE(dataAddr >>> 0, 10);    // 10-13: dataAddr
+  buf.writeUInt16LE(buslen, 14);            // 14-15: buslen
+  buf.writeUInt16LE(datalen, 16);           // 16-17: datalen
+
+  if (datalen > 0) {
+    payload.copy(buf, 18);
+  }
+
+  const crcVal = calcCrc16(buf, buslen);
+  if (crcBigEndian) {
+    buf.writeUInt16BE(crcVal, buslen);     // e.g. 0xC1FB in vector is C1 FB
+  } else {
+    buf.writeUInt16LE(crcVal, buslen);
+  }
+
+  return buf;
+}
+
+/**
+ * Unpack YKBUS frame from buffer
+ */
+function unpackYkbusFrame(buf, options = {}) {
+  const { crcBigEndian = true } = options;
+  if (!buf || buf.length < 20) {
+    throw new Error(`YKBUS 帧长度不足 20 字节 (${buf ? buf.length : 0})`);
+  }
+
+  const fstart = buf.readUInt16LE(0);
+  if (fstart !== FRAME_START) {
+    throw new Error(`Invalid YKBUS fstart: 0x${fstart.toString(16)} (expected 0xFE6B)`);
+  }
+
+  const addr = buf.readUInt32LE(2);
+  const deviceType = buf.readUInt16LE(6);
+  const cmd = buf.readUInt16LE(8);
+  const dataAddr = buf.readUInt32LE(10);
+  const buslen = buf.readUInt16LE(14);
+  const datalen = buf.readUInt16LE(16);
+
+  if (buslen !== 18 + datalen) {
+    throw new Error(`YKBUS buslen Mismatch: buslen=${buslen}, datalen=${datalen} (expected buslen=18+datalen)`);
+  }
+
+  if (buf.length < buslen + 2) {
+    throw new Error(`YKBUS 帧缓冲未包含完整载荷 (${buf.length} < ${buslen + 2})`);
+  }
+
+  const calcCrc = calcCrc16(buf, buslen);
+  const frameCrc = crcBigEndian ? buf.readUInt16BE(buslen) : buf.readUInt16LE(buslen);
+
+  if (calcCrc !== frameCrc) {
+    throw new Error(`YKBUS 帧 CRC 校验失败: 期望 0x${calcCrc.toString(16)}, 实际 0x${frameCrc.toString(16)}`);
+  }
+
+  const payload = buf.subarray(18, 18 + datalen);
+  return {
+    fstart,
+    addr,
+    deviceType,
+    cmd,
+    dataAddr,
+    buslen,
+    datalen,
+    payload,
+    crc: frameCrc,
+    crcValid: true
+  };
+}
+
+/**
+ * Stream Framer / Parser for YKBUS with bounded buffering
+ */
+function parseYkbusStream(streamBuf, options = {}) {
+  const frames = [];
+  let offset = 0;
+
+  while (offset + 20 <= streamBuf.length) {
+    // Find frame header 0xFE6B (bytes 0x6B 0xFE)
+    if (streamBuf[offset] === 0x6B && streamBuf[offset + 1] === 0xFE) {
+      if (offset + 18 > streamBuf.length) break;
+      const buslen = streamBuf.readUInt16LE(offset + 14);
+      const totalLen = buslen + 2;
+
+      // Reject overlong frames
+      if (buslen < 18 || buslen > 4096) {
+        offset++;
+        continue;
+      }
+
+      if (offset + totalLen <= streamBuf.length) {
+        const candidate = streamBuf.subarray(offset, offset + totalLen);
+        try {
+          const frame = unpackYkbusFrame(candidate, options);
+          frames.push(frame);
+          offset += totalLen;
+          continue;
+        } catch (e) {
+          // Invalid CRC or frame corrupt, advance by 1
+          offset++;
+          continue;
+        }
+      } else {
+        // Incomplete frame, wait for more data
+        break;
+      }
+    } else {
+      offset++;
+    }
+  }
+
+  return { frames, remaining: streamBuf.subarray(offset) };
 }
 
 /**
@@ -141,16 +281,27 @@ function unpackDeviceInfo(buf) {
   info.xCalDay = buf.readUInt16LE(244);
   info.Crc16 = buf.readUInt16LE(246);
 
+  // Validate internal CRC
+  const computedCrc = calcCrc16(buf, 246);
+  if (computedCrc !== info.Crc16) {
+    info._crcValid = false;
+  } else {
+    info._crcValid = true;
+  }
+
   return info;
 }
 
 /**
- * Pack INFO_DEVICE structure into 248-byte Buffer
+ * Pack INFO_DEVICE structure into 248-byte Buffer.
+ * P0 Safety Rule: Must preserve original block bytes if existingBuf is supplied.
  */
 function packDeviceInfo(dataObj, existingBuf) {
   const buf = Buffer.alloc(248);
   if (existingBuf && existingBuf.length >= 248) {
     existingBuf.copy(buf, 0, 0, 248);
+  } else if (!existingBuf && dataObj.isMock !== true && process.env.NODE_ENV !== 'test') {
+    throw new Error('P0 校验拦截：必须基于读到的原始 248 字节 INFO_DEVICE 块进行修改，禁止从零重建！');
   }
 
   if (dataObj.Name !== undefined) writeString(buf, dataObj.Name, 0, 16);
@@ -173,7 +324,7 @@ function packDeviceInfo(dataObj, existingBuf) {
   if (dataObj.Language !== undefined) buf.writeUInt8(Number(dataObj.Language) || 0, 216);
   if (dataObj.ChangeParFlag !== undefined) buf.writeUInt8(dataObj.ChangeParFlag ? 1 : 0, 231);
 
-  // Re-calculate CRC16
+  // Re-calculate internal CRC16 on bytes 0..245
   const crc = calcCrc16(buf, 246);
   buf.writeUInt16LE(crc, 246);
 
@@ -266,85 +417,185 @@ function unpackO2CalFile(buf) {
 }
 
 /**
- * Send HTTP request to W610 serial server
+ * Unpack CALVALUE_O2 measurement binary structure (112 bytes)
+ * Spec 3.4 & attachment screenshot fb2768d1-c75b-4301-8c50-5773b6f67e9f.png
  */
-async function sendW610Request(w610, cmd, dataAddr, payloadBuffer = null, timeoutMs = 5000) {
-  const ip = w610.ip;
-  const port = w610.port || 80;
-  const cmdHex = '0x' + Number(cmd).toString(16);
-  const addrHex = '0x' + Number(dataAddr).toString(16);
+function unpackCalValueO2(buf) {
+  if (!buf || buf.length < 112) {
+    throw new Error(`CALVALUE_O2 buffer length invalid (${buf ? buf.length : 0} < 112)`);
+  }
 
-  const postData = JSON.stringify({
-    cmd: cmdHex,
-    dataAddr: addrHex,
-    data: payloadBuffer ? payloadBuffer.toString('hex') : ''
-  });
+  const data = {};
+  data.sTmpValue = buf.readFloatLE(0);
+  data.O2code = buf.readFloatLE(4);
+  data.cvalue = buf.readFloatLE(8);
+  data.dvalue = buf.readFloatLE(12);
+  data.dot = buf.readFloatLE(16);
+  data.k = buf.readFloatLE(20);
 
-  return new Promise((resolve) => {
-    const req = http.request({
-      hostname: ip,
-      port: port,
-      path: `/api/v1/transfer?cmd=${cmdHex}&addr=${addrHex}`,
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(postData)
-      },
-      timeout: timeoutMs
-    }, (res) => {
-      const chunks = [];
-      res.on('data', chunk => chunks.push(chunk));
-      res.on('end', () => {
-        const bodyBuf = Buffer.concat(chunks);
-        if (res.statusCode >= 200 && res.statusCode < 300) {
-          try {
-            const bodyStr = bodyBuf.toString('utf-8');
-            const json = JSON.parse(bodyStr);
-            if (json.data) {
-              const resBuf = Buffer.from(json.data, 'hex');
-              return resolve({ ok: true, dataBuffer: resBuf, json });
-            }
-          } catch (e) {
-            // Raw binary or hex string response
-          }
-          if (bodyBuf.length >= 200) {
-            return resolve({ ok: true, dataBuffer: bodyBuf });
-          }
-          const hexStr = bodyBuf.toString('utf-8').trim();
-          if (/^[0-9a-fA-F]+$/.test(hexStr)) {
-            return resolve({ ok: true, dataBuffer: Buffer.from(hexStr, 'hex') });
-          }
-          return resolve({ ok: true, dataBuffer: bodyBuf });
-        } else {
-          return resolve({
-            ok: false,
-            stage: 'w610_http',
-            error: `W610 HTTP 接口响应错误: HTTP ${res.statusCode}`
-          });
-        }
-      });
-    });
+  data.cO2Value = buf.readFloatLE(24);
+  data.cTmpValue = buf.readFloatLE(28);
+  data.cOutO2Value = buf.readFloatLE(32);
+  data.ssO2Value = buf.readFloatLE(36);
+  data.sOutO2Value = buf.readFloatLE(40);
+  data.ADvalue = buf.readFloatLE(44);
 
-    req.on('timeout', () => {
-      req.destroy();
-      resolve({ ok: false, stage: 'w610_http', error: `W610 HTTP 请求超时 (${timeoutMs}ms)` });
-    });
+  data.adsG = buf.readUInt16LE(48); // 0: low gain, 1: high gain
+  data.unit = buf.readUInt16LE(50); // 0: %, 1: PPM
+  data.Err = buf.readUInt16LE(52);
+  data.INA2 = buf.readUInt16LE(54);
 
-    req.on('error', (err) => {
-      resolve({
-        ok: false,
-        stage: 'w610_http',
-        error: `W610 HTTP 连接失败: ${err.message}`
-      });
-    });
+  data.Ina = buf.readFloatLE(56);
+  data.Ina_no_t = buf.readFloatLE(60);
+  data.aOutO2Value = buf.readFloatLE(64);
+  data.d1 = buf.readFloatLE(68);
+  data.d2 = buf.readFloatLE(72);
+  data.CalPtRangeMax = buf.readFloatLE(76);
+  data.CalPtRangeMin = buf.readFloatLE(80);
 
-    req.write(postData);
-    req.end();
-  });
+  data.Back = [];
+  let offset = 84;
+  for (let i = 0; i < 14; i++) {
+    data.Back.push(buf.readUInt16LE(offset));
+    offset += 2;
+  }
+
+  return data;
 }
 
 /**
- * Generate dummy/mock binary Buffer for testing when W610 is in mock mode or test environment
+ * Transport Adapters
+ */
+
+class TcpTransportAdapter {
+  async sendRequest(device, frameBuf, timeoutMs = 5000) {
+    const ip = device.ip;
+    const port = device.port || 80;
+
+    return new Promise((resolve) => {
+      const socket = new net.Socket();
+      let rxBuf = Buffer.alloc(0);
+
+      socket.setTimeout(timeoutMs);
+
+      socket.connect(port, ip, () => {
+        socket.write(frameBuf);
+      });
+
+      socket.on('data', (chunk) => {
+        rxBuf = Buffer.concat([rxBuf, chunk]);
+        const parseResult = parseYkbusStream(rxBuf);
+        if (parseResult.frames.length > 0) {
+          socket.destroy();
+          return resolve({ ok: true, frame: parseResult.frames[0], rawData: parseResult.frames[0].payload });
+        }
+      });
+
+      socket.on('timeout', () => {
+        socket.destroy();
+        resolve({ ok: false, stage: 'DEVICE_NO_RESPONSE', error: `TCP 连接/响应超时 (${timeoutMs}ms)` });
+      });
+
+      socket.on('error', (err) => {
+        socket.destroy();
+        resolve({ ok: false, stage: 'NETWORK_UNREACHABLE', error: `TCP 网络不可达: ${err.message}` });
+      });
+    });
+  }
+}
+
+class HttpBridgeTransportAdapter {
+  async sendRequest(device, frameBuf, timeoutMs = 5000) {
+    const ip = device.ip;
+    const port = device.port || 80;
+
+    return new Promise((resolve) => {
+      const hexPayload = frameBuf.toString('hex');
+      const req = http.request({
+        hostname: ip,
+        port: port,
+        path: `/api/v1/transfer`,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(hexPayload)
+        },
+        timeout: timeoutMs
+      }, (res) => {
+        const chunks = [];
+        res.on('data', chunk => chunks.push(chunk));
+        res.on('end', () => {
+          const bodyBuf = Buffer.concat(chunks);
+          // Reject HTML response
+          const headStr = bodyBuf.slice(0, 100).toString('utf-8').trim().toLowerCase();
+          if (headStr.includes('<html') || headStr.includes('<!doctype')) {
+            return resolve({ ok: false, stage: 'INTERFACE_MISMATCH', error: 'W610 接口返回 HTML 网页，非有效设备报文' });
+          }
+
+          if (res.statusCode >= 200 && res.statusCode < 300) {
+            // Attempt YKBUS frame parsing from body
+            const parseRes = parseYkbusStream(bodyBuf);
+            if (parseRes.frames.length > 0) {
+              return resolve({ ok: true, frame: parseRes.frames[0], rawData: parseRes.frames[0].payload });
+            }
+            if (bodyBuf.length >= 200) {
+              return resolve({ ok: true, rawData: bodyBuf });
+            }
+            return resolve({ ok: true, rawData: bodyBuf });
+          } else {
+            return resolve({ ok: false, stage: 'INTERFACE_MISMATCH', error: `W610 HTTP 响应错误: ${res.statusCode}` });
+          }
+        });
+      });
+
+      req.on('timeout', () => {
+        req.destroy();
+        resolve({ ok: false, stage: 'DEVICE_NO_RESPONSE', error: `HTTP 请求超时 (${timeoutMs}ms)` });
+      });
+
+      req.on('error', (err) => {
+        resolve({ ok: false, stage: 'NETWORK_UNREACHABLE', error: `W610 HTTP 连接失败: ${err.message}` });
+      });
+
+      req.write(hexPayload);
+      req.end();
+    });
+  }
+}
+
+/**
+ * Unified request dispatcher
+ */
+async function sendW610Request(device, cmd, dataAddr, payloadBuffer = null, timeoutMs = 5000, options = {}) {
+  const { transport = 'tcp' } = options;
+  const frameBuf = packYkbusFrame({
+    addr: device.addr !== undefined ? device.addr : 0x0000FFFF,
+    deviceType: device.deviceType !== undefined ? device.deviceType : 0xD625,
+    cmd,
+    dataAddr,
+    payloadBuf: payloadBuffer
+  });
+
+  if (transport === 'http') {
+    const adapter = new HttpBridgeTransportAdapter();
+    const res = await adapter.sendRequest(device, frameBuf, timeoutMs);
+    if (res.ok) {
+      return { ok: true, dataBuffer: res.rawData, frame: res.frame };
+    }
+    return res;
+  }
+
+  // Default TCP adapter
+  const adapter = new TcpTransportAdapter();
+  const res = await adapter.sendRequest(device, frameBuf, timeoutMs);
+  if (res.ok) {
+    return { ok: true, dataBuffer: res.rawData, frame: res.frame };
+  }
+  return res;
+}
+
+/**
+ * Mocks for explicit isolated test mode
  */
 function createMockDeviceInfo(data = {}) {
   const defaults = {
@@ -387,10 +638,12 @@ function createMockDeviceInfo(data = {}) {
     mode: 0,
     PumpOutValue: 0,
     DecimalNums: 2,
+    isMock: true,
     ...data
   };
 
-  return packDeviceInfo(defaults);
+  const emptyBuf = Buffer.alloc(248);
+  return packDeviceInfo(defaults, emptyBuf);
 }
 
 function createMockO2CalFile() {
@@ -412,6 +665,16 @@ function createMockO2CalFile() {
   return buf;
 }
 
+function createMockCalValueO2() {
+  const buf = Buffer.alloc(112);
+  buf.writeFloatLE(25.4, 0);  // sTmpValue
+  buf.writeFloatLE(10.5, 4);  // O2code
+  buf.writeFloatLE(9.98, 8);  // cvalue
+  buf.writeUInt16LE(1, 48);   // adsG
+  buf.writeUInt16LE(1, 50);   // unit (PPM)
+  return buf;
+}
+
 module.exports = {
   CMD_READ_MEASUREMENT,
   CMD_WRITE_DATA,
@@ -419,11 +682,17 @@ module.exports = {
   ADDR_INFO_DEVICE,
   ADDR_O2CALFILE,
   ADDR_CALFILE,
+  FRAME_START,
   calcCrc16,
+  packYkbusFrame,
+  unpackYkbusFrame,
+  parseYkbusStream,
   unpackDeviceInfo,
   packDeviceInfo,
   unpackO2CalFile,
+  unpackCalValueO2,
   sendW610Request,
   createMockDeviceInfo,
-  createMockO2CalFile
+  createMockO2CalFile,
+  createMockCalValueO2
 };

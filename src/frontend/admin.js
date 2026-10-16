@@ -562,7 +562,7 @@ async function loadWorkerTemplateConfigs(workerId) {
       }
 
       const isEnabled = Boolean(t.is_enabled);
-      const docLabel = t.doc_type === 'cert' ? '📜 发货证书' : '📦 装箱清单';
+      const docLabel = t.doc_type === 'cert' ? '📜 发货证书' : (t.doc_type === 'packing' ? '📦 装箱清单' : '📡 设备通信');
       const syncTextMap = {
         SYNCED: '<span style="font-size: 12px; color: #16a34a;">✅ 已同步</span>',
         PENDING: '<span style="font-size: 12px; color: #d97706;">⏳ 待执行端确认</span>',
@@ -2069,7 +2069,9 @@ function renderWorkerDirectoriesTable(list) {
 
     const docTypeBadge = item.doc_type === 'cert'
       ? '<span class="status-badge" style="background:#e0e7ff; color:#3730a3;">发货证书</span>'
-      : '<span class="status-badge" style="background:#fef3c7; color:#92400e;">装箱清单</span>';
+      : (item.doc_type === 'packing'
+        ? '<span class="status-badge" style="background:#fef3c7; color:#92400e;">装箱清单</span>'
+        : '<span class="status-badge" style="background:#e0f2fe; color:#0369a1;">设备通信</span>');
 
     const saveModeText = item.save_mode === 'subfolder'
       ? `<span>📁 子文件夹<br><small class="text-muted">[${item.subfolder_rule || 'deviceSn'}]</small></span>`
