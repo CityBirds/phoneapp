@@ -294,15 +294,15 @@ function unpackDeviceInfo(buf) {
 
 /**
  * Pack INFO_DEVICE structure into 248-byte Buffer.
- * P0 Safety Rule: Must preserve original block bytes if existingBuf is supplied.
+ * P0 Safety Rule: Must preserve original block bytes from existingBuf.
+ * Strictly rejects if existingBuf is missing or under 248 bytes.
  */
 function packDeviceInfo(dataObj, existingBuf) {
-  const buf = Buffer.alloc(248);
-  if (existingBuf && existingBuf.length >= 248) {
-    existingBuf.copy(buf, 0, 0, 248);
-  } else if (!existingBuf && dataObj.isMock !== true && process.env.NODE_ENV !== 'test') {
+  if (!existingBuf || existingBuf.length < 248) {
     throw new Error('P0 校验拦截：必须基于读到的原始 248 字节 INFO_DEVICE 块进行修改，禁止从零重建！');
   }
+  const buf = Buffer.alloc(248);
+  existingBuf.copy(buf, 0, 0, 248);
 
   if (dataObj.Name !== undefined) writeString(buf, dataObj.Name, 0, 16);
   if (dataObj.typecode !== undefined) buf.writeUInt16LE(Number(dataObj.typecode) || 0, 16);
@@ -504,70 +504,20 @@ class TcpTransportAdapter {
   }
 }
 
-class HttpBridgeTransportAdapter {
-  async sendRequest(device, frameBuf, timeoutMs = 5000) {
-    const ip = device.ip;
-    const port = device.port || 80;
-
-    return new Promise((resolve) => {
-      const hexPayload = frameBuf.toString('hex');
-      const req = http.request({
-        hostname: ip,
-        port: port,
-        path: `/api/v1/transfer`,
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(hexPayload)
-        },
-        timeout: timeoutMs
-      }, (res) => {
-        const chunks = [];
-        res.on('data', chunk => chunks.push(chunk));
-        res.on('end', () => {
-          const bodyBuf = Buffer.concat(chunks);
-          // Reject HTML response
-          const headStr = bodyBuf.slice(0, 100).toString('utf-8').trim().toLowerCase();
-          if (headStr.includes('<html') || headStr.includes('<!doctype')) {
-            return resolve({ ok: false, stage: 'INTERFACE_MISMATCH', error: 'W610 接口返回 HTML 网页，非有效设备报文' });
-          }
-
-          if (res.statusCode >= 200 && res.statusCode < 300) {
-            // Attempt YKBUS frame parsing from body
-            const parseRes = parseYkbusStream(bodyBuf);
-            if (parseRes.frames.length > 0) {
-              return resolve({ ok: true, frame: parseRes.frames[0], rawData: parseRes.frames[0].payload });
-            }
-            if (bodyBuf.length >= 200) {
-              return resolve({ ok: true, rawData: bodyBuf });
-            }
-            return resolve({ ok: true, rawData: bodyBuf });
-          } else {
-            return resolve({ ok: false, stage: 'INTERFACE_MISMATCH', error: `W610 HTTP 响应错误: ${res.statusCode}` });
-          }
-        });
-      });
-
-      req.on('timeout', () => {
-        req.destroy();
-        resolve({ ok: false, stage: 'DEVICE_NO_RESPONSE', error: `HTTP 请求超时 (${timeoutMs}ms)` });
-      });
-
-      req.on('error', (err) => {
-        resolve({ ok: false, stage: 'NETWORK_UNREACHABLE', error: `W610 HTTP 连接失败: ${err.message}` });
-      });
-
-      req.write(hexPayload);
-      req.end();
-    });
-  }
-}
-
 /**
  * Unified request dispatcher
+ * TCP 透传方式与端口待 W610 固件确认，未经实机验证。
  */
 async function sendW610Request(device, cmd, dataAddr, payloadBuffer = null, timeoutMs = 5000, options = {}) {
   const { transport = 'tcp' } = options;
+  if (transport !== 'tcp') {
+    return {
+      ok: false,
+      stage: 'UNSUPPORTED_TRANSPORT',
+      error: `不支持的传输方式 [${transport}]。注：TCP 透传方式与端口待 W610 固件确认，未经实机验证。`
+    };
+  }
+
   const frameBuf = packYkbusFrame({
     addr: device.addr !== undefined ? device.addr : 0x0000FFFF,
     deviceType: device.deviceType !== undefined ? device.deviceType : 0xD625,
@@ -575,15 +525,6 @@ async function sendW610Request(device, cmd, dataAddr, payloadBuffer = null, time
     dataAddr,
     payloadBuf: payloadBuffer
   });
-
-  if (transport === 'http') {
-    const adapter = new HttpBridgeTransportAdapter();
-    const res = await adapter.sendRequest(device, frameBuf, timeoutMs);
-    if (res.ok) {
-      return { ok: true, dataBuffer: res.rawData, frame: res.frame };
-    }
-    return res;
-  }
 
   // Default TCP adapter
   const adapter = new TcpTransportAdapter();

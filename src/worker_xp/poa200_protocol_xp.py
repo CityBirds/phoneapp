@@ -236,12 +236,9 @@ def unpack_device_info(buf):
 
 
 def pack_device_info(data_obj, existing_buf=None):
-    if existing_buf and len(existing_buf) >= 248:
-        buf = bytearray(existing_buf[:248])
-    else:
-        if not data_obj.get('isMock') and getattr(sys, '_running_tests', False) is False:
-            raise ValueError("P0 校验拦截：必须基于读到的原始 248 字节 INFO_DEVICE 块进行修改，禁止从零重建！")
-        buf = bytearray(248)
+    if not existing_buf or len(existing_buf) < 248:
+        raise ValueError("P0 校验拦截：必须基于读到的原始 248 字节 INFO_DEVICE 块进行修改，禁止从零重建！")
+    buf = bytearray(existing_buf[:248])
 
     if 'Name' in data_obj:
         write_string(buf, data_obj['Name'], 0, 16)
@@ -389,6 +386,13 @@ def unpack_cal_value_o2(buf):
 
 
 def send_w610_request(w610_device, cmd, data_addr, payload_bytes=None, timeout_sec=5, transport="tcp"):
+    if transport != "tcp":
+        return {
+            "ok": False,
+            "stage": "UNSUPPORTED_TRANSPORT",
+            "error": "不支持的传输方式 [%s]。注：TCP 透传方式与端口待 W610 固件确认，未经实机验证。" % str(transport)
+        }
+
     ip = w610_device.get('ip')
     port = w610_device.get('port', 80)
     frame_buf = pack_ykbus_frame(
@@ -399,63 +403,30 @@ def send_w610_request(w610_device, cmd, data_addr, payload_bytes=None, timeout_s
         payload_bytes=payload_bytes
     )
 
-    if transport == "tcp":
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(timeout_sec)
-        try:
-            sock.connect((ip, port))
-            sock.sendall(frame_buf)
-            rx_bytes = b""
-            while len(rx_bytes) < 20:
-                chunk = sock.recv(1024)
-                if not chunk:
-                    break
-                rx_bytes += chunk
-            sock.close()
-
-            if len(rx_bytes) >= 20:
-                try:
-                    frame = unpack_ykbus_frame(rx_bytes)
-                    return {"ok": True, "dataBuffer": frame["payload"], "frame": frame}
-                except Exception:
-                    pass
-            return {"ok": True, "dataBuffer": rx_bytes}
-        except socket.timeout:
-            return {"ok": False, "stage": "DEVICE_NO_RESPONSE", "error": "TCP 连接/响应超时 (%d sec)" % timeout_sec}
-        except Exception as e:
-            return {"ok": False, "stage": "NETWORK_UNREACHABLE", "error": "TCP 连接失败: %s" % str(e)}
-
-    # HTTP transport fallback
-    cmd_hex = "0x%x" % cmd
-    addr_hex = "0x%x" % data_addr
-    data_hex = codecs.encode(payload_bytes, 'hex').decode('ascii') if payload_bytes else ""
-
-    url = "http://%s:%d/api/v1/transfer" % (ip, port)
-    post_dict = {"cmd": cmd_hex, "dataAddr": addr_hex, "data": data_hex}
-    post_body = json.dumps(post_dict).encode('utf-8')
-
-    req = urllib_req.Request(url, data=post_body)
-    req.add_header('Content-Type', 'application/json')
-
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(timeout_sec)
     try:
-        response = urllib_req.urlopen(req, timeout=timeout_sec)
-        resp_bytes = response.read()
+        sock.connect((ip, port))
+        sock.sendall(frame_buf)
+        rx_bytes = b""
+        while len(rx_bytes) < 20:
+            chunk = sock.recv(1024)
+            if not chunk:
+                break
+            rx_bytes += chunk
+        sock.close()
 
-        head_str = resp_bytes[:100].decode('utf-8', 'ignore').lower()
-        if '<html' in head_str or '<!doctype' in head_str:
-            return {"ok": False, "stage": "INTERFACE_MISMATCH", "error": "W610 接口返回 HTML 网页，非有效设备报文"}
-
-        if len(resp_bytes) >= 20:
+        if len(rx_bytes) >= 20:
             try:
-                frame = unpack_ykbus_frame(resp_bytes)
+                frame = unpack_ykbus_frame(rx_bytes)
                 return {"ok": True, "dataBuffer": frame["payload"], "frame": frame}
             except Exception:
                 pass
-
-        return {"ok": True, "dataBuffer": resp_bytes}
-
+        return {"ok": True, "dataBuffer": rx_bytes}
+    except socket.timeout:
+        return {"ok": False, "stage": "DEVICE_NO_RESPONSE", "error": "TCP 连接/响应超时 (%d sec)" % timeout_sec}
     except Exception as e:
-        return {"ok": False, "stage": "NETWORK_UNREACHABLE", "error": "W610 HTTP 通信失败: %s" % str(e)}
+        return {"ok": False, "stage": "NETWORK_UNREACHABLE", "error": "TCP 连接失败: %s" % str(e)}
 
 
 def create_mock_device_info(data=None):

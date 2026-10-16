@@ -83,6 +83,7 @@ class ExecutionWorker {
     this._connectAttempts = 0;
     // 身份冲突（同 workerId 被复制到另一台电脑）时服务端会下发冲突标记
     this.identityConflict = null;
+    this.enableTestMock = Boolean(config.enableTestMock || process.env.W610_TEST_MOCK === '1');
   }
 
   /** 统一的执行端请求头：身份与接入凭据（服务端据此校验归属，不信任请求体自报） */
@@ -425,8 +426,8 @@ class ExecutionWorker {
       const action = task.action;
       let w610Device = task.w610Device || payload.w610Device;
 
-      // COMM-15: Mock mode is ONLY triggered when explicitly enabled for isolated tests
-      const isMock = Boolean(payload.isMock || payload.enableMock || payload.isTestMock);
+      // COMM-15: Mock mode is ONLY triggered when process-level explicit test switch is ON
+      const isMock = Boolean(this.enableTestMock || process.env.W610_TEST_MOCK === '1');
 
       if (action === 'probe') {
         let devices = [];
@@ -574,25 +575,39 @@ class ExecutionWorker {
         const packBuf = poa200.packDeviceInfo({ SnNo: newSn, OutDate: newOutDate, ChangeParFlag: 1, isMock }, originalBuf);
 
         // Write SN and OutDate (cmd 0x0101)
+        await this.renewW610TaskLease(task.id);
         if (isMock) {
           if (payload.mockFailStage === 'write_timeout') {
-            throw new Error('写入设备数据超时: W610 无响应 (RESULT_UNKNOWN)');
+            await this.reportW610TaskResult(task.id, 'RESULT_UNKNOWN', {
+              stage: 'WRITE_SENT',
+              verifiedSn: null
+            }, '写入设备数据超时: W610 无响应 (RESULT_UNKNOWN)');
+            return;
           }
         } else {
           const writeRes = await poa200.sendW610Request(w610Device, poa200.CMD_WRITE_DATA, poa200.ADDR_INFO_DEVICE, packBuf, 5000);
           if (!writeRes.ok) {
+            if (writeRes.stage === 'DEVICE_NO_RESPONSE') {
+              await this.reportW610TaskResult(task.id, 'RESULT_UNKNOWN', {
+                stage: 'WRITE_SENT',
+                verifiedSn: null
+              }, `写入发送后设备超时无响应: ${writeRes.error} (RESULT_UNKNOWN)`);
+              return;
+            }
             throw new Error(`写入设备序列号和日期失败 (${writeRes.stage || 'WRITE_FAILED'}): ${writeRes.error}`);
           }
         }
+        await this.renewW610TaskLease(task.id);
 
         // Re-read and verify (cmd 0x0102)
         let rereadBuf = null;
         let rereadInfo = null;
+        const mockFailStage = this.testMockFailStage || payload.mockFailStage;
         if (isMock) {
-          if (payload.mockFailStage === 'reread_mismatch') {
+          if (mockFailStage === 'reread_mismatch') {
             rereadBuf = poa200.createMockDeviceInfo({ SnNo: 'WRONG_SN', OutDate: newOutDate });
             rereadInfo = poa200.unpackDeviceInfo(rereadBuf);
-          } else if (payload.mockFailStage === 'reread_timeout') {
+          } else if (mockFailStage === 'reread_timeout') {
             throw new Error('写入后回读核验超时: 设备未在规定时间内返回数据');
           } else {
             rereadBuf = poa200.packDeviceInfo({ SnNo: newSn, OutDate: newOutDate, ChangeParFlag: 1, isMock }, originalBuf);
@@ -708,6 +723,15 @@ class ExecutionWorker {
       console.error(`W610 Task #${task.id} failed:`, err.message);
       await this.reportW610TaskResult(task.id, 'FAILED', null, err.message);
     }
+  }
+
+  async renewW610TaskLease(taskId) {
+    try {
+      await fetch(`${this.serverUrl}/api/worker/w610-tasks/${taskId}/renew-lease`, {
+        method: 'POST',
+        headers: this.workerHeaders()
+      });
+    } catch (e) {}
   }
 
   async reportW610TaskResult(taskId, status, result = null, errorMsg = null) {
