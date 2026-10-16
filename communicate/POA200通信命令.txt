@@ -1,0 +1,179 @@
+cmd命令：
+0x84： 读取测量数据
+
+0x0101：写数据
+0x0102：读数据
+dataAddr ：
+0xE000 设备信息
+0xE200 校准数据
+0xE400 温度校准
+
+
+//设备信息
+typedef struct
+{
+    char   	Name[16];
+    uint16 	typecode;
+    char 	typeName[14];
+    char   OutDate[16];//生产日期
+    char   SnNo[16];//序列号
+    char   VerNo[32];//版本号
+    char   SensorData[16];//传感器校准日期
+    //char   BAKA4[16];
+
+    float  Minimumdisplayvalue;//Minimum display value
+    float  K1minCode;
+    float  K2maxCode;
+    float  BAK1;
+
+    
+    float  MaxValue;//测量最大值
+    float  MinValue;//测量最小值 
+    float  xIntervalValue;          //开始启动点 默认3.0 PPM
+    float  BAK5;
+    float  xMinValue;               //最小值 默认0.3PPM
+    float  Min_Negative_value;      //最小负值 默认 -10
+    float  BAK6;
+    float  BAK7;
+    float  BAK8;
+    float  BAK9;
+    float  BAK10;  
+    float  BAK11;  
+    
+    float  MinCoordinates_PPM;//曲线最小坐标 PPM
+    float  MinCoordinates_BF; //曲线最小坐标 %              
+    float  BAK13;                   
+    float  BAKB16;
+
+    uint32 AddrSerNo;
+    uint32 Maximum_Charge_Voltage;   //VCHG定义充满电压，标志电池充满的电压门限 8200000uV
+    uint32 Minimum_Charge_Current ;  //IMIN定义最小充电电流门限 电池充电电压大于VCHG，并且充电电流小于IMIN，电池显示容量为满100% 160mA
+    uint32 Minimum_Charge_Voltage;   //VAE电池放电电压小于VAE，这个时候激活有效空电量点，电池电量显示为0% 7300000uV
+    uint8    xEnable; 
+    uint8    BAKC1;  
+    uint8    BAKC2; 
+    uint8    OpenDelayFlag;  // 1:打开电磁阀 0:关闭 
+   
+    uint8 OpenAirPumpFlag;// 1:打开泵 0:关闭泵
+    uint8 OpenPrintfFlag;// 1:打印 0:关闭泵
+    uint8 OpenBlueToothFlag;//蓝牙 1:打开蓝牙 0:关闭蓝牙
+    uint8 OpenRecordFlag;//记录 1:打开记录 0:关闭记录
+    
+    uint8 Language;//系统语言 0：英文 1：中文
+    uint8 BlackLight;//背光 0:最暗 1：亮 2：最亮
+    uint8 DispiayNO;//显示界面 0：曲线界面 1：数值显示界面 2：数字显示界面（白色背景）
+    
+    uint8	SaveRepetFlag;//是否重复存储 1:是 0:否
+    uint8   IntervalTime;//存储间隔时间 5~60秒 以5S间隔设置
+    uint8	CurveTime;//曲线显示时间 0~30分钟
+    
+    uint8 PressureFlag;//压力传感器 1:有 0:无
+    uint8 AirPumpFlag;//气泵 1:有 0:无
+    uint8 PrintfFlag;//打印机 1:有 0:无
+    uint8 TemperatureFlag;//温度传感器 1:有 0:无
+    uint8 BlueToothFlag;//蓝牙 1:有 0:无
+    uint8 RecordFlag;//记录 1:有 0:无
+    uint8 CalPassword;//饱和点校准密码 低6位有效
+    uint8 ResetPassword;
+    uint8 BAKC9;
+    uint8 ChangeParFlag;//参数改变标志，true：关机时保存该数据块，false：未改变，不保存。
+
+    uint8 mode;
+    uint8 PumpOutValue;
+
+    uint16   SalePassword; //已用容量 PC只读
+    uint16   AdminPassword; //总容量   PC只读
+	uint16   DecimalNums;//显示值小数点位数
+	//uint16   BAKD1;//校准天数 默认180
+	uint8 JMFlag;                    //加密 0：不加密  		1：加密
+	uint8 TempFlag;                  //温度 0：采样池温度 	1：传感器电路板温度  
+	uint16 BAKD1;  
+    uint16 xCalDay;				//电池总电量
+	//uint16 BAKD7;    
+    uint16  Crc16;
+
+
+} INFO_DEVICE;
+
+
+
+//校准数据
+
+typedef struct O2_PT
+{
+    float           code;                      //原始值
+    float           Value;                      //标定值
+} O2PT;
+
+typedef struct O2_CALPT
+{
+    float           code;                      //原始值
+    float           Value;                      //标定值
+    uint16          U_F;
+    uint16          BK;
+} O2CALPT;
+
+
+typedef struct O2STABLELPT
+{
+    float           oldH;                      //原始值
+    float           newH;                      //标定值
+    float           oldL;
+    float           newL;
+} O2_STABLEL_PT;
+
+
+typedef struct O2_CALFILE
+{
+
+    float           K1;
+    float           K2;
+    float           ZeroMax;
+    float           ZeroMin;
+    float           MinCal;
+    float           lifeSpan;
+
+    uint8           SenserInx;
+    uint8           openSatble1;
+    uint8           openSatble2;
+    uint8           openTc;
+    uint8           calPtInx;
+    
+    uint8           Senser_ptCnt;
+    uint8           stable_PtCnt;
+    uint8           K1_I_ptCnt;
+    uint8           K2_I_ptCnt;
+    uint8           F_CAL_ptCnt;
+    uint8           U_CAL_ptCnt;
+    uint8           BK1;
+
+
+    O2PT            Senser_pt[4];
+    O2_STABLEL_PT   stable_Pt[2];
+    O2PT            K1_I_pt[2];
+    O2PT            K2_I_pt[2];
+    O2CALPT         F_CAL_pt[3];
+    O2CALPT         U_CAL_pt[3];
+
+} O2CALFILE;
+
+
+//温度校准
+
+
+#define MAXNODE 16
+typedef struct
+{
+    float           code;                      //?-ê??μ
+    float           Value;                      //±ê?¨?μ
+    float           xCode;  //±?ó?     
+} CALPOINT;
+
+typedef struct
+{
+    uint32 ptCnt;
+    CALPOINT     point[MAXNODE];
+    //uint8       noused[60];       
+    
+    //uint16 Crc16;
+} CALFILE; //132
