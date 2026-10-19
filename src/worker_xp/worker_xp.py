@@ -647,26 +647,41 @@ class ExecutionWorkerXP(object):
         payload = task.get("payload") or {}
         w610_device = task.get("w610Device") or payload.get("w610Device")
 
-        is_mock = bool(payload.get("isMock") or (w610_device and w610_device.get("ip") == "127.0.0.1"))
+        # COMM-15: Mock mode is ONLY triggered when explicitly enabled
+        is_mock = bool(payload.get("isMock") or payload.get("enableMock") or payload.get("isTestMock"))
 
         try:
             if action == "probe":
                 devices = payload.get("devices") or []
+                fetch_error = None
+
                 if not devices:
-                    url = self.server_url + "/api/w610/devices"
-                    sc, h, cnt, e = http_request(url, method="GET")
+                    url = self.server_url + "/api/worker/w610/devices"
+                    headers = {"x-worker-id": safe_str(self.worker_id), "x-worker-token": safe_str(self.worker_secret)}
+                    sc, h, cnt, e = http_request(url, method="GET", headers=headers)
                     if sc == 200 and cnt:
                         try:
                             devices = json.loads(cnt.decode('utf-8'))
-                        except Exception:
-                            pass
+                        except Exception as p_e:
+                            fetch_error = "解析 W610 清单失败: " + str(p_e)
+                    else:
+                        fetch_error = "拉取 W610 清单接口失败: HTTP %d (%s)" % (sc, str(e))
+
+                if fetch_error:
+                    self.report_w610_task_result(task_id, "FAILED", None, fetch_error)
+                    return
+
+                if not devices:
+                    self.report_w610_task_result(task_id, "SUCCESS", {"probeResults": [], "configuredStatus": "UNCONFIGURED", "message": "未配置 W610 设备"})
+                    return
 
                 probe_results = []
                 for dev in devices:
                     http_ok = False
                     device_ok = False
+                    detail = ""
 
-                    if is_mock or dev.get("ip") == "127.0.0.1" or dev.get("mock"):
+                    if is_mock:
                         http_ok = dev.get("ip") != "0.0.0.0" and dev.get("ip") != "invalid_host"
                         device_ok = http_ok and not dev.get("no_device")
                     else:
@@ -677,8 +692,11 @@ class ExecutionWorkerXP(object):
                                 info = poa200_xp.unpack_device_info(req_res.get("dataBuffer"))
                                 if info and info.get("SnNo"):
                                     device_ok = True
+                                    detail = "真正在线"
                             except Exception:
-                                pass
+                                detail = "协议校验失败"
+                        else:
+                            detail = req_res.get("error") or "网络不通/设备无应答"
 
                     probe_results.append({
                         "id": dev.get("id"),
@@ -687,7 +705,8 @@ class ExecutionWorkerXP(object):
                         "port": dev.get("port", 80),
                         "http_ok": http_ok,
                         "device_ok": device_ok,
-                        "status": "ONLINE" if device_ok else ("W610_ONLY" if http_ok else "OFFLINE")
+                        "status": "ONLINE" if device_ok else ("W610_ONLY" if http_ok else "OFFLINE"),
+                        "detail": detail
                     })
 
                 self.report_w610_task_result(task_id, "SUCCESS", {"probeResults": probe_results})
@@ -697,7 +716,7 @@ class ExecutionWorkerXP(object):
                 raise ValueError("缺少目标 W610 设备配置信息")
 
             if action == "read_device":
-                if is_mock or w610_device.get("ip") == "127.0.0.1" or w610_device.get("mock"):
+                if is_mock:
                     if w610_device.get("ip") == "0.0.0.0" or payload.get("mockFailStage") == "w610_http":
                         raise ValueError("W610 HTTP 连接失败: 无法连接到目标 IP 地址")
                     if payload.get("mockFailStage") == "device_no_response":
@@ -738,43 +757,82 @@ class ExecutionWorkerXP(object):
                     except Exception as me:
                         raise ValueError("通信保存根目录创建失败 [%s]: %s" % (root_dir, str(me)))
 
-                # Write SN and OutDate
-                if is_mock or w610_device.get("ip") == "127.0.0.1" or w610_device.get("mock"):
-                    if payload.get("mockFailStage") == "write_timeout":
-                        raise ValueError("写入设备数据超时: W610 无响应")
+                # P0 Safety Requirement: Re-read complete original 248-byte INFO_DEVICE block before write
+                original_buf = None
+                original_info = None
+
+                if is_mock:
+                    original_buf = poa200_xp.create_mock_device_info(payload.get("mockDeviceInfo") or {})
+                    original_info = poa200_xp.unpack_device_info(original_buf)
                 else:
-                    pack_buf = poa200_xp.pack_device_info({"SnNo": new_sn, "OutDate": new_out_date, "ChangeParFlag": 1})
+                    orig_res = poa200_xp.send_w610_request(w610_device, poa200_xp.CMD_READ_DATA, poa200_xp.ADDR_INFO_DEVICE, timeout_sec=5)
+                    if not orig_res.get("ok") or not orig_res.get("dataBuffer") or len(orig_res.get("dataBuffer")) < 248:
+                        raise ValueError("写前读取设备原始 INFO_DEVICE 块失败，禁止写入以防数据被破坏: %s" % (orig_res.get("error") or "数据不完整"))
+                    original_buf = orig_res.get("dataBuffer")
+                    original_info = poa200_xp.unpack_device_info(original_buf)
+
+                # Pack updated device info using original_buf as baseline
+                pack_buf = poa200_xp.pack_device_info({"SnNo": new_sn, "OutDate": new_out_date, "ChangeParFlag": 1, "isMock": is_mock}, original_buf)
+
+                # Write SN and OutDate
+                if is_mock:
+                    if payload.get("mockFailStage") == "write_timeout":
+                        raise ValueError("写入设备数据超时: W610 无响应 (RESULT_UNKNOWN)")
+                else:
                     write_res = poa200_xp.send_w610_request(w610_device, poa200_xp.CMD_WRITE_DATA, poa200_xp.ADDR_INFO_DEVICE, pack_buf, timeout_sec=5)
                     if not write_res.get("ok"):
                         raise ValueError("写入设备序列号和日期失败: %s" % write_res.get("error"))
 
                 # Re-read and verify
-                if is_mock or w610_device.get("ip") == "127.0.0.1" or w610_device.get("mock"):
+                reread_buf = None
+                reread_info = None
+
+                if is_mock:
                     if payload.get("mockFailStage") == "reread_mismatch":
-                        reread_info = poa200_xp.unpack_device_info(poa200_xp.create_mock_device_info({"SnNo": "WRONG_SN", "OutDate": new_out_date}))
+                        reread_buf = poa200_xp.create_mock_device_info({"SnNo": "WRONG_SN", "OutDate": new_out_date})
+                        reread_info = poa200_xp.unpack_device_info(reread_buf)
                     elif payload.get("mockFailStage") == "reread_timeout":
                         raise ValueError("写入后回读核验超时: 设备未在规定时间内返回数据")
                     else:
-                        reread_info = poa200_xp.unpack_device_info(poa200_xp.create_mock_device_info({"SnNo": new_sn, "OutDate": new_out_date}))
+                        reread_buf = poa200_xp.pack_device_info({"SnNo": new_sn, "OutDate": new_out_date, "ChangeParFlag": 1, "isMock": True}, original_buf)
+                        reread_info = poa200_xp.unpack_device_info(reread_buf)
                 else:
                     reread_res = poa200_xp.send_w610_request(w610_device, poa200_xp.CMD_READ_DATA, poa200_xp.ADDR_INFO_DEVICE, timeout_sec=5)
-                    if not reread_res.get("ok"):
-                        raise ValueError("写入后回读读取失败: %s" % reread_res.get("error"))
-                    reread_info = poa200_xp.unpack_device_info(reread_res.get("dataBuffer"))
+                    if not reread_res.get("ok") or not reread_res.get("dataBuffer") or len(reread_res.get("dataBuffer")) < 248:
+                        raise ValueError("写入后回读读取失败: %s" % (reread_res.get("error") or "数据块不完整"))
+                    reread_buf = reread_res.get("dataBuffer")
+                    reread_info = poa200_xp.unpack_device_info(reread_buf)
 
                 if reread_info.get("SnNo") != new_sn or reread_info.get("OutDate") != new_out_date:
                     raise ValueError("回读核验失败！设备中读取到的序列号/日期与提交值不一致！禁止归档结果！")
 
+                # Verify non-target fields were NOT corrupted
+                if reread_info.get("typecode") != original_info.get("typecode") or reread_info.get("typeName") != original_info.get("typeName"):
+                    raise ValueError("回读核验失败！设备非目标只读参数 (typecode/typeName) 被修改/破坏！禁止归档结果！")
+
                 # Read full info and O2 calib
-                if is_mock or w610_device.get("ip") == "127.0.0.1" or w610_device.get("mock"):
-                    mock_o2 = poa200_xp.create_mock_o2_cal_file()
-                    o2_cal_data = poa200_xp.unpack_o2_cal_file(mock_o2)
+                o2_cal_data = None
+                o2_read_ok = False
+                o2_read_error = None
+
+                if is_mock:
+                    if payload.get("mockFailStage") == "o2_read_fail":
+                        o2_read_ok = False
+                        o2_read_error = "读取 O2 标定数据超时"
+                    else:
+                        mock_o2 = poa200_xp.create_mock_o2_cal_file()
+                        o2_cal_data = poa200_xp.unpack_o2_cal_file(mock_o2)
+                        o2_read_ok = True
                 else:
                     o2_res = poa200_xp.send_w610_request(w610_device, poa200_xp.CMD_READ_DATA, poa200_xp.ADDR_O2CALFILE, timeout_sec=5)
-                    if o2_res.get("ok"):
-                        o2_cal_data = poa200_xp.unpack_o2_cal_file(o2_res.get("dataBuffer"))
+                    if o2_res.get("ok") and o2_res.get("dataBuffer") and len(o2_res.get("dataBuffer")) >= 204:
+                        try:
+                            o2_cal_data = poa200_xp.unpack_o2_cal_file(o2_res.get("dataBuffer"))
+                            o2_read_ok = True
+                        except Exception as o2_e:
+                            o2_read_error = "O2 标定解析失败: " + str(o2_e)
                     else:
-                        o2_cal_data = {"error": o2_res.get("error")}
+                        o2_read_error = o2_res.get("error") or "读取 O2 标定数据失败"
 
                 # Save directory
                 save_dir = root_dir
@@ -786,23 +844,38 @@ class ExecutionWorkerXP(object):
                 import datetime
                 date_str = datetime.datetime.now().strftime("%Y%m%d")
                 dev_info_name = "POA200_%s_DeviceInfo_%s.json" % (reread_info.get("SnNo"), date_str)
-                o2_calib_name = "POA200_%s_O2Calib_%s.json" % (reread_info.get("SnNo"), date_str)
 
                 if payload.get("mockFailStage") == "save_file_fail":
                     raise ValueError("文件保存失败: 目标磁盘空间不足或无写入权限")
 
                 dev_path = self.save_json_with_conflict_handling(save_dir, dev_info_name, reread_info)
-                o2_path = self.save_json_with_conflict_handling(save_dir, o2_calib_name, o2_cal_data)
+                files_saved = [{"name": dev_info_name, "path": dev_path}]
+
+                # Only save O2 calibration file if O2 read succeeded
+                if o2_read_ok and o2_cal_data:
+                    o2_calib_name = "POA200_%s_O2Calib_%s.json" % (reread_info.get("SnNo"), date_str)
+                    o2_path = self.save_json_with_conflict_handling(save_dir, o2_calib_name, o2_cal_data)
+                    files_saved.append({"name": o2_calib_name, "path": o2_path})
+
+                if not o2_read_ok:
+                    self.report_w610_task_result(task_id, "FAILED", {
+                        "writeOk": True,
+                        "rereadOk": True,
+                        "o2CalibOk": False,
+                        "verifiedSn": reread_info.get("SnNo"),
+                        "verifiedOutDate": reread_info.get("OutDate"),
+                        "filesSaved": files_saved,
+                        "stage": "O2_READ_FAILED"
+                    }, "设备修改成功，但读取 O2 标定数据失败: " + str(o2_read_error))
+                    return
 
                 self.report_w610_task_result(task_id, "SUCCESS", {
                     "writeOk": True,
                     "rereadOk": True,
+                    "o2CalibOk": True,
                     "verifiedSn": reread_info.get("SnNo"),
                     "verifiedOutDate": reread_info.get("OutDate"),
-                    "filesSaved": [
-                        {"name": dev_info_name, "path": dev_path},
-                        {"name": o2_calib_name, "path": o2_path}
-                    ]
+                    "filesSaved": files_saved
                 })
                 return
 

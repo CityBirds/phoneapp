@@ -2165,7 +2165,7 @@ app.get('/api/admin/workers/:workerId/template-configs', (req, res) => {
 
   const selectedTmpls = Array.from(grouped.values()).sort((a, b) => a.model.localeCompare(b.model) || a.type.localeCompare(b.type));
 
-  const configs = db.prepare("SELECT * FROM worker_save_configs WHERE worker_id = ?").all(workerId);
+  const configs = db.prepare("SELECT * FROM worker_save_configs WHERE worker_id = ? AND doc_type IN ('cert', 'packing')").all(workerId);
   const map = new Map();
   configs.forEach(c => map.set(`${c.template_id}_${c.doc_type}`, c));
 
@@ -2603,6 +2603,11 @@ app.post('/api/worker/authorizations/sync', (req, res) => {
 });
 
 // --- W610 Address Management APIs ---
+app.get('/api/worker/w610/devices', requireWorkerAuth, (req, res) => {
+  const devices = db.prepare('SELECT * FROM w610_devices WHERE is_enabled = 1 ORDER BY id DESC').all();
+  res.json(devices);
+});
+
 app.get('/api/admin/w610', (req, res) => {
   const devices = db.prepare('SELECT * FROM w610_devices ORDER BY id DESC').all();
   res.json(devices);
@@ -2881,9 +2886,13 @@ app.get('/api/w610/tasks/:taskId', (req, res) => {
   });
 });
 
-app.get('/api/worker/w610-tasks/pending', (req, res) => {
+app.get('/api/worker/w610-tasks/pending', requireWorkerAuth, (req, res) => {
   const workerId = req.headers['x-worker-id'] || req.query.workerId;
   if (!workerId) return res.status(400).json({ error: '缺少 workerId' });
+
+  // Lease recovery: recover stuck PROCESSING tasks if updated_at is older than 60s
+  const cutoff = new Date(Date.now() - 60000).toISOString();
+  db.prepare("UPDATE w610_tasks SET status = 'PENDING' WHERE worker_id = ? AND status = 'PROCESSING' AND updated_at < ?").run(workerId, cutoff);
 
   const tasks = db.prepare("SELECT * FROM w610_tasks WHERE worker_id = ? AND status = 'PENDING'").all(workerId);
   const now = new Date().toISOString();

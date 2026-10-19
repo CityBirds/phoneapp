@@ -425,25 +425,45 @@ class ExecutionWorker {
       const action = task.action;
       let w610Device = task.w610Device || payload.w610Device;
 
-      const isMock = !!(payload.isMock || process.env.NODE_ENV === 'test' || (w610Device && w610Device.ip === '127.0.0.1'));
+      // COMM-15: Mock mode is ONLY triggered when explicitly enabled for isolated tests
+      const isMock = Boolean(payload.isMock || payload.enableMock || payload.isTestMock);
 
       if (action === 'probe') {
         let devices = [];
+        let fetchError = null;
+
         if (payload.devices && Array.isArray(payload.devices) && payload.devices.length > 0) {
           devices = payload.devices;
         } else {
           try {
-            const dRes = await fetch(`${this.serverUrl}/api/w610/devices`);
-            if (dRes.ok) devices = await dRes.json();
-          } catch (e) {}
+            const dRes = await fetch(`${this.serverUrl}/api/worker/w610/devices`, { headers: this.workerAuthHeaders() });
+            if (dRes.ok) {
+              devices = await dRes.json();
+            } else {
+              fetchError = `拉取 W610 设备清单接口失败: HTTP ${dRes.status}`;
+            }
+          } catch (e) {
+            fetchError = `拉取 W610 设备清单网络失败: ${e.message}`;
+          }
+        }
+
+        if (fetchError) {
+          await this.reportW610TaskResult(task.id, 'FAILED', null, fetchError);
+          return;
+        }
+
+        if (devices.length === 0) {
+          await this.reportW610TaskResult(task.id, 'SUCCESS', { probeResults: [], configuredStatus: 'UNCONFIGURED', message: '未配置 W610 设备' });
+          return;
         }
 
         const probeResults = [];
         for (const dev of devices) {
           let http_ok = false;
           let device_ok = false;
+          let detail = '';
 
-          if (isMock || dev.ip === '127.0.0.1' || dev.mock) {
+          if (isMock) {
             http_ok = dev.ip !== '0.0.0.0' && dev.ip !== 'invalid_host';
             device_ok = http_ok && !dev.no_device;
           } else {
@@ -452,8 +472,15 @@ class ExecutionWorker {
               http_ok = true;
               try {
                 const info = poa200.unpackDeviceInfo(reqRes.dataBuffer);
-                if (info && info.SnNo) device_ok = true;
-              } catch (e) {}
+                if (info && info.SnNo) {
+                  device_ok = true;
+                  detail = '真正在线';
+                }
+              } catch (e) {
+                detail = '协议校验失败';
+              }
+            } else {
+              detail = reqRes.error || '网络不通/设备无应答';
             }
           }
 
@@ -464,7 +491,8 @@ class ExecutionWorker {
             port: dev.port || 80,
             http_ok,
             device_ok,
-            status: device_ok ? 'ONLINE' : (http_ok ? 'W610_ONLY' : 'OFFLINE')
+            status: device_ok ? 'ONLINE' : (http_ok ? 'W610_ONLY' : 'OFFLINE'),
+            detail
           });
         }
 
@@ -478,7 +506,7 @@ class ExecutionWorker {
 
       if (action === 'read_device') {
         let info = null;
-        if (isMock || w610Device.ip === '127.0.0.1' || w610Device.mock) {
+        if (isMock) {
           if (w610Device.ip === '0.0.0.0' || payload.mockFailStage === 'w610_http') {
             throw new Error('W610 HTTP 连接失败: 无法连接到目标 IP 地址');
           }
@@ -526,52 +554,94 @@ class ExecutionWorker {
           }
         }
 
+        // P0 Safety Requirement: Re-read complete original 248-byte INFO_DEVICE block before write
+        let originalBuf = null;
+        let originalInfo = null;
+
+        if (isMock) {
+          originalBuf = poa200.createMockDeviceInfo(payload.mockDeviceInfo || {});
+          originalInfo = poa200.unpackDeviceInfo(originalBuf);
+        } else {
+          const origRes = await poa200.sendW610Request(w610Device, poa200.CMD_READ_DATA, poa200.ADDR_INFO_DEVICE, null, 5000);
+          if (!origRes.ok || !origRes.dataBuffer || origRes.dataBuffer.length < 248) {
+            throw new Error(`写前读取设备原始 INFO_DEVICE 块失败，禁止写入以防破坏/清空设备参数: ${origRes.error || '数据块不完整'}`);
+          }
+          originalBuf = origRes.dataBuffer;
+          originalInfo = poa200.unpackDeviceInfo(originalBuf);
+        }
+
+        // Pack updated device info using originalBuf as baseline
+        const packBuf = poa200.packDeviceInfo({ SnNo: newSn, OutDate: newOutDate, ChangeParFlag: 1, isMock }, originalBuf);
+
         // Write SN and OutDate (cmd 0x0101)
-        if (isMock || w610Device.ip === '127.0.0.1' || w610Device.mock) {
+        if (isMock) {
           if (payload.mockFailStage === 'write_timeout') {
-            throw new Error('写入设备数据超时: W610 无响应');
+            throw new Error('写入设备数据超时: W610 无响应 (RESULT_UNKNOWN)');
           }
         } else {
-          const packBuf = poa200.packDeviceInfo({ SnNo: newSn, OutDate: newOutDate, ChangeParFlag: 1 });
           const writeRes = await poa200.sendW610Request(w610Device, poa200.CMD_WRITE_DATA, poa200.ADDR_INFO_DEVICE, packBuf, 5000);
           if (!writeRes.ok) {
-            throw new Error(`写入设备序列号和日期失败: ${writeRes.error}`);
+            throw new Error(`写入设备序列号和日期失败 (${writeRes.stage || 'WRITE_FAILED'}): ${writeRes.error}`);
           }
         }
 
         // Re-read and verify (cmd 0x0102)
+        let rereadBuf = null;
         let rereadInfo = null;
-        if (isMock || w610Device.ip === '127.0.0.1' || w610Device.mock) {
+        if (isMock) {
           if (payload.mockFailStage === 'reread_mismatch') {
-            rereadInfo = poa200.unpackDeviceInfo(poa200.createMockDeviceInfo({ SnNo: 'WRONG_SN', OutDate: newOutDate }));
+            rereadBuf = poa200.createMockDeviceInfo({ SnNo: 'WRONG_SN', OutDate: newOutDate });
+            rereadInfo = poa200.unpackDeviceInfo(rereadBuf);
           } else if (payload.mockFailStage === 'reread_timeout') {
             throw new Error('写入后回读核验超时: 设备未在规定时间内返回数据');
           } else {
-            rereadInfo = poa200.unpackDeviceInfo(poa200.createMockDeviceInfo({ SnNo: newSn, OutDate: newOutDate }));
+            rereadBuf = poa200.packDeviceInfo({ SnNo: newSn, OutDate: newOutDate, ChangeParFlag: 1, isMock }, originalBuf);
+            rereadInfo = poa200.unpackDeviceInfo(rereadBuf);
           }
         } else {
           const rereadRes = await poa200.sendW610Request(w610Device, poa200.CMD_READ_DATA, poa200.ADDR_INFO_DEVICE, null, 5000);
-          if (!rereadRes.ok) {
-            throw new Error(`写入后回读读取失败: ${rereadRes.error}`);
+          if (!rereadRes.ok || !rereadRes.dataBuffer || rereadRes.dataBuffer.length < 248) {
+            throw new Error(`写入后回读读取失败: ${rereadRes.error || '数据块不完整'}`);
           }
-          rereadInfo = poa200.unpackDeviceInfo(rereadRes.dataBuffer);
+          rereadBuf = rereadRes.dataBuffer;
+          rereadInfo = poa200.unpackDeviceInfo(rereadBuf);
         }
 
+        // Verify target fields
         if (rereadInfo.SnNo !== newSn || rereadInfo.OutDate !== newOutDate) {
           throw new Error(`回读核验失败！设备中读取到的序列号/日期 [SN=${rereadInfo.SnNo}, Date=${rereadInfo.OutDate}] 与提交值 [SN=${newSn}, Date=${newOutDate}] 不一致！禁止归档结果！`);
         }
 
-        // Read full info and O2 calibration
+        // Verify non-target fields were NOT corrupted
+        if (rereadInfo.typecode !== originalInfo.typecode || rereadInfo.typeName !== originalInfo.typeName) {
+          throw new Error(`回读核验失败！设备非目标只读参数 (typecode/typeName) 被修改/破坏 (${rereadInfo.typecode}/${rereadInfo.typeName} vs ${originalInfo.typecode}/${originalInfo.typeName})！禁止归档！`);
+        }
+
+        // Read O2 calibration
         let o2CalData = null;
-        if (isMock || w610Device.ip === '127.0.0.1' || w610Device.mock) {
-          const mockO2Buf = poa200.createMockO2CalFile();
-          o2CalData = poa200.unpackO2CalFile(mockO2Buf);
+        let o2ReadOk = false;
+        let o2ReadError = null;
+
+        if (isMock) {
+          if (payload.mockFailStage === 'o2_read_fail') {
+            o2ReadOk = false;
+            o2ReadError = '读取 O2 标定数据超时';
+          } else {
+            const mockO2Buf = poa200.createMockO2CalFile();
+            o2CalData = poa200.unpackO2CalFile(mockO2Buf);
+            o2ReadOk = true;
+          }
         } else {
           const o2Res = await poa200.sendW610Request(w610Device, poa200.CMD_READ_DATA, poa200.ADDR_O2CALFILE, null, 5000);
-          if (o2Res.ok) {
-            o2CalData = poa200.unpackO2CalFile(o2Res.dataBuffer);
+          if (o2Res.ok && o2Res.dataBuffer && o2Res.dataBuffer.length >= 204) {
+            try {
+              o2CalData = poa200.unpackO2CalFile(o2Res.dataBuffer);
+              o2ReadOk = true;
+            } catch (e) {
+              o2ReadError = `O2 标定数据解析失败: ${e.message}`;
+            }
           } else {
-            o2CalData = { error: o2Res.error };
+            o2ReadError = o2Res.error || '读取 O2 标定数据失败';
           }
         }
 
@@ -591,27 +661,43 @@ class ExecutionWorker {
         const dateStr = `${yyyy}${mm}${dd}`;
 
         const devInfoName = `POA200_${rereadInfo.SnNo}_DeviceInfo_${dateStr}.json`;
-        const o2CalibName = `POA200_${rereadInfo.SnNo}_O2Calib_${dateStr}.json`;
-
         if (payload.mockFailStage === 'save_file_fail') {
           throw new Error('文件保存失败: 目标磁盘空间不足或无写入权限');
         }
 
         const devInfoTarget = handleFileConflictAndOverwrite(saveDir, devInfoName, true);
-        const o2CalibTarget = handleFileConflictAndOverwrite(saveDir, o2CalibName, true);
-
         fs.writeFileSync(devInfoTarget.officialFilePath, JSON.stringify(rereadInfo, null, 2), 'utf-8');
-        fs.writeFileSync(o2CalibTarget.officialFilePath, JSON.stringify(o2CalData, null, 2), 'utf-8');
+
+        const filesSaved = [{ name: devInfoName, path: devInfoTarget.officialFilePath }];
+
+        // Only save O2 calibration JSON file if O2 read succeeded (do NOT write error JSON)
+        if (o2ReadOk && o2CalData) {
+          const o2CalibName = `POA200_${rereadInfo.SnNo}_O2Calib_${dateStr}.json`;
+          const o2CalibTarget = handleFileConflictAndOverwrite(saveDir, o2CalibName, true);
+          fs.writeFileSync(o2CalibTarget.officialFilePath, JSON.stringify(o2CalData, null, 2), 'utf-8');
+          filesSaved.push({ name: o2CalibName, path: o2CalibTarget.officialFilePath });
+        }
+
+        if (!o2ReadOk) {
+          await this.reportW610TaskResult(task.id, 'FAILED', {
+            writeOk: true,
+            rereadOk: true,
+            o2CalibOk: false,
+            verifiedSn: rereadInfo.SnNo,
+            verifiedOutDate: rereadInfo.OutDate,
+            filesSaved,
+            stage: 'O2_READ_FAILED'
+          }, `设备序列号与日期修改并核验成功，但读取 O2 标定数据失败: ${o2ReadError}`);
+          return;
+        }
 
         await this.reportW610TaskResult(task.id, 'SUCCESS', {
           writeOk: true,
           rereadOk: true,
+          o2CalibOk: true,
           verifiedSn: rereadInfo.SnNo,
           verifiedOutDate: rereadInfo.OutDate,
-          filesSaved: [
-            { name: devInfoName, path: devInfoTarget.officialFilePath },
-            { name: o2CalibName, path: o2CalibTarget.officialFilePath }
-          ]
+          filesSaved
         });
         return;
       }
