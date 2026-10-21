@@ -2846,13 +2846,15 @@ app.post('/api/w610/tasks', (req, res) => {
   }
 
   const now = new Date().toISOString();
-  // Attach comm save config details to payload if write_and_save
+  // Attach comm save config details to payload if write_and_save or read_device
   let fullPayload = { ...payload };
-  if (action === 'write_and_save') {
+  if (action === 'write_and_save' || action === 'read_device') {
     const commCfg = db.prepare("SELECT * FROM worker_save_configs WHERE worker_id = ? AND template_id = ? AND doc_type = 'comm'").get(workerId, `comm_${model}`);
-    fullPayload.rootDir = commCfg.root_dir;
-    fullPayload.saveMode = commCfg.save_mode;
-    fullPayload.subfolderRule = commCfg.subfolder_rule;
+    if (commCfg && commCfg.is_enabled && commCfg.check_status === 'PASSED') {
+      fullPayload.rootDir = commCfg.root_dir;
+      fullPayload.saveMode = commCfg.save_mode;
+      fullPayload.subfolderRule = commCfg.subfolder_rule;
+    }
   }
 
   // Insert w610 task

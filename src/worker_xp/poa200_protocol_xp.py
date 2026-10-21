@@ -754,3 +754,32 @@ def create_mock_cal_value_o2():
     struct.pack_into('<H', buf, 48, 1)
     struct.pack_into('<H', buf, 50, 1)
     return bytes(buf) if sys.version_info[0] >= 3 else str(buf)
+
+
+def unpack_cal_file(buf):
+    if len(buf) < 4:
+        raise ValueError("CALFILE buffer length invalid (%d < 4)" % len(buf))
+    pt_cnt = struct.unpack('<I', buf[0:4])[0]
+    point = []
+    max_possible = min(16, (len(buf) - 4) // 12)
+    offset = 4
+    for _ in range(max_possible):
+        c, v, x = struct.unpack('<3f', buf[offset:offset+12])
+        point.append({'code': c, 'Value': v, 'xCode': x})
+        offset += 12
+    return {'ptCnt': pt_cnt, 'point': point}
+
+
+def create_mock_cal_file(data_obj=None):
+    if data_obj is None:
+        data_obj = {}
+    buf = bytearray(196)
+    struct.pack_into('<I', buf, 0, data_obj.get('ptCnt', 2))
+    offset = 4
+    for i in range(16):
+        pts = data_obj.get('point') or []
+        pt = pts[i] if i < len(pts) else {'code': 25.0 + i, 'Value': 25.0 + i, 'xCode': 0.0}
+        struct.pack_into('<3f', buf, offset, pt.get('code', 0.0), pt.get('Value', 0.0), pt.get('xCode', 0.0))
+        offset += 12
+    return bytes(buf) if sys.version_info[0] >= 3 else str(buf)
+

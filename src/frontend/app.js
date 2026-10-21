@@ -2474,13 +2474,20 @@ async function readSerialDeviceInfo() {
             `</div>`;
         }
 
+        let savedNotice = '';
+        if (task.result && task.result.filesSaved && task.result.filesSaved.length > 0) {
+          savedNotice = `<div style="margin-top: 6px; font-size: 12px; color: #047857;">已归档 ${task.result.filesSaved.length} 个配置文件至执行端：${task.result.filesSaved.map(f => `<code>${escapeHtml(f.name)}</code>`).join('、')}</div>`;
+        }
+
         resultTitle.innerText = '✅ 设备信息读取成功';
         resultTitle.style.color = '#166534';
         resultBody.innerHTML = `
           <div style="color: #15803d; font-weight: bold; margin-bottom: 6px;">已从设备成功读取真实参数！</div>
-          <div>请在下方编辑框核对并修正<b>序列号</b>与<b>生产日期</b>，确认无误后点击“提交写入并保存文件”。</div>
+          ${savedNotice}
+          <div style="margin-top: 4px;">请在下方编辑框核对并修正<b>序列号</b>与<b>生产日期</b>，确认无误后点击“提交写入并保存文件”。</div>
           ${diagHtml}
         `;
+
 
       } else if (task.status === 'FAILED') {
         completed = true;

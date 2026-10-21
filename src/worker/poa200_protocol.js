@@ -464,6 +464,31 @@ function unpackCalValueO2(buf) {
 }
 
 /**
+ * Unpack CALFILE temperature calibration binary structure (ADDR_CALFILE 0xE400)
+ * ptCnt (uint32) + up to 16 CALPOINT (each 12 bytes: code float, Value float, xCode float)
+ */
+function unpackCalFile(buf) {
+  if (!buf || buf.length < 4) {
+    throw new Error(`CALFILE buffer length invalid (${buf ? buf.length : 0} < 4)`);
+  }
+
+  const ptCnt = buf.readUInt32LE(0);
+  const point = [];
+  const maxPossible = Math.min(16, Math.floor((buf.length - 4) / 12));
+  let offset = 4;
+  for (let i = 0; i < maxPossible; i++) {
+    point.push({
+      code: buf.readFloatLE(offset),
+      Value: buf.readFloatLE(offset + 4),
+      xCode: buf.readFloatLE(offset + 8)
+    });
+    offset += 12;
+  }
+
+  return { ptCnt, point };
+}
+
+/**
  * Transport Adapters with layered diagnostic status reporting and hard overall timeout bounds
  */
 
@@ -932,6 +957,20 @@ function createMockCalValueO2() {
   return buf;
 }
 
+function createMockCalFile(dataObj = {}) {
+  const buf = Buffer.alloc(196);
+  buf.writeUInt32LE(dataObj.ptCnt !== undefined ? dataObj.ptCnt : 2, 0);
+  let offset = 4;
+  for (let i = 0; i < 16; i++) {
+    const pt = (dataObj.point && dataObj.point[i]) || { code: 25.0 + i, Value: 25.0 + i, xCode: 0.0 };
+    buf.writeFloatLE(pt.code || 0, offset);
+    buf.writeFloatLE(pt.Value || 0, offset + 4);
+    buf.writeFloatLE(pt.xCode || 0, offset + 8);
+    offset += 12;
+  }
+  return buf;
+}
+
 module.exports = {
   CMD_READ_MEASUREMENT,
   CMD_WRITE_DATA,
@@ -948,8 +987,11 @@ module.exports = {
   packDeviceInfo,
   unpackO2CalFile,
   unpackCalValueO2,
+  unpackCalFile,
   sendW610Request,
   createMockDeviceInfo,
   createMockO2CalFile,
-  createMockCalValueO2
+  createMockCalValueO2,
+  createMockCalFile
 };
+

@@ -240,6 +240,65 @@ test('W610-05: POA200 首次读取正确，序列号和日期自动带出', asyn
   assert.equal(taskData.result.info.VerNo, 'V1.0.2');
 });
 
+test('W610-05B: read_device 依次获取测量(0x84)、设备信息(0xE000)、校准(0xE200)、温度校准(0xE400)并归档三个文件', async () => {
+  const commDir = path.join(testBaseDir, 'comm_records_read3');
+  fs.mkdirSync(commDir, { recursive: true });
+
+  const worker = new ExecutionWorker({ workerId: 'worker-w610-05b', name: '电脑05B', serverUrl, workingDir: testBaseDir, enableTestMock: true });
+  await worker.sendHeartbeat();
+
+  await fetch(`${serverUrl}/api/admin/workers/worker-w610-05b/allowed-paths`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-admin-token': 'phoneapp-admin-secret' },
+    body: JSON.stringify({ rootPath: commDir, allowRead: true, allowWrite: true, allowCreate: true })
+  });
+
+  await fetch(`${serverUrl}/api/admin/workers/worker-w610-05b/comm-configs`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-admin-token': 'phoneapp-admin-secret' },
+    body: JSON.stringify({ model: 'POA200', rootDir: commDir, saveMode: 'subfolder', allowCreate: 1, isEnabled: 1 })
+  });
+
+  await worker.pollAndExecuteDirectoryChecks();
+
+  const taskRes = await fetch(`${serverUrl}/api/w610/tasks`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      workerId: 'worker-w610-05b',
+      w610Id: 105,
+      action: 'read_device',
+      model: 'POA200',
+      payload: {
+        isMock: true,
+        w610Device: { id: 105, ip: '127.0.0.1', port: 80 },
+        mockDeviceInfo: { SnNo: 'AP10007513', OutDate: '2026/10/14', VerNo: 'V1.0.2' }
+      }
+    })
+  });
+
+  const taskId = (await taskRes.json()).task.id;
+
+  await worker.pollAndExecuteW610Tasks();
+
+  const taskData = await (await fetch(`${serverUrl}/api/w610/tasks/${taskId}`)).json();
+  assert.equal(taskData.status, 'SUCCESS');
+  assert.equal(taskData.result.deviceSn, 'AP10007513');
+  assert.equal(taskData.result.deviceAddr, 10001);
+  assert.ok(taskData.result.calValue, '返回测量数据');
+  assert.ok(taskData.result.o2CalData, '返回O2校准数据');
+  assert.ok(taskData.result.tempCalData, '返回温度校准数据');
+  assert.equal(taskData.result.filesSaved.length, 3, '已保存三个配置文件');
+
+  const targetSubfolder = path.join(commDir, 'AP10007513');
+  assert.ok(fs.existsSync(targetSubfolder), '按序列号创建子目录成功');
+  const files = fs.readdirSync(targetSubfolder);
+  assert.ok(files.some(f => f.includes('DeviceInfo')), '包含 DeviceInfo 文件');
+  assert.ok(files.some(f => f.includes('O2Calib')), '包含 O2Calib 文件');
+  assert.ok(files.some(f => f.includes('TempCalib')), '包含 TempCalib 文件');
+});
+
+
 test('W610-06 & W610-07 & W610-08: 修改后写入、回读核验一致性，JSON 文件生成与同名冲突处理', async () => {
   const workerDir = path.join(testBaseDir, 'worker_dir_06');
   const commDir = path.join(testBaseDir, 'comm_records_06');
