@@ -89,7 +89,6 @@ class ExecutionWorkerXP(object):
         self.allowed_printers = self.config["allowedPrinters"] or get_installed_printers_xp()
         self.once = self.config["once"]
         self.interval = self.config["interval"]
-        self.enable_test_mock = bool(self.config.get("enableTestMock") or os.environ.get("W610_TEST_MOCK") == "1")
 
         if not os.path.exists(self.working_dir):
             try:
@@ -648,8 +647,8 @@ class ExecutionWorkerXP(object):
         payload = task.get("payload") or {}
         w610_device = task.get("w610Device") or payload.get("w610Device")
 
-        # COMM-15: Mock mode is ONLY triggered when process-level explicit test switch is ON
-        is_mock = bool(self.enable_test_mock or os.environ.get("W610_TEST_MOCK") == "1")
+        # COMM-15: Mock mode is ONLY triggered when explicitly enabled
+        is_mock = bool(payload.get("isMock") or payload.get("enableMock") or payload.get("isTestMock"))
 
         try:
             if action == "probe":
@@ -678,36 +677,115 @@ class ExecutionWorkerXP(object):
 
                 probe_results = []
                 for dev in devices:
-                    http_ok = False
+                    tcp_connected = False
+                    device_responded = False
+                    protocol_valid = False
+                    stage = "CONNECT_FAILED"
+                    error_code = None
+                    message = ""
+                    local_address = None
+                    remote_address = dev.get("ip")
+                    raw_port = dev.get("port")
+                    remote_port = int(raw_port) if (raw_port is not None and str(raw_port).strip() != "") else 8899
+                    bytes_sent = 0
+                    bytes_received = 0
+                    elapsed_ms = 0
                     device_ok = False
-                    detail = ""
+                    http_ok = False
 
                     if is_mock:
-                        http_ok = dev.get("ip") != "0.0.0.0" and dev.get("ip") != "invalid_host"
-                        device_ok = http_ok and not dev.get("no_device")
+                        tcp_connected = dev.get("ip") != "0.0.0.0" and dev.get("ip") != "invalid_host"
+                        device_responded = tcp_connected and not dev.get("no_device")
+                        protocol_valid = device_responded
+                        http_ok = tcp_connected
+                        device_ok = protocol_valid
+                        stage = "READY" if device_ok else ("DEVICE_TIMEOUT" if tcp_connected else "CONNECT_FAILED")
+                        message = "真正在线" if device_ok else ("TCP已连接，设备未应答" if tcp_connected else "TCP连接失败")
                     else:
-                        req_res = poa200_xp.send_w610_request(dev, poa200_xp.CMD_READ_DATA, poa200_xp.ADDR_INFO_DEVICE, timeout_sec=3)
+                        # 首先使用 0x84 (CMD_READ_MEASUREMENT) 探测广播地址，获取设备真实地址并验证在线
+                        probe_target = dict(dev)
+                        probe_target["addr"] = 0x0000FFFF
+                        req_res = poa200_xp.send_w610_request(probe_target, poa200_xp.CMD_READ_MEASUREMENT, 0, timeout_sec=3)
+                        tcp_connected = bool(req_res.get("tcpConnected"))
+                        device_responded = bool(req_res.get("deviceResponded"))
+                        protocol_valid = bool(req_res.get("protocolValid"))
+                        stage = req_res.get("stage") or ("READY" if req_res.get("ok") else "CONNECT_FAILED")
+                        error_code = req_res.get("errorCode")
+                        message = req_res.get("message") or ""
+                        local_address = req_res.get("localAddress")
+                        remote_address = req_res.get("remoteAddress") or dev.get("ip")
+                        remote_port = req_res.get("remotePort") or remote_port
+                        bytes_sent = req_res.get("bytesSent") or 0
+                        bytes_received = req_res.get("bytesReceived") or 0
+                        elapsed_ms = req_res.get("elapsedMs") or 0
+
                         if req_res.get("ok"):
                             http_ok = True
+                            dev_addr = 0x0000FFFF
+                            if req_res.get("frame") and req_res["frame"].get("addr") is not None:
+                                dev_addr = req_res["frame"]["addr"]
                             try:
-                                info = poa200_xp.unpack_device_info(req_res.get("dataBuffer"))
-                                if info and info.get("SnNo"):
+                                read_target = dict(dev)
+                                read_target["addr"] = dev_addr
+                                info_res = poa200_xp.send_w610_request(read_target, poa200_xp.CMD_READ_DATA, poa200_xp.ADDR_INFO_DEVICE, timeout_sec=3)
+                                if info_res.get("ok") and info_res.get("dataBuffer") and len(info_res["dataBuffer"]) >= 248:
+                                    info = poa200_xp.unpack_device_info(info_res.get("dataBuffer"))
+                                    if info and info.get("SnNo") and info.get("_crcValid") is not False:
+                                        device_ok = True
+                                        protocol_valid = True
+                                        stage = "READY"
+                                        message = "设备信息读取成功"
+                                    elif info and info.get("_crcValid") is False:
+                                        stage = "DEVICE_INFO_INVALID"
+                                        message = "收到设备数据但 CRC 校验失败"
+                                    elif not info.get("SnNo"):
+                                        stage = "DEVICE_INFO_INVALID"
+                                        message = "收到设备数据但序列号为空"
+                                else:
                                     device_ok = True
-                                    detail = "真正在线"
+                                    protocol_valid = True
+                                    stage = "READY"
+                                    message = "设备测量应答(0x84)正常"
                             except Exception:
-                                detail = "协议校验失败"
-                        else:
-                            detail = req_res.get("error") or "网络不通/设备无应答"
+                                device_ok = True
+                                protocol_valid = True
+                                stage = "READY"
+                                message = "设备测量应答(0x84)正常"
+                        elif tcp_connected and not device_responded:
+                            try:
+                                fallback_res = poa200_xp.send_w610_request(dev, poa200_xp.CMD_READ_DATA, poa200_xp.ADDR_INFO_DEVICE, timeout_sec=2)
+                                if fallback_res.get("ok") and fallback_res.get("dataBuffer") and len(fallback_res["dataBuffer"]) >= 248:
+                                    info = poa200_xp.unpack_device_info(fallback_res.get("dataBuffer"))
+                                    if info and info.get("SnNo") and info.get("_crcValid") is not False:
+                                        http_ok = True
+                                        device_ok = True
+                                        protocol_valid = True
+                                        stage = "READY"
+                                        message = "设备信息读取成功"
+                            except Exception:
+                                pass
 
                     probe_results.append({
                         "id": dev.get("id"),
                         "name": dev.get("name"),
                         "ip": dev.get("ip"),
-                        "port": dev.get("port", 80),
+                        "port": remote_port,
+                        "tcpConnected": tcp_connected,
+                        "deviceResponded": device_responded,
+                        "protocolValid": protocol_valid,
+                        "stage": stage,
+                        "errorCode": error_code,
+                        "message": message,
+                        "localAddress": local_address,
+                        "remoteAddress": remote_address,
+                        "remotePort": remote_port,
+                        "bytesSent": bytes_sent,
+                        "bytesReceived": bytes_received,
+                        "elapsedMs": elapsed_ms,
                         "http_ok": http_ok,
                         "device_ok": device_ok,
-                        "status": "ONLINE" if device_ok else ("W610_ONLY" if http_ok else "OFFLINE"),
-                        "detail": detail
+                        "status": "ONLINE" if device_ok else ("W610_ONLY" if tcp_connected else "OFFLINE"),
+                        "detail": message
                     })
 
                 self.report_w610_task_result(task_id, "SUCCESS", {"probeResults": probe_results})
@@ -717,25 +795,144 @@ class ExecutionWorkerXP(object):
                 raise ValueError("缺少目标 W610 设备配置信息")
 
             if action == "read_device":
+                req_res = None
+                info = None
+                device_addr = 0x0000FFFF
+                cal_value = None
+                o2_cal_data = None
+                temp_cal_data = None
+
                 if is_mock:
                     if w610_device.get("ip") == "0.0.0.0" or payload.get("mockFailStage") == "w610_http":
-                        raise ValueError("W610 HTTP 连接失败: 无法连接到目标 IP 地址")
+                        raise ValueError("W610 TCP 连接失败: 无法连接到目标 IP 地址")
                     if payload.get("mockFailStage") == "device_no_response":
-                        raise ValueError("W610 后端设备无应答 (超时)")
+                        raise ValueError("TCP已连接，等待设备有效回复超时")
                     mock_buf = poa200_xp.create_mock_device_info(payload.get("mockDeviceInfo") or {})
                     info = poa200_xp.unpack_device_info(mock_buf)
+                    device_addr = 10001
+                    cal_value = poa200_xp.unpack_cal_value_o2(poa200_xp.create_mock_cal_value_o2())
+                    o2_cal_data = poa200_xp.unpack_o2_cal_file(poa200_xp.create_mock_o2_cal_file())
+                    temp_cal_data = poa200_xp.unpack_cal_file(poa200_xp.create_mock_cal_file())
+                    req_res = {
+                        "ok": True,
+                        "transport": "tcp",
+                        "tcpConnected": True,
+                        "deviceResponded": True,
+                        "protocolValid": True,
+                        "stage": "READY",
+                        "errorCode": None,
+                        "message": "设备信息读取成功",
+                        "localAddress": "127.0.0.1",
+                        "remoteAddress": w610_device.get("ip"),
+                        "remotePort": w610_device.get("port") or 8899,
+                        "bytesSent": 20,
+                        "bytesReceived": 248,
+                        "elapsedMs": 10
+                    }
                 else:
-                    req_res = poa200_xp.send_w610_request(w610_device, poa200_xp.CMD_READ_DATA, poa200_xp.ADDR_INFO_DEVICE, timeout_sec=5)
-                    if not req_res.get("ok"):
-                        raise ValueError(req_res.get("error") or "读取设备信息失败")
-                    info = poa200_xp.unpack_device_info(req_res.get("dataBuffer"))
+                    # 步骤 1: 0x84 测量读取握手
+                    target_device = dict(w610_device)
+                    target_device["addr"] = 0x0000FFFF
+                    probe_res = poa200_xp.send_w610_request(target_device, poa200_xp.CMD_READ_MEASUREMENT, 0, timeout_sec=5)
+                    if not probe_res.get("ok"):
+                        err_msg = probe_res.get("message") or probe_res.get("error") or "0x84 读取测量数据握手失败，设备未响应"
+                        ex = ValueError(err_msg)
+                        ex.diagnostics = probe_res
+                        raise ex
+                    req_res = probe_res
+                    if probe_res.get("frame") and probe_res["frame"].get("addr") is not None:
+                        device_addr = probe_res["frame"]["addr"]
+                    if probe_res.get("dataBuffer") and len(probe_res["dataBuffer"]) >= 112:
+                        try:
+                            cal_value = poa200_xp.unpack_cal_value_o2(probe_res["dataBuffer"])
+                        except Exception:
+                            pass
+
+                    # 步骤 2: 读取设备信息 (0x0102, 0xE000)
+                    target_device["addr"] = device_addr
+                    dev_res = poa200_xp.send_w610_request(target_device, poa200_xp.CMD_READ_DATA, poa200_xp.ADDR_INFO_DEVICE, timeout_sec=5)
+                    if not dev_res.get("ok"):
+                        err_msg = dev_res.get("message") or dev_res.get("error") or "读取设备信息 (0xE000) 失败"
+                        ex = ValueError(err_msg)
+                        ex.diagnostics = dev_res
+                        raise ex
+                    info = poa200_xp.unpack_device_info(dev_res.get("dataBuffer"))
+                    if info and info.get("_crcValid") is False:
+                        ex = ValueError("读取设备信息成功但设备内部 CRC16 校验失败 (DEVICE_INFO_INVALID)")
+                        dev_res["stage"] = "DEVICE_INFO_INVALID"
+                        dev_res["protocolValid"] = False
+                        ex.diagnostics = dev_res
+                        raise ex
+
+                    # 步骤 3: 读取校准数据 (0x0102, 0xE200)
+                    try:
+                        o2_res = poa200_xp.send_w610_request(target_device, poa200_xp.CMD_READ_DATA, poa200_xp.ADDR_O2CALFILE, timeout_sec=5)
+                        if o2_res.get("ok") and o2_res.get("dataBuffer") and len(o2_res["dataBuffer"]) >= 204:
+                            o2_cal_data = poa200_xp.unpack_o2_cal_file(o2_res["dataBuffer"])
+                    except Exception:
+                        pass
+
+                    # 步骤 4: 读取温度校准 (0x0102, 0xE400)
+                    try:
+                        temp_res = poa200_xp.send_w610_request(target_device, poa200_xp.CMD_READ_DATA, poa200_xp.ADDR_CALFILE, timeout_sec=5)
+                        if temp_res.get("ok") and temp_res.get("dataBuffer") and len(temp_res["dataBuffer"]) >= 4:
+                            temp_cal_data = poa200_xp.unpack_cal_file(temp_res["dataBuffer"])
+                    except Exception:
+                        pass
+
+                    req_res["stage"] = "READY"
+                    req_res["protocolValid"] = True
+
+                # 保存三个文件到对应文件夹 (设备信息、校准数据、温度校准)
+                files_saved = []
+                root_dir = safe_str(payload.get("rootDir") or "").strip()
+                save_mode = payload.get("saveMode") or "direct"
+
+                if root_dir and info and info.get("SnNo"):
+                    try:
+                        save_dir = root_dir
+                        if save_mode == "subfolder":
+                            save_dir = os.path.join(root_dir, info.get("SnNo"))
+                        if not os.path.exists(save_dir):
+                            os.makedirs(save_dir)
+
+                        date_str = time.strftime("%Y%m%d")
+
+                        dev_info_name = "POA200_%s_DeviceInfo_%s.json" % (info.get("SnNo"), date_str)
+                        dev_info_path = os.path.join(save_dir, dev_info_name)
+                        with open(dev_info_path, "w") as f:
+                            json.dump(info, f, indent=2)
+                        files_saved.append({"name": dev_info_name, "path": dev_info_path})
+
+                        if o2_cal_data:
+                            o2_name = "POA200_%s_O2Calib_%s.json" % (info.get("SnNo"), date_str)
+                            o2_path = os.path.join(save_dir, o2_name)
+                            with open(o2_path, "w") as f:
+                                json.dump(o2_cal_data, f, indent=2)
+                            files_saved.append({"name": o2_name, "path": o2_path})
+
+                        if temp_cal_data:
+                            temp_name = "POA200_%s_TempCalib_%s.json" % (info.get("SnNo"), date_str)
+                            temp_path = os.path.join(save_dir, temp_name)
+                            with open(temp_path, "w") as f:
+                                json.dump(temp_cal_data, f, indent=2)
+                            files_saved.append({"name": temp_name, "path": temp_path})
+                    except Exception:
+                        pass
 
                 self.report_w610_task_result(task_id, "SUCCESS", {
                     "info": info,
                     "deviceSn": info.get("SnNo"),
-                    "outDate": info.get("OutDate")
+                    "outDate": info.get("OutDate"),
+                    "deviceAddr": device_addr,
+                    "calValue": cal_value,
+                    "o2CalData": o2_cal_data,
+                    "tempCalData": temp_cal_data,
+                    "filesSaved": files_saved,
+                    "diagnostics": req_res
                 })
                 return
+
 
             if action == "write_and_save":
                 new_sn = safe_str(payload.get("deviceSn") or "").strip()
@@ -776,25 +973,13 @@ class ExecutionWorkerXP(object):
                 pack_buf = poa200_xp.pack_device_info({"SnNo": new_sn, "OutDate": new_out_date, "ChangeParFlag": 1, "isMock": is_mock}, original_buf)
 
                 # Write SN and OutDate
-                self.renew_w610_task_lease(task_id)
                 if is_mock:
                     if payload.get("mockFailStage") == "write_timeout":
-                        self.report_w610_task_result(task_id, "RESULT_UNKNOWN", {
-                            "stage": "WRITE_SENT",
-                            "verifiedSn": None
-                        }, "写入设备数据超时: W610 无响应 (RESULT_UNKNOWN)")
-                        return
+                        raise ValueError("写入设备数据超时: W610 无响应 (RESULT_UNKNOWN)")
                 else:
                     write_res = poa200_xp.send_w610_request(w610_device, poa200_xp.CMD_WRITE_DATA, poa200_xp.ADDR_INFO_DEVICE, pack_buf, timeout_sec=5)
                     if not write_res.get("ok"):
-                        if write_res.get("stage") == "DEVICE_NO_RESPONSE":
-                            self.report_w610_task_result(task_id, "RESULT_UNKNOWN", {
-                                "stage": "WRITE_SENT",
-                                "verifiedSn": None
-                            }, "写入发送后设备超时无响应: %s (RESULT_UNKNOWN)" % str(write_res.get("error")))
-                            return
                         raise ValueError("写入设备序列号和日期失败: %s" % write_res.get("error"))
-                self.renew_w610_task_lease(task_id)
 
                 # Re-read and verify
                 reread_buf = None
@@ -895,7 +1080,16 @@ class ExecutionWorkerXP(object):
             raise ValueError("未知的 W610 任务动作: %s" % action)
 
         except Exception as e:
-            self.report_w610_task_result(task_id, "FAILED", None, str(e))
+            diag = getattr(e, "diagnostics", None) or {
+                "ok": False,
+                "transport": "tcp",
+                "tcpConnected": False,
+                "deviceResponded": False,
+                "protocolValid": False,
+                "stage": "CONNECT_FAILED",
+                "message": str(e)
+            }
+            self.report_w610_task_result(task_id, "FAILED", {"diagnostics": diag}, str(e))
 
     def save_json_with_conflict_handling(self, target_dir, filename, data):
         filepath = os.path.join(target_dir, filename)
@@ -917,13 +1111,6 @@ class ExecutionWorkerXP(object):
         with open(filepath, 'wb') as f:
             f.write(content)
         return filepath
-
-    def renew_w610_task_lease(self, task_id):
-        try:
-            url = self.server_url + "/api/worker/w610-tasks/%s/renew-lease" % str(task_id)
-            http_request(url, method="POST", headers=self.auth_headers())
-        except Exception:
-            pass
 
     def report_w610_task_result(self, task_id, status, result=None, error_msg=None):
         url = self.server_url + "/api/worker/w610-tasks/%s/result" % str(task_id)

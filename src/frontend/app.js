@@ -2218,17 +2218,17 @@ async function handleSerialWorkerChange() {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
 
-    if (!data.configured) {
-      const workerOpt = document.querySelector(`#serial-worker-select option[value="${workerId}"]`);
-      const workerName = workerOpt ? workerOpt.innerText : workerId;
+    const workerOpt = document.querySelector(`#serial-worker-select option[value="${workerId}"]`);
+    const workerName = workerOpt ? workerOpt.innerText : workerId;
 
+    if (!data.configured) {
       banner.style.display = 'block';
       banner.style.background = '#fef2f2';
       banner.style.border = '1px solid #fca5a5';
       banner.style.color = '#991b1b';
       banner.innerHTML = `
         <strong>⚠️ 目标执行端未配置通信保存目录</strong><br>
-        执行端 [${escapeHtml(workerName)}] 尚未配置或启用 [${model}] 型号的通信文件保存目录！<br>
+        执行端 [${escapeHtml(workerName)}] (ID: ${escapeHtml(workerId)}) 尚未配置或启用 [${escapeHtml(model)}] 型号的通信文件保存目录！<br>
         <span style="font-size: 12px; color: #7f1d1d;">请提示管理员前往<b>【协调服务控制台 -> 执行终端 -> 配置目录】</b>中增加设备通信保存目录并启用。</span>
       `;
       return;
@@ -2240,6 +2240,7 @@ async function handleSerialWorkerChange() {
     banner.style.color = '#166534';
     banner.innerHTML = `
       <strong>✅ 执行端通信目录就绪</strong><br>
+      目标执行端: <b>${escapeHtml(workerName)}</b> (ID: <code>${escapeHtml(workerId)}</code>)<br>
       保存路径: <code style="background: #dcfce7; padding: 2px 6px; border-radius: 4px;">${escapeHtml(data.config.root_dir)}</code>
       (${data.config.save_mode === 'subfolder' ? '按序列号建子文件夹' : '直接保存根目录'})
     `;
@@ -2259,13 +2260,16 @@ async function probeW610Devices() {
   const workerId = serialState.activeWorkerId;
   if (!workerId) return;
 
+  serialState.probeVersion = (serialState.probeVersion || 0) + 1;
+  const currentProbeVersion = serialState.probeVersion;
+
   const w610Select = document.getElementById('serial-w610-select');
   const notice = document.getElementById('serial-w610-probe-notice');
   const readBtn = document.getElementById('btn-serial-read');
 
   w610Select.disabled = true;
   w610Select.innerHTML = '<option value="">正在由执行端探测 W610 设备...</option>';
-  if (notice) notice.innerText = '正在由所选执行端发起 HTTP 探测...';
+  if (notice) notice.innerText = '正在由所选执行端通过 TCP 与 W610 通信...';
 
   try {
     const taskRes = await fetch(`${API_BASE}/api/w610/tasks`, {
@@ -2287,14 +2291,21 @@ async function probeW610Devices() {
     let completed = false;
     let attempts = 0;
 
-    while (!completed && attempts < 15) {
+    while (!completed && attempts < 20) {
       await new Promise(r => setTimeout(r, 1000));
+      if (serialState.probeVersion !== currentProbeVersion || serialState.activeWorkerId !== workerId) {
+        return;
+      }
       attempts++;
 
       const pollRes = await fetch(`${API_BASE}/api/w610/tasks/${taskId}`);
       if (!pollRes.ok) continue;
 
       const task = await pollRes.json();
+      if (serialState.probeVersion !== currentProbeVersion || serialState.activeWorkerId !== workerId) {
+        return;
+      }
+
       if (task.status === 'SUCCESS') {
         completed = true;
         const probeResults = task.result ? (task.result.probeResults || []) : [];
@@ -2314,12 +2325,20 @@ async function probeW610Devices() {
           opt.value = dev.id;
 
           let statusText = ' (离线)';
-          if (dev.status === 'ONLINE') {
+          if (dev.stage === 'READY' || dev.device_ok) {
             statusText = ' (在线可通信)';
             if (!firstOnlineId) firstOnlineId = dev.id;
-          } else if (dev.status === 'W610_ONLY') {
-            statusText = ' (W610接口响应/设备未应答)';
+          } else if (dev.tcpConnected && !dev.deviceResponded) {
+            statusText = ' (TCP可连接，设备未应答)';
             if (!firstOnlineId) firstOnlineId = dev.id;
+          } else if (dev.deviceResponded && !dev.protocolValid) {
+            statusText = ' (收到数据但协议校验失败)';
+            if (!firstOnlineId) firstOnlineId = dev.id;
+          } else if (dev.tcpConnected) {
+            statusText = ' (TCP已连通，协议未就绪)';
+            if (!firstOnlineId) firstOnlineId = dev.id;
+          } else if (dev.tcpConnected === undefined) {
+            statusText = ' (旧版结果，阶段未知)';
           }
 
           opt.innerText = `${dev.name} [${dev.ip}:${dev.port}]${statusText}`;
@@ -2331,10 +2350,10 @@ async function probeW610Devices() {
           w610Select.value = firstOnlineId;
           serialState.activeW610Id = firstOnlineId;
           if (readBtn) readBtn.disabled = false;
-          if (notice) notice.innerText = '探测完成，已自动选中在线设备';
+          if (notice) notice.innerText = `探测完成 (TaskId #${taskId})，已自动选中可用设备。由所选执行端通过 TCP 与 W610 通信。`;
         } else {
           if (readBtn) readBtn.disabled = true;
-          if (notice) notice.innerText = '所有配置的 W610 均处于离线状态，请检查网络或串口连接';
+          if (notice) notice.innerText = `探测完成 (TaskId #${taskId})，所选 W610 设备未能完全就绪。详细错误请查看下拉菜单状态。`;
         }
 
       } else if (task.status === 'FAILED') {
@@ -2345,11 +2364,13 @@ async function probeW610Devices() {
     }
 
     if (!completed) {
+      if (serialState.probeVersion !== currentProbeVersion) return;
       w610Select.innerHTML = '<option value="">探测超时</option>';
-      if (notice) notice.innerText = '执行端响应超时，请检查执行端运行状态';
+      if (notice) notice.innerText = '执行端响应超时，页面可重新查询';
     }
 
   } catch (err) {
+    if (serialState.probeVersion !== currentProbeVersion) return;
     w610Select.innerHTML = '<option value="">探测异常</option>';
     if (notice) notice.innerText = '探测失败: ' + err.message;
   }
@@ -2444,22 +2465,49 @@ async function readSerialDeviceInfo() {
 
         document.getElementById('serial-device-card').style.display = 'block';
 
+        const diag = task.result ? task.result.diagnostics : null;
+        let diagHtml = '';
+        if (diag) {
+          diagHtml = `<div style="font-size: 11px; color: #475569; background: #f1f5f9; padding: 6px 8px; border-radius: 4px; margin-top: 6px;">` +
+            `阶段: ${escapeHtml(diag.stage || 'READY')} | TCP: ${diag.tcpConnected ? '已连通' : '未连通'} | 源地址: ${escapeHtml(diag.localAddress || '未知')} -> 目标: ${escapeHtml(diag.remoteAddress || '-')}:${diag.remotePort || 8899}` +
+            ` | 发送: ${diag.bytesSent || 0}B, 接收: ${diag.bytesReceived || 0}B (${diag.elapsedMs || 0}ms)` +
+            `</div>`;
+        }
+
+        let savedNotice = '';
+        if (task.result && task.result.filesSaved && task.result.filesSaved.length > 0) {
+          savedNotice = `<div style="margin-top: 6px; font-size: 12px; color: #047857;">已归档 ${task.result.filesSaved.length} 个配置文件至执行端：${task.result.filesSaved.map(f => `<code>${escapeHtml(f.name)}</code>`).join('、')}</div>`;
+        }
+
         resultTitle.innerText = '✅ 设备信息读取成功';
         resultTitle.style.color = '#166534';
         resultBody.innerHTML = `
           <div style="color: #15803d; font-weight: bold; margin-bottom: 6px;">已从设备成功读取真实参数！</div>
-          <div>请在下方编辑框核对并修正<b>序列号</b>与<b>生产日期</b>，确认无误后点击“提交写入并保存文件”。</div>
+          ${savedNotice}
+          <div style="margin-top: 4px;">请在下方编辑框核对并修正<b>序列号</b>与<b>生产日期</b>，确认无误后点击“提交写入并保存文件”。</div>
+          ${diagHtml}
         `;
+
 
       } else if (task.status === 'FAILED') {
         completed = true;
         document.getElementById('serial-device-card').style.display = 'none';
+
+        const diag = (task.result && task.result.diagnostics) || {};
+        let diagHtml = '';
+        if (diag.stage || diag.tcpConnected !== undefined) {
+          diagHtml = `<div style="font-size: 11px; color: #7f1d1d; background: #fee2e2; padding: 6px 8px; border-radius: 4px; margin-top: 6px;">` +
+            `诊断阶段: ${escapeHtml(diag.stage || 'FAILED')} | TCP已连通: ${diag.tcpConnected ? '是' : '否'} | 收到数据: ${diag.deviceResponded ? '是' : '否'}` +
+            `${diag.localAddress ? ` | 本地源地址: ${escapeHtml(diag.localAddress)}` : ''}` +
+            `</div>`;
+        }
 
         resultTitle.innerText = '❌ 读取设备信息失败';
         resultTitle.style.color = '#991b1b';
         resultBody.innerHTML = `
           <div style="color: #b91c1c; font-weight: bold; margin-bottom: 6px;">读取中断与错误原因:</div>
           <div style="color: #7f1d1d; word-break: break-all; background: #fef2f2; padding: 8px; border-radius: 4px; font-family: monospace;">${escapeHtml(task.error_msg || '未知错误')}</div>
+          ${diagHtml}
         `;
       }
     }
