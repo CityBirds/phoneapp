@@ -11,17 +11,11 @@ set "PORT=3000"
 set "INTERNAL_PORT=3001"
 set "SKIP_SEED_TEMPLATES=1"
 
-rem INTERNAL_BIND 决定“执行端接入口”监听哪些网卡：
-rem   0.0.0.0     = 允许局域网内其它电脑的执行端接入（多机部署需要，本文件默认）
-rem   <本机局域网IP> = 只监听指定网卡（更严格，推荐固定 IP 的协调机使用）
-rem   127.0.0.1   = 只允许本机执行端（不需要远程执行端时使用）
-rem 注意：该端口绝不可发布到公网隧道；远程接入的安全性由执行端身份凭据保证。
+rem INTERNAL_BIND: 0.0.0.0 (default), 127.0.0.1, or LAN IP
 if not defined INTERNAL_BIND set "INTERNAL_BIND=0.0.0.0"
 echo 执行端接入口监听地址: %INTERNAL_BIND%:%INTERNAL_PORT%
 
-rem 首次接入登记策略：
-rem   first-time = 允许执行端首次自动登记（默认）
-rem   closed     = 只允许管理员预先登记过的执行端接入（更严格）
+rem WORKER_REGISTRATION: first-time (default) or closed
 if not defined WORKER_REGISTRATION set "WORKER_REGISTRATION=first-time"
 
 cd /d "%~dp0"
