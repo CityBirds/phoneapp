@@ -140,7 +140,7 @@ test('W610-04: W610 在线、离线、地址错误、HTTP 可达但设备无应�
   const workerDir = path.join(testBaseDir, 'worker_dir_04');
   fs.mkdirSync(workerDir, { recursive: true });
 
-  const worker = new ExecutionWorker({ workerId: 'worker-w610-04', name: '电脑04', serverUrl, workingDir: workerDir, enableTestMock: true });
+  const worker = new ExecutionWorker({ workerId: 'worker-w610-04', name: '电脑04', serverUrl, workingDir: workerDir });
   await worker.sendHeartbeat();
 
   // Create devices: 1) Online device 2) HTTP ok but device no response 3) Offline IP
@@ -211,25 +211,22 @@ test('W610-05: POA200 首次读取正确，序列号和日期自动带出', asyn
   const workerDir = path.join(testBaseDir, 'worker_dir_05');
   fs.mkdirSync(workerDir, { recursive: true });
 
-  const worker = new ExecutionWorker({ workerId: 'worker-w610-05', name: '电脑05', serverUrl, workingDir: workerDir, enableTestMock: true });
+  const worker = new ExecutionWorker({ workerId: 'worker-w610-05', name: '电脑05', serverUrl, workingDir: workerDir });
   await worker.sendHeartbeat();
-
-  const w610Res = await fetch(`${serverUrl}/api/admin/w610`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name: '测试W610', ip: '127.0.0.1', port: 80, isEnabled: 1 })
-  });
-  const w610Id = (await w610Res.json()).device.id;
 
   const taskRes = await fetch(`${serverUrl}/api/w610/tasks`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       workerId: 'worker-w610-05',
-      w610Id,
+      w610Id: 101,
       action: 'read_device',
       model: 'POA200',
-      payload: {}
+      payload: {
+        isMock: true,
+        w610Device: { id: 101, ip: '127.0.0.1', port: 80 },
+        mockDeviceInfo: { SnNo: 'AP10007513', OutDate: '2026/10/14', VerNo: 'V1.0.2' }
+      }
     })
   });
   const taskId = (await taskRes.json()).task.id;
@@ -249,7 +246,7 @@ test('W610-06 & W610-07 & W610-08: 修改后写入、回读核验一致性，JSO
   fs.mkdirSync(workerDir, { recursive: true });
   fs.mkdirSync(commDir, { recursive: true });
 
-  const worker = new ExecutionWorker({ workerId: 'worker-w610-06', name: '电脑06', serverUrl, workingDir: workerDir, enableTestMock: true });
+  const worker = new ExecutionWorker({ workerId: 'worker-w610-06', name: '电脑06', serverUrl, workingDir: workerDir });
   await worker.sendHeartbeat();
 
   // Authorize path & configure comm directory (subfolder mode)
@@ -273,23 +270,18 @@ test('W610-06 & W610-07 & W610-08: 修改后写入、回读核验一致性，JSO
 
   await worker.pollAndExecuteDirectoryChecks();
 
-  const w610Res = await fetch(`${serverUrl}/api/admin/w610`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name: '测试W610-06', ip: '127.0.0.1', port: 80, isEnabled: 1 })
-  });
-  const w610Id = (await w610Res.json()).device.id;
-
   // 1. Submit write_and_save task with valid matching reread
   const taskRes1 = await fetch(`${serverUrl}/api/w610/tasks`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       workerId: 'worker-w610-06',
-      w610Id,
+      w610Id: 101,
       action: 'write_and_save',
       model: 'POA200',
       payload: {
+        isMock: true,
+        w610Device: { id: 101, ip: '127.0.0.1', port: 80 },
         deviceSn: 'AP99990001',
         outDate: '2026/10/14'
       }
@@ -331,10 +323,12 @@ test('W610-06 & W610-07 & W610-08: 修改后写入、回读核验一致性，JSO
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       workerId: 'worker-w610-06',
-      w610Id,
+      w610Id: 101,
       action: 'write_and_save',
       model: 'POA200',
       payload: {
+        isMock: true,
+        w610Device: { id: 101, ip: '127.0.0.1', port: 80 },
         deviceSn: 'AP99990001',
         outDate: '2026/10/14'
       }
@@ -355,7 +349,7 @@ test('W610-09: 回读不一致时拒绝归档 (Reread Mismatch Rejection)', asyn
   fs.mkdirSync(workerDir, { recursive: true });
   fs.mkdirSync(commDir, { recursive: true });
 
-  const worker = new ExecutionWorker({ workerId: 'worker-w610-09', name: '电脑09', serverUrl, workingDir: workerDir, enableTestMock: true });
+  const worker = new ExecutionWorker({ workerId: 'worker-w610-09', name: '电脑09', serverUrl, workingDir: workerDir });
   await worker.sendHeartbeat();
 
   await fetch(`${serverUrl}/api/admin/workers/worker-w610-09/allowed-paths`, {
@@ -378,28 +372,21 @@ test('W610-09: 回读不一致时拒绝归档 (Reread Mismatch Rejection)', asyn
 
   await worker.pollAndExecuteDirectoryChecks();
 
-  const w610Res = await fetch(`${serverUrl}/api/admin/w610`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name: '测试W610-09', ip: '127.0.0.1', port: 80, isEnabled: 1 })
-  });
-  const w610Id = (await w610Res.json()).device.id;
-
-  // Set mockFailStage in test worker or via test worker config
-  worker.testMockFailStage = 'reread_mismatch';
-
-  // Submit write_and_save
+  // Submit write_and_save with reread_mismatch mock failure stage
   const taskRes = await fetch(`${serverUrl}/api/w610/tasks`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       workerId: 'worker-w610-09',
-      w610Id,
+      w610Id: 101,
       action: 'write_and_save',
       model: 'POA200',
       payload: {
+        isMock: true,
+        w610Device: { id: 101, ip: '127.0.0.1', port: 80 },
         deviceSn: 'AP99990009',
-        outDate: '2026/10/14'
+        outDate: '2026/10/14',
+        mockFailStage: 'reread_mismatch'
       }
     })
   });

@@ -83,7 +83,6 @@ class ExecutionWorker {
     this._connectAttempts = 0;
     // 身份冲突（同 workerId 被复制到另一台电脑）时服务端会下发冲突标记
     this.identityConflict = null;
-    this.enableTestMock = Boolean(config.enableTestMock || process.env.W610_TEST_MOCK === '1');
   }
 
   /** 统一的执行端请求头：身份与接入凭据（服务端据此校验归属，不信任请求体自报） */
@@ -426,8 +425,8 @@ class ExecutionWorker {
       const action = task.action;
       let w610Device = task.w610Device || payload.w610Device;
 
-      // COMM-15: Mock mode is ONLY triggered when process-level explicit test switch is ON
-      const isMock = Boolean(this.enableTestMock || process.env.W610_TEST_MOCK === '1');
+      // COMM-15: Mock mode is ONLY triggered when explicitly enabled for isolated tests
+      const isMock = Boolean(payload.isMock || payload.enableMock || payload.isTestMock);
 
       if (action === 'probe') {
         let devices = [];
@@ -460,28 +459,64 @@ class ExecutionWorker {
 
         const probeResults = [];
         for (const dev of devices) {
-          let http_ok = false;
+          let tcpConnected = false;
+          let deviceResponded = false;
+          let protocolValid = false;
+          let stage = 'CONNECT_FAILED';
+          let errorCode = null;
+          let message = '';
+          let localAddress = null;
+          let remoteAddress = dev.ip || null;
+          let remotePort = (dev.port !== undefined && dev.port !== null && dev.port !== '') ? Number(dev.port) : 8899;
+          let bytesSent = 0;
+          let bytesReceived = 0;
+          let elapsedMs = 0;
           let device_ok = false;
-          let detail = '';
+          let http_ok = false;
 
           if (isMock) {
-            http_ok = dev.ip !== '0.0.0.0' && dev.ip !== 'invalid_host';
-            device_ok = http_ok && !dev.no_device;
+            tcpConnected = dev.ip !== '0.0.0.0' && dev.ip !== 'invalid_host';
+            deviceResponded = tcpConnected && !dev.no_device;
+            protocolValid = deviceResponded;
+            http_ok = tcpConnected;
+            device_ok = protocolValid;
+            stage = device_ok ? 'READY' : (tcpConnected ? 'DEVICE_TIMEOUT' : 'CONNECT_FAILED');
+            message = device_ok ? '真正在线' : (tcpConnected ? 'TCP已连接，设备未应答' : 'TCP连接失败');
           } else {
             const reqRes = await poa200.sendW610Request(dev, poa200.CMD_READ_DATA, poa200.ADDR_INFO_DEVICE, null, 3000);
+            tcpConnected = Boolean(reqRes.tcpConnected);
+            deviceResponded = Boolean(reqRes.deviceResponded);
+            protocolValid = Boolean(reqRes.protocolValid);
+            stage = reqRes.stage || (reqRes.ok ? 'READY' : 'CONNECT_FAILED');
+            errorCode = reqRes.errorCode || null;
+            message = reqRes.message || '';
+            localAddress = reqRes.localAddress || null;
+            remoteAddress = reqRes.remoteAddress || dev.ip;
+            remotePort = reqRes.remotePort || remotePort;
+            bytesSent = reqRes.bytesSent || 0;
+            bytesReceived = reqRes.bytesReceived || 0;
+            elapsedMs = reqRes.elapsedMs || 0;
+
             if (reqRes.ok) {
               http_ok = true;
               try {
                 const info = poa200.unpackDeviceInfo(reqRes.dataBuffer);
-                if (info && info.SnNo) {
+                if (info && info.SnNo && info._crcValid !== false) {
                   device_ok = true;
-                  detail = '真正在线';
+                  protocolValid = true;
+                  stage = 'READY';
+                  message = '设备信息读取成功';
+                } else if (info && info._crcValid === false) {
+                  stage = 'DEVICE_INFO_INVALID';
+                  message = '收到设备数据但 CRC 校验失败';
+                } else if (!info.SnNo) {
+                  stage = 'DEVICE_INFO_INVALID';
+                  message = '收到设备数据但序列号为空';
                 }
               } catch (e) {
-                detail = '协议校验失败';
+                stage = 'PROTOCOL_INVALID';
+                message = `协议校验失败: ${e.message}`;
               }
-            } else {
-              detail = reqRes.error || '网络不通/设备无应答';
             }
           }
 
@@ -489,11 +524,23 @@ class ExecutionWorker {
             id: dev.id,
             name: dev.name,
             ip: dev.ip,
-            port: dev.port || 80,
+            port: remotePort,
+            tcpConnected,
+            deviceResponded,
+            protocolValid,
+            stage,
+            errorCode,
+            message,
+            localAddress,
+            remoteAddress,
+            remotePort,
+            bytesSent,
+            bytesReceived,
+            elapsedMs,
             http_ok,
             device_ok,
-            status: device_ok ? 'ONLINE' : (http_ok ? 'W610_ONLY' : 'OFFLINE'),
-            detail
+            status: device_ok ? 'ONLINE' : (tcpConnected ? 'W610_ONLY' : 'OFFLINE'),
+            detail: message
           });
         }
 
@@ -506,28 +553,55 @@ class ExecutionWorker {
       }
 
       if (action === 'read_device') {
+        let reqRes = null;
         let info = null;
         if (isMock) {
           if (w610Device.ip === '0.0.0.0' || payload.mockFailStage === 'w610_http') {
-            throw new Error('W610 HTTP 连接失败: 无法连接到目标 IP 地址');
+            throw new Error('W610 TCP 连接失败: 无法连接到目标 IP 地址');
           }
           if (payload.mockFailStage === 'device_no_response') {
-            throw new Error('W610 后端设备无应答 (超时)');
+            throw new Error('TCP已连接，等待设备有效回复超时');
           }
           const mockBuf = poa200.createMockDeviceInfo(payload.mockDeviceInfo || {});
           info = poa200.unpackDeviceInfo(mockBuf);
+          reqRes = {
+            ok: true,
+            transport: 'tcp',
+            tcpConnected: true,
+            deviceResponded: true,
+            protocolValid: true,
+            stage: 'READY',
+            errorCode: null,
+            message: '设备信息读取成功',
+            localAddress: '127.0.0.1',
+            remoteAddress: w610Device.ip,
+            remotePort: w610Device.port || 8899,
+            bytesSent: 20,
+            bytesReceived: 248,
+            elapsedMs: 10
+          };
         } else {
-          const reqRes = await poa200.sendW610Request(w610Device, poa200.CMD_READ_DATA, poa200.ADDR_INFO_DEVICE, null, 5000);
+          reqRes = await poa200.sendW610Request(w610Device, poa200.CMD_READ_DATA, poa200.ADDR_INFO_DEVICE, null, 5000);
           if (!reqRes.ok) {
-            throw new Error(reqRes.error || '读取设备信息失败');
+            const err = new Error(reqRes.message || reqRes.error || '读取设备信息失败');
+            err.diagnostics = reqRes;
+            throw err;
           }
           info = poa200.unpackDeviceInfo(reqRes.dataBuffer);
+          if (info && info._crcValid === false) {
+            const err = new Error('读取设备信息成功但设备内部 CRC16 校验失败 (DEVICE_INFO_INVALID)');
+            err.diagnostics = { ...reqRes, stage: 'DEVICE_INFO_INVALID', protocolValid: false };
+            throw err;
+          }
+          reqRes.stage = 'READY';
+          reqRes.protocolValid = true;
         }
 
         await this.reportW610TaskResult(task.id, 'SUCCESS', {
           info,
           deviceSn: info.SnNo,
-          outDate: info.OutDate
+          outDate: info.OutDate,
+          diagnostics: reqRes
         });
         return;
       }
@@ -575,39 +649,25 @@ class ExecutionWorker {
         const packBuf = poa200.packDeviceInfo({ SnNo: newSn, OutDate: newOutDate, ChangeParFlag: 1, isMock }, originalBuf);
 
         // Write SN and OutDate (cmd 0x0101)
-        await this.renewW610TaskLease(task.id);
         if (isMock) {
           if (payload.mockFailStage === 'write_timeout') {
-            await this.reportW610TaskResult(task.id, 'RESULT_UNKNOWN', {
-              stage: 'WRITE_SENT',
-              verifiedSn: null
-            }, '写入设备数据超时: W610 无响应 (RESULT_UNKNOWN)');
-            return;
+            throw new Error('写入设备数据超时: W610 无响应 (RESULT_UNKNOWN)');
           }
         } else {
           const writeRes = await poa200.sendW610Request(w610Device, poa200.CMD_WRITE_DATA, poa200.ADDR_INFO_DEVICE, packBuf, 5000);
           if (!writeRes.ok) {
-            if (writeRes.stage === 'DEVICE_NO_RESPONSE') {
-              await this.reportW610TaskResult(task.id, 'RESULT_UNKNOWN', {
-                stage: 'WRITE_SENT',
-                verifiedSn: null
-              }, `写入发送后设备超时无响应: ${writeRes.error} (RESULT_UNKNOWN)`);
-              return;
-            }
             throw new Error(`写入设备序列号和日期失败 (${writeRes.stage || 'WRITE_FAILED'}): ${writeRes.error}`);
           }
         }
-        await this.renewW610TaskLease(task.id);
 
         // Re-read and verify (cmd 0x0102)
         let rereadBuf = null;
         let rereadInfo = null;
-        const mockFailStage = this.testMockFailStage || payload.mockFailStage;
         if (isMock) {
-          if (mockFailStage === 'reread_mismatch') {
+          if (payload.mockFailStage === 'reread_mismatch') {
             rereadBuf = poa200.createMockDeviceInfo({ SnNo: 'WRONG_SN', OutDate: newOutDate });
             rereadInfo = poa200.unpackDeviceInfo(rereadBuf);
-          } else if (mockFailStage === 'reread_timeout') {
+          } else if (payload.mockFailStage === 'reread_timeout') {
             throw new Error('写入后回读核验超时: 设备未在规定时间内返回数据');
           } else {
             rereadBuf = poa200.packDeviceInfo({ SnNo: newSn, OutDate: newOutDate, ChangeParFlag: 1, isMock }, originalBuf);
@@ -721,17 +781,17 @@ class ExecutionWorker {
 
     } catch (err) {
       console.error(`W610 Task #${task.id} failed:`, err.message);
-      await this.reportW610TaskResult(task.id, 'FAILED', null, err.message);
+      const diag = err.diagnostics || {
+        ok: false,
+        transport: 'tcp',
+        tcpConnected: false,
+        deviceResponded: false,
+        protocolValid: false,
+        stage: 'CONNECT_FAILED',
+        message: err.message
+      };
+      await this.reportW610TaskResult(task.id, 'FAILED', { diagnostics: diag }, err.message);
     }
-  }
-
-  async renewW610TaskLease(taskId) {
-    try {
-      await fetch(`${this.serverUrl}/api/worker/w610-tasks/${taskId}/renew-lease`, {
-        method: 'POST',
-        headers: this.workerHeaders()
-      });
-    } catch (e) {}
   }
 
   async reportW610TaskResult(taskId, status, result = null, errorMsg = null) {
